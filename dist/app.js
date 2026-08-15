@@ -1,0 +1,283 @@
+(function () {
+  'use strict'
+
+  var api = window.__TAURI__ && window.__TAURI__.core
+  var invoke = api && api.invoke
+  var state = null
+  var poller = null
+  var versionHint = ''
+  var viewMode = 'home'
+  var autoOpenedUrl = ''
+  var loadedFrameUrl = ''
+  var systemThemeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false }
+
+  function el(id) { return document.getElementById(id) }
+  function setText(id, value) { el(id).textContent = value == null ? '' : String(value) }
+  function setHidden(id, hidden) { el(id).hidden = hidden }
+  function effectiveTheme(theme) {
+    return theme === 'light' || theme === 'dark' ? theme : (systemThemeMedia.matches ? 'dark' : 'light')
+  }
+  function applyTheme(theme) {
+    var preference = theme === 'light' || theme === 'dark' || theme === 'system' ? theme : 'system'
+    var active = effectiveTheme(preference)
+    document.documentElement.dataset.theme = active
+    document.documentElement.dataset.themePreference = preference
+    document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
+      var selected = button.getAttribute('data-theme-choice') === preference
+      button.classList.toggle('active', selected)
+      button.setAttribute('aria-pressed', selected ? 'true' : 'false')
+    })
+    var labels = { light: '亮色', dark: '暗色', system: '跟随系统' }
+    var message = preference === 'system'
+      ? '跟随系统：当前使用' + (active === 'dark' ? '暗色。' : '亮色。')
+      : '当前使用' + labels[preference] + '。'
+    setText('theme-message', message)
+  }
+  function setBusy(busy) {
+    ;['primary-action', 'toggle-dsh', 'enter-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
+      var node = el(id)
+      if (node) node.disabled = !!busy
+    })
+  }
+  function updateView() {
+    var url = state && state.webUrl ? String(state.webUrl) : ''
+    if (url && !autoOpenedUrl) {
+      viewMode = 'dsh'
+      autoOpenedUrl = url
+    } else if (!url) {
+      viewMode = 'home'
+      autoOpenedUrl = ''
+      loadedFrameUrl = ''
+    }
+    var showingDsh = !!url && viewMode === 'dsh'
+    setHidden('setup-view', showingDsh)
+    setHidden('dsh-view', !showingDsh)
+    setHidden('app-actions', !showingDsh)
+    var titlebarHome = el('titlebar-home')
+    if (titlebarHome) {
+      titlebarHome.disabled = !url
+      titlebarHome.title = !url ? 'DSH 未启动，无法切换页面' : (showingDsh ? '返回配置首页' : '进入 DSH 页面')
+      titlebarHome.setAttribute('aria-label', !url ? 'DSH 未启动' : (showingDsh ? '返回配置首页' : '进入 DSH 页面'))
+    }
+    var frame = el('dsh-frame')
+    if (frame && url && loadedFrameUrl !== url) {
+      loadedFrameUrl = url
+      frame.src = url
+    }
+  }
+  function focusHomeElement(id) {
+    var node = el(id)
+    if (node) window.setTimeout(function () { node.scrollIntoView({ behavior: 'smooth', block: 'center' }) }, 0)
+  }
+  function showHome(focusId) {
+    viewMode = 'home'
+    updateView()
+    if (focusId) focusHomeElement(focusId)
+  }
+  function openUpdateCard(checkFirst) {
+    showHome('update-card')
+    if (!checkFirst) return Promise.resolve()
+    return action(function () { return invokeOrThrow('check_for_updates') }).then(function () { focusHomeElement('update-card') })
+  }
+  function enterDsh() {
+    if (state && state.webUrl) {
+      viewMode = 'dsh'
+      updateView()
+      return
+    }
+    action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })
+  }
+  function toggleDsh() {
+    if (state && state.webUrl) {
+      action(function () { return invokeOrThrow('stop_dsh') })
+      return
+    }
+    action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })
+  }
+  function closeWindow() {
+    invokeOrThrow('stop_dsh').then(function () { return refresh() }).then(function () { return invokeOrThrow('hide_window') }).catch(showWindowError)
+  }
+  function messageOf(error) { return error && error.message ? error.message : String(error) }
+  function invokeOrThrow(command, args) {
+    if (!invoke) return Promise.reject(new Error('Tauri API 未注入，请使用 tauri dev/build 启动客户端。'))
+    return invoke(command, args || {})
+  }
+  function versionsOf(snapshot) {
+    var versions = Array.isArray(snapshot && snapshot.versions) ? snapshot.versions.slice() : []
+    if (snapshot && snapshot.pinned && !versions.some(function (item) { return item.version === snapshot.pinned })) {
+      versions.push({ version: snapshot.pinned, installed: false, ready: false })
+    }
+    if (snapshot && snapshot.available && !versions.some(function (item) { return item.version === snapshot.available })) {
+      versions.push({ version: snapshot.available, installed: false, ready: false })
+    }
+    return versions
+  }
+  function statusMeta(status) {
+    var map = {
+      checking: ['检查中', 'neutral'], starting: ['启动中', 'neutral'], installing: ['安装中', 'warn'],
+      ready: ['运行中', 'good'], needs_install: ['待安装', 'warn'], needs_local: ['待选择本地版本', 'warn'], needs_workspace: ['待选择', 'warn'],
+      failed: ['启动失败', 'bad'], stopped: ['已停止', 'neutral'], updating: ['更新中', 'warn']
+    }
+    return map[status] || ['未连接', 'neutral']
+  }
+  function render(next) {
+    state = next || state || {}
+    applyTheme(state.theme || 'system')
+    updateView()
+    var meta = statusMeta(state.status)
+    setText('status-title', state.message || '等待操作')
+    setText('status-pill', meta[0])
+    el('status-pill').className = 'pill ' + meta[1]
+    setText('status-message', state.detail || '')
+    setText('entry-message', state.webUrl
+      ? 'DSH 已启动，可以关闭服务，或直接进入上游页面。'
+      : (state.status === 'needs_workspace' ? '点击启动时会弹出工作区选择，完成后自动进入页面。' : '未启动时先启动 DSH，启动完成后再进入页面。'))
+    var local = state.localRuntime
+    var source = state.runtimeSource || 'managed'
+    var localVersion = local && local.version ? local.version : ''
+    setText('runtime-source-title', source === 'local' ? '当前使用本地 DSH' : '当前使用桌面托管 DSH')
+    setText('runtime-source-message', localVersion
+      ? '已检测到 @deepseek-ai/dsh@' + localVersion + '（' + (local.source || '系统 PATH') + '）。' + (source === 'local' ? '当前启动会复用这个本地版本。' : '你也可以直接切换使用它。')
+      : '系统中暂未检测到可复用的本地 @deepseek-ai/dsh；可以安装并使用桌面托管版本。')
+    setHidden('use-local', !localVersion || source === 'local')
+    setHidden('use-managed', source !== 'local')
+    setText('version-summary', '固定版本 ' + (state.pinned || '未设置'))
+    setText('update-message', versionHint || (state.available ? '检测到可用版本 ' + state.available + '，安装后切换到托管版。' : '安装只会写入桌面托管目录，不会覆盖系统中的本地版本。'))
+    setHidden('error-detail', !state.error)
+    setText('error-detail', state.error || '')
+    setHidden('progress-track', !['installing', 'updating'].includes(state.status))
+    setHidden('install-log', !state.logs || !state.logs.length)
+    setText('install-log', (state.logs || []).slice(-80).join('\n'))
+    if (state.progress != null) el('progress-bar').style.width = Math.max(3, Math.min(100, state.progress)) + '%'
+    var versions = versionsOf(state)
+    setHidden('update-card', !versions.length)
+    var select = el('version-select')
+    if (select) {
+      var current = select.value
+      select.innerHTML = ''
+      select.disabled = !versions.length
+      versions.forEach(function (version) {
+        var option = document.createElement('option')
+        option.value = version.version
+        option.textContent = version.version + (version.installed ? ' · 已安装' : ' · 可下载')
+        if (version.version === current || (!current && version.version === state.available)) option.selected = true
+        select.appendChild(option)
+      })
+    }
+    var primary = el('primary-action')
+    primary.textContent = state.status === 'needs_workspace' ? '选择工作区' : '重启'
+    var running = !!state.webUrl
+    var toggleDsh = el('toggle-dsh')
+    var enterDshButton = el('enter-dsh')
+    if (toggleDsh) {
+      toggleDsh.textContent = running ? '关闭' : (['starting', 'installing', 'updating'].includes(state.status) ? '启动中…' : '启动')
+      toggleDsh.className = 'button ' + (running ? 'secondary' : 'primary')
+      toggleDsh.disabled = !running && ['starting', 'installing', 'updating'].includes(state.status)
+      toggleDsh.title = running ? '停止 DSH 服务' : '启动 DSH 服务'
+    }
+    if (enterDshButton) {
+      enterDshButton.disabled = !running
+      enterDshButton.title = running ? '进入已启动的 DSH 页面' : 'DSH 未启动，暂时无法进入页面'
+    }
+  }
+  function refresh() {
+    return invokeOrThrow('get_status').then(render).catch(function (error) {
+      setText('status-title', '无法连接客户端后端')
+      setText('status-message', messageOf(error))
+      el('status-pill').className = 'pill bad'
+      setText('status-pill', '错误')
+    })
+  }
+  function action(work) {
+    versionHint = ''
+    setBusy(true)
+    return Promise.resolve().then(work).catch(function (error) {
+      render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '操作失败' }))
+    }).finally(function () { setBusy(false); return refresh() })
+  }
+  function showWindowError(error) {
+    render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '窗口操作失败' }))
+  }
+  function setMaximizeGlyph(maximized) {
+    var button = el('window-maximize')
+    if (!button) return
+    button.textContent = maximized ? '❐' : '□'
+    button.title = maximized ? '还原' : '最大化'
+    button.setAttribute('aria-label', maximized ? '还原' : '最大化')
+  }
+  el('titlebar-drag').addEventListener('mousedown', function (event) {
+    if (event.button !== 0) return
+    event.preventDefault()
+    invokeOrThrow('start_window_dragging').catch(showWindowError)
+  })
+  el('titlebar-home').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-home').addEventListener('click', function () {
+    if (!state || !state.webUrl) return
+    if (viewMode === 'dsh') showHome()
+    else {
+      viewMode = 'dsh'
+      updateView()
+    }
+  })
+  el('window-minimize').addEventListener('click', function () { invokeOrThrow('minimize_window').catch(showWindowError) })
+  el('window-maximize').addEventListener('click', function () {
+    invokeOrThrow('toggle_maximize').then(setMaximizeGlyph).catch(showWindowError)
+  })
+  el('window-close').addEventListener('click', closeWindow)
+  el('app-home').addEventListener('click', function () { showHome() })
+  el('app-update').addEventListener('click', function () {
+    openUpdateCard(true)
+  })
+  el('app-upgrade').addEventListener('click', function () {
+    openUpdateCard(true)
+  })
+  el('app-stop').addEventListener('click', function () {
+    showHome()
+    action(function () { return invokeOrThrow('stop_dsh') })
+  })
+  el('detect-local').addEventListener('click', function () { action(function () { return invokeOrThrow('detect_local_runtime') }) })
+  el('use-local').addEventListener('click', function () { action(function () { return invokeOrThrow('set_runtime_source', { source: 'local' }) }) })
+  el('use-managed').addEventListener('click', function () { action(function () { return invokeOrThrow('set_runtime_source', { source: 'managed' }) }) })
+  document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var theme = button.getAttribute('data-theme-choice')
+      action(function () { return invokeOrThrow('set_theme', { theme: theme }) })
+    })
+  })
+  el('toggle-dsh').addEventListener('click', toggleDsh)
+  el('enter-dsh').addEventListener('click', enterDsh)
+  el('primary-action').addEventListener('click', function () {
+    action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })
+  })
+  el('check-updates').addEventListener('click', function () { action(function () { return invokeOrThrow('check_for_updates') }) })
+  el('version-select').addEventListener('change', function () {
+    var option = this.options[this.selectedIndex]
+    versionHint = option ? '已选择 ' + option.value + '，点击“安装并切换”开始安装。' : '暂无可安装版本，请先点击“检查更新”。'
+    render(state)
+  })
+  el('version-select').addEventListener('click', function () {
+    if (this.options.length) return
+    versionHint = '正在加载上游版本列表…'
+    render(state)
+    action(function () { return invokeOrThrow('check_for_updates') })
+  })
+  el('install-version').addEventListener('click', function () {
+    var version = el('version-select').value
+    if (!version) {
+      versionHint = '暂无可安装版本，请先点击“检查更新”。'
+      render(Object.assign({}, state || {}, { status: 'stopped', message: '没有可安装版本' }))
+      return
+    }
+    action(function () { return invokeOrThrow('install_and_switch', { version: version }) })
+  })
+  el('open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })
+  el('quit').addEventListener('click', function () { action(function () { return invokeOrThrow('quit_app') }) })
+  var onSystemThemeChanged = function () {
+    if (!state || (state.theme || 'system') === 'system') applyTheme('system')
+  }
+  if (systemThemeMedia.addEventListener) systemThemeMedia.addEventListener('change', onSystemThemeChanged)
+  else if (systemThemeMedia.addListener) systemThemeMedia.addListener(onSystemThemeChanged)
+  refresh()
+  poller = window.setInterval(refresh, 1500)
+  window.addEventListener('beforeunload', function () { if (poller) window.clearInterval(poller) })
+})()

@@ -1,0 +1,16 @@
+{
+  "name": "dsh-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A thin Windows/Tauri shell for the DeepSeek Harness npm runtime.",
+  "scripts": {
+    "check": "node --check dist/app.js && node --check plugins/dsh-desktop-bridge/lib/index.js && node --check plugins/dsh-desktop-bridge/lib/client.js",
+    "test": "node --test tests/**/*.test.mjs",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

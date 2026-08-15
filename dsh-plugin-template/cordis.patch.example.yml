@@ -1,0 +1,16 @@
+# 把 dsh-plugin-template 安装到 web profile 的挂载示例。
+#
+# 步骤：
+#   1) 把整个 dsh-plugin-template 目录复制为 profiles/web/node_modules/你的包名/
+#      并改 package.json 里的 "name"（必须与目录名一致，浏览器 bundle 的 id 也用它）
+#   2) 把下面这段 insert 追加到 profiles/web/cordis.patch.yml
+#   3) 重启 dsh（宿主改动生效）+ 刷新页面（浏览器改动生效）
+#
+# 发布/分发：npm publish 后，对方机器执行 dsh plugin --profile web add <你的包名>
+# 再把同样的 insert 行加进他的 cordis.patch.yml。
+- insert:
+    - id: my-plugin
+      name: 你的包名
+      # inject 按实际需要裁剪：路由要 webServer(+fs)，只要指令就留 commands
+      inject: [commands, webServer, fs]
+      # config: { ... }   # 插件配置（可选，apply 的第二个参数）

@@ -1,0 +1,5 @@
+# Add this block to %USERPROFILE%\.dsh\profiles\web\cordis.patch.yml.
+- insert:
+    - id: dsh-desktop-bridge
+      name: dsh-desktop-bridge
+      inject: [sessions, webServer]

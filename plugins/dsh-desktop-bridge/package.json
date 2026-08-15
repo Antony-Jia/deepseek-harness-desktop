@@ -1,0 +1,18 @@
+{
+  "name": "dsh-desktop-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional DSH host/browser bridge for DSH Desktop native notifications, tray state and folder picking.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}

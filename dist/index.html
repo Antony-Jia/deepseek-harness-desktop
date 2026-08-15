@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>DSH Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div id="titlebar-drag" class="titlebar-drag">
+        <button id="titlebar-home" class="titlebar-brand titlebar-home" type="button" title="DSH 未启动，无法切换页面" aria-label="切换首页和 DSH 页面" disabled>
+          <span class="titlebar-dot">D</span>
+          <span>DSH Desktop</span>
+        </button>
+        <span class="titlebar-caption">DeepSeek Harness</span>
+      </div>
+      <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作" hidden>
+        <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>
+        <button id="app-update" class="app-action" type="button" title="检查上游更新">更新</button>
+        <button id="app-upgrade" class="app-action accent" type="button" title="打开升级页面">升级</button>
+        <button id="app-stop" class="app-action danger" type="button" title="关闭 DSH 服务">关闭 DSH</button>
+      </nav>
+      <div class="window-controls" aria-label="窗口控制">
+        <button id="window-minimize" class="window-control" type="button" title="最小化" aria-label="最小化">−</button>
+        <button id="window-maximize" class="window-control" type="button" title="最大化" aria-label="最大化">□</button>
+        <button id="window-close" class="window-control close" type="button" title="关闭窗口并停止 DSH" aria-label="关闭窗口并停止 DSH">×</button>
+      </div>
+    </header>
+
+    <main id="setup-view" class="shell">
+      <section class="hero">
+        <div class="brand-mark">D</div>
+        <div>
+          <p class="eyebrow">DeepSeek Harness</p>
+          <h1>DSH Desktop</h1>
+          <p class="subtitle">瘦壳负责运行时、进程与桌面体验，上游界面保持原样。</p>
+        </div>
+      </section>
+
+      <section class="card status-card" aria-live="polite">
+        <div class="status-heading">
+          <div>
+            <p class="eyebrow">启动状态</p>
+            <h2 id="status-title">正在检查运行环境…</h2>
+          </div>
+          <span id="status-pill" class="pill neutral">检查中</span>
+        </div>
+        <p id="status-message" class="status-message">客户端正在读取固定版本与工作区设置。</p>
+        <div class="progress-track" id="progress-track" hidden>
+          <div class="progress-bar" id="progress-bar"></div>
+        </div>
+        <pre id="install-log" class="install-log" hidden></pre>
+        <div class="home-entry">
+          <div>
+            <p class="eyebrow">进入 DSH</p>
+            <p id="entry-message" class="muted">未启动时会先启动 DSH，启动后自动进入上游页面。</p>
+          </div>
+          <div class="home-entry-actions">
+            <button id="toggle-dsh" class="button primary" type="button">启动</button>
+            <button id="enter-dsh" class="button secondary" type="button" disabled>进入页面</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card runtime-source-card">
+        <div>
+          <p class="eyebrow">运行来源</p>
+          <h2 id="runtime-source-title">正在检测本地 DSH</h2>
+          <p id="runtime-source-message" class="muted">正在检查系统 PATH 与 npx 缓存中的 @deepseek-ai/dsh。</p>
+        </div>
+        <div class="runtime-source-actions">
+          <button id="detect-local" class="button ghost">重新检测</button>
+          <button id="use-local" class="button secondary" hidden>使用本地版本</button>
+          <button id="use-managed" class="button secondary" hidden>切换到托管版</button>
+        </div>
+      </section>
+
+      <section class="card appearance-card">
+        <div>
+          <p class="eyebrow">外观</p>
+          <h2>主题模式</h2>
+          <p id="theme-message" class="muted">跟随系统主题。</p>
+        </div>
+        <div class="theme-options" role="radiogroup" aria-label="主题模式">
+          <button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false">亮色</button>
+          <button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false">暗色</button>
+          <button class="theme-option" type="button" data-theme-choice="system" aria-pressed="false">跟随系统</button>
+        </div>
+      </section>
+
+      <section id="update-card" class="card update-card" hidden>
+        <div>
+          <p class="eyebrow">桌面托管运行时</p>
+          <h2 id="version-summary">固定版本</h2>
+          <p id="update-message" class="muted">安装只会写入桌面托管目录，不会覆盖系统中的本地版本。</p>
+        </div>
+        <div class="update-actions">
+          <select id="version-select" aria-label="选择运行时版本"></select>
+          <button id="install-version" class="button secondary">安装并切换到托管版</button>
+        </div>
+      </section>
+
+      <section class="actions">
+        <button id="primary-action" class="button primary">重启</button>
+        <button id="check-updates" class="button secondary">检查更新</button>
+        <button id="open-logs" class="button ghost">打开日志目录</button>
+        <button id="quit" class="button ghost">退出</button>
+      </section>
+
+      <p id="error-detail" class="error-detail" hidden></p>
+      <p class="footer-note">本地版本通过 npx --no-install 启动；托管版本安装到独立目录，不覆盖系统 npm。</p>
+    </main>
+    <main id="dsh-view" class="dsh-view" hidden>
+      <iframe id="dsh-frame" class="dsh-frame" title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write"></iframe>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

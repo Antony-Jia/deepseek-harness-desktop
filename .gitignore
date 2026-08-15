@@ -1,0 +1,19 @@
+node_modules/
+
+# Rust/Tauri build outputs, release binaries and installers
+src-tauri/target/
+dist/bundle/
+*.exe
+*.msi
+*.nsis.zip
+*.dmg
+*.deb
+*.AppImage
+
+runtime-assets/node/*
+!runtime-assets/node/README.md
+runtime-assets/pnpm.cjs
+.DS_Store
+*.log
+
+example_docs/
