@@ -3,6 +3,7 @@ node_modules/
 # Rust/Tauri build outputs, release binaries and installers
 src-tauri/target/
 dist/bundle/
+.node-staging/
 *.exe
 *.msi
 *.nsis.zip
