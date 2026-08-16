@@ -533,6 +533,10 @@ fn restore_window_bounds(app: &mut tauri::App, context: &DesktopContext) {
     let Some(bounds) = state.window_bounds else {
         return;
     };
+    // 跳过异常坐标（如 Windows 最小化隐藏位置 -32000），让 tauri.conf 的 center:true 生效
+    if bounds.x <= -10000 || bounds.y <= -10000 {
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -549,12 +553,20 @@ fn persist_window_bounds(app: &AppHandle, context: &DesktopContext) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    // 最小化时不保存坐标：Windows 会把窗口移到 -32000 的隐藏位置
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
     let Ok(position) = window.outer_position() else {
         return;
     };
     let Ok(size) = window.outer_size() else {
         return;
     };
+    // 兜底：跳过异常隐藏坐标，避免把最小化位置写进 state.json
+    if position.x <= -10000 || position.y <= -10000 {
+        return;
+    }
     let bounds = WindowBounds {
         x: position.x,
         y: position.y,
