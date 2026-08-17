@@ -15,6 +15,7 @@
           <span>DSH Desktop</span>
         </button>
         <span class="titlebar-caption">DeepSeek Harness</span>
+        <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
       </div>
       <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作" hidden>
         <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>
@@ -114,6 +115,58 @@
     </main>
     <main id="dsh-view" class="dsh-view" hidden>
       <iframe id="dsh-frame" class="dsh-frame" title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write"></iframe>
+    </main>
+    <main id="market-view" class="market-view" hidden>
+      <div class="market-shell">
+        <section class="market-hero">
+          <div>
+            <p class="eyebrow">DSH Desktop / web profile</p>
+            <h1>插件市场</h1>
+            <p class="subtitle">只管理当前 DSH <code>web</code> profile。安装或卸载后请重启 DSH 生效。</p>
+          </div>
+          <button id="market-back-home" class="button ghost" type="button">返回首页</button>
+        </section>
+
+        <section class="card market-runtime-card" aria-live="polite">
+          <div>
+            <p class="eyebrow">运行环境</p>
+            <h2 id="market-runtime-title">正在检查 DSH 运行时</h2>
+            <p id="market-runtime-message" class="muted">市场不会自动切换运行来源，也不会修改系统 PATH。</p>
+          </div>
+          <div class="market-runtime-pills">
+            <span id="market-runtime-pill" class="pill neutral">未检查</span>
+            <span id="market-pnpm-pill" class="pill neutral">pnpm 未检查</span>
+          </div>
+        </section>
+
+        <section class="card market-search-card">
+          <form id="market-search-form" class="market-search" autocomplete="off">
+            <label class="market-search-label" for="market-query">搜索市场插件</label>
+            <div class="market-search-row">
+              <input id="market-query" class="market-query" type="search" maxlength="120" placeholder="输入插件名称或关键词，留空列出全部" />
+              <button id="market-search-button" class="button primary" type="submit">搜索</button>
+            </div>
+            <p class="muted market-search-hint">仅显示通过 <code>@p-dsh-market/*</code> 清单协议校验的公开插件。</p>
+          </form>
+        </section>
+
+        <p id="market-message" class="market-message" aria-live="polite"></p>
+        <div id="market-results" class="market-results" aria-live="polite"></div>
+
+        <section id="market-operation-card" class="card market-operation" hidden aria-live="polite">
+          <div>
+            <p class="eyebrow">插件操作</p>
+            <h2 id="market-operation-title">正在处理</h2>
+            <p id="market-operation-message" class="muted"></p>
+          </div>
+          <details id="market-operation-details" class="market-operation-details" hidden>
+            <summary>查看受控日志</summary>
+            <pre id="market-operation-log" class="install-log"></pre>
+          </details>
+        </section>
+
+        <p id="market-readonly-note" class="market-readonly-note" hidden>当前没有可调用的 DSH 运行时。请返回首页安装桌面托管运行时，或选择可用的本地运行时。</p>
+      </div>
     </main>
     <script src="./app.js"></script>
   </body>

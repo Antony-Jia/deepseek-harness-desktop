@@ -1,0 +1,4 @@
+- insert:
+    - id: p-dsh-market-example
+      name: '@p-dsh-market/example'
+      inject: [skills, webServer]

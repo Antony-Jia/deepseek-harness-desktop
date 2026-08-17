@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod control;
+mod market;
 mod plugin;
 mod process;
 mod runtime;
@@ -8,6 +9,7 @@ mod single_instance;
 mod state;
 
 use control::ControlServer;
+use market::{MarketManager, MarketOperationResult, MarketSearchResult};
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
@@ -22,7 +24,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, TryLockError,
     },
     thread,
     time::Duration,
@@ -36,6 +38,7 @@ use tauri::{
 #[derive(Clone)]
 pub struct DesktopContext {
     manager: Arc<RuntimeManager>,
+    market: Arc<MarketManager>,
     store: StateStore,
     dsh_home: PathBuf,
     local_runtime: Arc<Mutex<Option<LocalRuntime>>>,
@@ -45,6 +48,7 @@ pub struct DesktopContext {
     status: Arc<Mutex<DesktopStatus>>,
     logs: Arc<Mutex<Vec<String>>>,
     start_lock: Arc<Mutex<()>>,
+    market_task_lock: Arc<Mutex<()>>,
     allow_close: Arc<AtomicBool>,
     window_save_revision: Arc<AtomicU64>,
 }
@@ -60,10 +64,12 @@ impl DesktopContext {
             .or_else(|| dirs::home_dir().map(|path| path.join(".dsh")))
             .unwrap_or_else(|| env::temp_dir().join(".dsh"));
         let manager = Arc::new(RuntimeManager::new(base_dir.clone()));
+        let market = Arc::new(MarketManager::new(base_dir.clone()));
         let store = StateStore::new(base_dir.join("state.json"));
         let _ = manager.ensure_layout();
         Self {
             manager,
+            market,
             store,
             dsh_home,
             local_runtime: Arc::new(Mutex::new(None)),
@@ -73,6 +79,7 @@ impl DesktopContext {
             status: Arc::new(Mutex::new(DesktopStatus::default())),
             logs: Arc::new(Mutex::new(Vec::new())),
             start_lock: Arc::new(Mutex::new(())),
+            market_task_lock: Arc::new(Mutex::new(())),
             allow_close: Arc::new(AtomicBool::new(false)),
             window_save_revision: Arc::new(AtomicU64::new(0)),
         }
@@ -108,6 +115,9 @@ pub fn run() {
             open_logs,
             quit_app,
             stop_dsh,
+            search_market_plugins,
+            install_market_plugin,
+            uninstall_market_plugin,
             set_theme,
             minimize_window,
             toggle_maximize,
@@ -465,6 +475,54 @@ fn stop_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result
         None,
     );
     Ok(())
+}
+
+#[tauri::command]
+fn search_market_plugins(
+    context: tauri::State<'_, DesktopContext>,
+    query: String,
+) -> Result<MarketSearchResult, String> {
+    let _guard = lock_market_task(&context)?;
+    let state = context.store.load().map_err(io_error)?;
+    context
+        .market
+        .search(&context.manager, &state, &context.dsh_home, &query)
+}
+
+#[tauri::command]
+fn install_market_plugin(
+    context: tauri::State<'_, DesktopContext>,
+    name: String,
+    version: String,
+) -> Result<MarketOperationResult, String> {
+    let _guard = lock_market_task(&context)?;
+    let state = context.store.load().map_err(io_error)?;
+    let restart_required = is_dsh_running(&context);
+    context.market.install(
+        &context.manager,
+        &state,
+        &context.dsh_home,
+        &name,
+        &version,
+        restart_required,
+    )
+}
+
+#[tauri::command]
+fn uninstall_market_plugin(
+    context: tauri::State<'_, DesktopContext>,
+    name: String,
+) -> Result<MarketOperationResult, String> {
+    let _guard = lock_market_task(&context)?;
+    let state = context.store.load().map_err(io_error)?;
+    let restart_required = is_dsh_running(&context);
+    context.market.uninstall(
+        &context.manager,
+        &state,
+        &context.dsh_home,
+        &name,
+        restart_required,
+    )
 }
 
 #[tauri::command]
@@ -865,6 +923,23 @@ fn stop_current(context: &DesktopContext) {
         if let Some(process) = slot.take() {
             let _ = process.stop();
         }
+    }
+}
+
+fn is_dsh_running(context: &DesktopContext) -> bool {
+    context
+        .process
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(DshProcess::is_running))
+        .unwrap_or(false)
+}
+
+fn lock_market_task(context: &DesktopContext) -> Result<MutexGuard<'_, ()>, String> {
+    match context.market_task_lock.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err("已有插件操作进行中，请稍后重试。".to_string()),
+        Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
     }
 }
 

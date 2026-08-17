@@ -60,6 +60,37 @@ test('bridge plugin is inert without desktop environment variables', () => {
   assert.match(host, /turn\/end/)
 })
 
+test('plugin market contract is represented in the Rust, UI and fixture layers', () => {
+  const rust = text('src-tauri/src/market.rs')
+  const mainRust = text('src-tauri/src/lib.rs')
+  const html = text('dist/index.html')
+  const javascript = text('dist/app.js')
+  const fixture = JSON.parse(text('plugins/dsh-market-example/package.json'))
+
+  assert.match(mainRust, /search_market_plugins/)
+  assert.match(mainRust, /install_market_plugin/)
+  assert.match(mainRust, /uninstall_market_plugin/)
+  assert.match(rust, /@p-dsh-market\//)
+  assert.match(rust, /dsh\.client\.platform/)
+  assert.match(rust, /dsh\.bundle\.patch/)
+  assert.match(rust, /dsh\.market\.capabilities/)
+  assert.match(rust, /--search-limit/)
+  assert.match(rust, /pnpm\.cmd/)
+  assert.match(rust, /DSH_HOME/)
+  assert.match(html, /titlebar-market/)
+  assert.match(html, /id="market-view"/)
+  assert.match(html, /market-search-form/)
+  assert.match(javascript, /viewMode = 'market'/)
+  assert.match(javascript, /search_market_plugins/)
+  assert.match(javascript, /install_market_plugin/)
+  assert.match(javascript, /uninstall_market_plugin/)
+  assert.equal(fixture.name, '@p-dsh-market/example')
+  assert.equal(fixture.exports['./client'], './lib/client.js')
+  assert.equal(fixture.dsh.client.platform, 'web')
+  assert.equal(fixture.dsh.bundle.patch, './cordis.patch.yml')
+  assert.deepEqual(fixture.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
+})
+
 test('splash page exposes recovery actions', () => {
   const html = text('dist/index.html')
   const javascript = text('dist/app.js')
@@ -110,6 +141,8 @@ test('javascript artifacts pass node syntax validation', () => {
     'dist/app.js',
     'plugins/dsh-desktop-bridge/lib/index.js',
     'plugins/dsh-desktop-bridge/lib/client.js',
+    'plugins/dsh-market-example/lib/index.js',
+    'plugins/dsh-market-example/lib/client.js',
   ]) {
     execFileSync(process.execPath, ['--check', file(path)], { stdio: 'pipe' })
   }

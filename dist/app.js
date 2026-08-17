@@ -9,11 +9,17 @@
   var viewMode = 'home'
   var autoOpenedUrl = ''
   var loadedFrameUrl = ''
+  var marketResult = null
+  var marketQuery = ''
+  var marketBusy = false
+  var marketError = ''
+  var marketOperation = null
+  var pendingRestartNames = []
   var systemThemeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false }
 
   function el(id) { return document.getElementById(id) }
-  function setText(id, value) { el(id).textContent = value == null ? '' : String(value) }
-  function setHidden(id, hidden) { el(id).hidden = hidden }
+  function setText(id, value) { if (el(id)) el(id).textContent = value == null ? '' : String(value) }
+  function setHidden(id, hidden) { if (el(id)) el(id).hidden = hidden }
   function effectiveTheme(theme) {
     return theme === 'light' || theme === 'dark' ? theme : (systemThemeMedia.matches ? 'dark' : 'light')
   }
@@ -41,23 +47,33 @@
   }
   function updateView() {
     var url = state && state.webUrl ? String(state.webUrl) : ''
-    if (url && !autoOpenedUrl) {
-      viewMode = 'dsh'
+    if (url) {
+      if (!autoOpenedUrl && viewMode !== 'market') viewMode = 'dsh'
       autoOpenedUrl = url
-    } else if (!url) {
+    } else if (viewMode === 'dsh') {
       viewMode = 'home'
       autoOpenedUrl = ''
-      loadedFrameUrl = ''
+    } else {
+      autoOpenedUrl = ''
     }
     var showingDsh = !!url && viewMode === 'dsh'
-    setHidden('setup-view', showingDsh)
+    var showingMarket = viewMode === 'market'
+    setHidden('setup-view', showingDsh || showingMarket)
     setHidden('dsh-view', !showingDsh)
+    setHidden('market-view', !showingMarket)
     setHidden('app-actions', !showingDsh)
     var titlebarHome = el('titlebar-home')
     if (titlebarHome) {
-      titlebarHome.disabled = !url
-      titlebarHome.title = !url ? 'DSH 未启动，无法切换页面' : (showingDsh ? '返回配置首页' : '进入 DSH 页面')
-      titlebarHome.setAttribute('aria-label', !url ? 'DSH 未启动' : (showingDsh ? '返回配置首页' : '进入 DSH 页面'))
+      titlebarHome.disabled = !url && !showingMarket
+      titlebarHome.title = showingMarket
+        ? (url ? '进入 DSH 页面' : '返回配置首页')
+        : (!url ? 'DSH 未启动，无法切换页面' : (showingDsh ? '返回配置首页' : '进入 DSH 页面'))
+      titlebarHome.setAttribute('aria-label', titlebarHome.title)
+    }
+    var marketButton = el('titlebar-market')
+    if (marketButton) {
+      marketButton.classList.toggle('active', showingMarket)
+      marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
     }
     var frame = el('dsh-frame')
     if (frame && url && loadedFrameUrl !== url) {
@@ -78,6 +94,11 @@
     showHome('update-card')
     if (!checkFirst) return Promise.resolve()
     return action(function () { return invokeOrThrow('check_for_updates') }).then(function () { focusHomeElement('update-card') })
+  }
+  function openMarket() {
+    viewMode = 'market'
+    updateView()
+    if (!marketBusy) marketSearch(marketResult ? marketQuery : '')
   }
   function enterDsh() {
     if (state && state.webUrl) {
@@ -120,14 +141,162 @@
     }
     return map[status] || ['未连接', 'neutral']
   }
+  function setPill(id, text, tone) {
+    var node = el(id)
+    if (!node) return
+    node.textContent = text
+    node.className = 'pill ' + tone
+  }
+  function makeNode(tag, className, value) {
+    var node = document.createElement(tag)
+    if (className) node.className = className
+    if (value != null) node.textContent = String(value)
+    return node
+  }
+  function renderMarket() {
+    var source = state && state.runtimeSource === 'local' ? '本地' : '桌面托管'
+    var runtimeReady = marketResult ? !!marketResult.runtimeReady : true
+    var packageManagerReady = marketResult ? !!marketResult.packageManagerReady : false
+    setText('market-runtime-title', runtimeReady ? '当前使用' + source + ' DSH' : '插件市场只读')
+    setText('market-runtime-message', marketResult && marketResult.message
+      ? marketResult.message
+      : (runtimeReady ? '市场固定使用 web profile，不会切换 DSH 运行来源。' : '请先返回首页准备 DSH 运行时。'))
+    setPill('market-runtime-pill', runtimeReady ? 'DSH 可用' : 'DSH 缺失', runtimeReady ? 'good' : 'warn')
+    setPill('market-pnpm-pill', packageManagerReady ? '私有 pnpm 可用' : 'pnpm 未准备', packageManagerReady ? 'good' : 'warn')
+    var query = el('market-query')
+    if (query && document.activeElement !== query) query.value = marketQuery
+    var canSearch = !marketResult || (runtimeReady && packageManagerReady)
+    var searchButton = el('market-search-button')
+    if (searchButton) {
+      searchButton.disabled = marketBusy || !canSearch
+      searchButton.textContent = marketBusy ? '处理中…' : '搜索'
+    }
+    if (query) query.disabled = marketBusy || !canSearch
+    var message = marketError || (marketResult && marketResult.message) || ''
+    if (!message && marketResult) message = marketResult.plugins.length + ' 个插件通过协议校验。'
+    if (pendingRestartNames.length) {
+      message += (message ? ' ' : '') + (state && state.webUrl
+        ? '插件变更待重启 DSH 后生效。'
+        : '磁盘状态已更新，将在下次启动 DSH 时生效。')
+    }
+    var messageNode = el('market-message')
+    if (messageNode) {
+      messageNode.textContent = message
+      messageNode.className = 'market-message' + (marketError ? ' bad' : '')
+    }
+    setHidden('market-readonly-note', !!marketResult && !runtimeReady)
+    var results = el('market-results')
+    if (results) {
+      results.replaceChildren()
+      if (marketResult && marketResult.plugins && marketResult.plugins.length) {
+        marketResult.plugins.forEach(function (plugin) { results.appendChild(renderMarketPlugin(plugin, runtimeReady && packageManagerReady)) })
+      } else if (marketResult && runtimeReady && packageManagerReady && !marketBusy) {
+        var empty = makeNode('div', 'market-empty', marketResult.message || '没有符合条件的插件。')
+        results.appendChild(empty)
+      }
+    }
+    var operationCard = el('market-operation-card')
+    if (operationCard) operationCard.hidden = !marketOperation
+    if (marketOperation) {
+      setText('market-operation-title', marketOperation.running ? '正在' + (marketOperation.operation === 'install' ? '安装' : '卸载') : (marketOperation.ok ? '插件操作完成' : '插件操作失败'))
+      setText('market-operation-message', marketOperation.message || '')
+      var details = el('market-operation-details')
+      if (details) details.hidden = !marketOperation.log
+      setText('market-operation-log', marketOperation.log || '')
+    }
+  }
+  function renderMarketPlugin(plugin, enabled) {
+    var card = makeNode('article', 'market-plugin-card')
+    var heading = makeNode('div', 'market-plugin-heading')
+    var title = makeNode('h2', null, plugin.displayName || plugin.name)
+    var packageName = makeNode('code', 'market-plugin-name', plugin.name)
+    heading.appendChild(title)
+    heading.appendChild(packageName)
+    card.appendChild(heading)
+    var description = makeNode('p', 'market-plugin-description', plugin.description || '暂无描述。')
+    card.appendChild(description)
+    var meta = makeNode('div', 'market-plugin-meta')
+    meta.appendChild(makeNode('span', 'market-plugin-version', '最新版本 ' + plugin.version))
+    if (plugin.installed) meta.appendChild(makeNode('span', 'pill good', '已安装 · ' + (plugin.installedVersion || '未知版本')))
+    card.appendChild(meta)
+    var capabilities = makeNode('div', 'market-capabilities')
+    ;(plugin.capabilities || []).forEach(function (capability) { capabilities.appendChild(makeNode('span', 'market-capability', capability)) })
+    card.appendChild(capabilities)
+    var footer = makeNode('div', 'market-plugin-footer')
+    var actionButton = makeNode('button', 'button ' + (plugin.installed ? 'danger-button' : 'primary'), plugin.installed ? '卸载' : '安装')
+    actionButton.type = 'button'
+    actionButton.disabled = !enabled || marketBusy
+    actionButton.title = plugin.installed ? '从 web profile 卸载此插件' : '安装搜索结果中的确定版本 ' + plugin.version
+    actionButton.addEventListener('click', function () { runMarketOperation(plugin, plugin.installed ? 'uninstall' : 'install') })
+    footer.appendChild(actionButton)
+    card.appendChild(footer)
+    return card
+  }
+  function marketSearch(queryValue) {
+    if (marketBusy) return Promise.resolve()
+    marketQuery = String(queryValue == null ? '' : queryValue).trim()
+    marketError = ''
+    marketBusy = true
+    renderMarket()
+    return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (result) {
+      marketResult = result || null
+      marketQuery = result && result.query != null ? String(result.query) : marketQuery
+      marketError = ''
+      renderMarket()
+      return result
+    }).catch(function (error) {
+      marketError = messageOf(error)
+      renderMarket()
+      return null
+    }).finally(function () {
+      marketBusy = false
+      renderMarket()
+    })
+  }
+  function runMarketOperation(plugin, operation) {
+    if (marketBusy || !marketResult || !marketResult.runtimeReady || !marketResult.packageManagerReady) return
+    var actionText = operation === 'install' ? '安装' : '卸载'
+    var confirmation = operation === 'install'
+      ? '确认安装 ' + plugin.name + '@' + plugin.version + ' 到 web profile？'
+      : '确认从 web profile 卸载 ' + plugin.name + '？'
+    if (typeof window.confirm === 'function' && !window.confirm(confirmation)) return
+    marketBusy = true
+    marketError = ''
+    marketOperation = { running: true, operation: operation, name: plugin.name, message: '正在' + actionText + '，请稍候…', log: '' }
+    renderMarket()
+    var command = operation === 'install' ? 'install_market_plugin' : 'uninstall_market_plugin'
+    var args = operation === 'install' ? { name: plugin.name, version: plugin.version } : { name: plugin.name }
+    invokeOrThrow(command, args).then(function (result) {
+      marketOperation = Object.assign({}, result || {}, { running: false, operation: operation, name: plugin.name, ok: true })
+      if (result && result.restartRequired && pendingRestartNames.indexOf(plugin.name) < 0) pendingRestartNames.push(plugin.name)
+      return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (next) {
+        marketResult = next || marketResult
+        marketQuery = next && next.query != null ? String(next.query) : marketQuery
+      }).catch(function (error) {
+        marketError = '操作已完成，但刷新插件列表失败：' + messageOf(error)
+      })
+    }).catch(function (error) {
+      marketOperation = { running: false, operation: operation, name: plugin.name, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
+      marketError = messageOf(error)
+    }).finally(function () {
+      marketBusy = false
+      renderMarket()
+    })
+  }
   function render(next) {
+    var wasRunning = !!(state && state.webUrl)
     state = next || state || {}
+    if (!!state.webUrl && !wasRunning && pendingRestartNames.length) {
+      pendingRestartNames = []
+      if (viewMode === 'market' && !marketBusy) window.setTimeout(function () { marketSearch(marketQuery) }, 0)
+    }
     applyTheme(state.theme || 'system')
     updateView()
+    renderMarket()
     var meta = statusMeta(state.status)
     setText('status-title', state.message || '等待操作')
     setText('status-pill', meta[0])
-    el('status-pill').className = 'pill ' + meta[1]
+    if (el('status-pill')) el('status-pill').className = 'pill ' + meta[1]
     setText('status-message', state.detail || '')
     setText('entry-message', state.webUrl
       ? 'DSH 已启动，可以关闭服务，或直接进入上游页面。'
@@ -148,7 +317,7 @@
     setHidden('progress-track', !['installing', 'updating'].includes(state.status))
     setHidden('install-log', !state.logs || !state.logs.length)
     setText('install-log', (state.logs || []).slice(-80).join('\n'))
-    if (state.progress != null) el('progress-bar').style.width = Math.max(3, Math.min(100, state.progress)) + '%'
+    if (state.progress != null && el('progress-bar')) el('progress-bar').style.width = Math.max(3, Math.min(100, state.progress)) + '%'
     var versions = versionsOf(state)
     setHidden('update-card', !versions.length)
     var select = el('version-select')
@@ -165,7 +334,7 @@
       })
     }
     var primary = el('primary-action')
-    primary.textContent = state.status === 'needs_workspace' ? '选择工作区' : '重启'
+    if (primary) primary.textContent = state.status === 'needs_workspace' ? '选择工作区' : '重启'
     var running = !!state.webUrl
     var toggleDsh = el('toggle-dsh')
     var enterDshButton = el('enter-dsh')
@@ -184,7 +353,7 @@
     return invokeOrThrow('get_status').then(render).catch(function (error) {
       setText('status-title', '无法连接客户端后端')
       setText('status-message', messageOf(error))
-      el('status-pill').className = 'pill bad'
+      if (el('status-pill')) el('status-pill').className = 'pill bad'
       setText('status-pill', '错误')
     })
   }
@@ -212,28 +381,32 @@
   })
   el('titlebar-home').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-home').addEventListener('click', function () {
+    if (viewMode === 'market') {
+      if (state && state.webUrl) { viewMode = 'dsh'; updateView() } else showHome()
+      return
+    }
     if (!state || !state.webUrl) return
     if (viewMode === 'dsh') showHome()
-    else {
-      viewMode = 'dsh'
-      updateView()
-    }
+    else { viewMode = 'dsh'; updateView() }
   })
+  el('titlebar-market').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-market').addEventListener('click', openMarket)
   el('window-minimize').addEventListener('click', function () { invokeOrThrow('minimize_window').catch(showWindowError) })
   el('window-maximize').addEventListener('click', function () {
     invokeOrThrow('toggle_maximize').then(setMaximizeGlyph).catch(showWindowError)
   })
   el('window-close').addEventListener('click', closeWindow)
   el('app-home').addEventListener('click', function () { showHome() })
-  el('app-update').addEventListener('click', function () {
-    openUpdateCard(true)
-  })
-  el('app-upgrade').addEventListener('click', function () {
-    openUpdateCard(true)
-  })
+  el('app-update').addEventListener('click', function () { openUpdateCard(true) })
+  el('app-upgrade').addEventListener('click', function () { openUpdateCard(true) })
   el('app-stop').addEventListener('click', function () {
     showHome()
     action(function () { return invokeOrThrow('stop_dsh') })
+  })
+  el('market-back-home').addEventListener('click', function () { showHome() })
+  el('market-search-form').addEventListener('submit', function (event) {
+    event.preventDefault()
+    marketSearch(el('market-query').value)
   })
   el('detect-local').addEventListener('click', function () { action(function () { return invokeOrThrow('detect_local_runtime') }) })
   el('use-local').addEventListener('click', function () { action(function () { return invokeOrThrow('set_runtime_source', { source: 'local' }) }) })
