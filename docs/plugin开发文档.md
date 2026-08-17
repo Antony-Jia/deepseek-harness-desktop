@@ -363,7 +363,7 @@ export function deactivate() {
 | 组合编辑 SKILL | npm 包内 `config/agent-presets/cordis/skills/editing-cordis-compositions/SKILL.md` | cordis.yml 组合、host/agent 预设分层、realm 与 isolate |
 | 宿主 runner | `@deepseek-ai/dsh-cordis-host-runner/README.zh.md` | 动态包宿主半：define/run/stop、vm 沙箱、fiber 生命周期 |
 | 浏览器 runner | `@deepseek-ai/dsh-cordis-client-runner/README.zh.md` | 动态包浏览器半：装载、guard 门面、渲染失败回流 |
-| Cordis 工具集 | `@deepseek-ai/dsh-tool-cordis/README.zh.md` | `cordis_inspect/define/run/stop/undefine` 五个工具的语义 |
+| Cordis 工具集 | `@deepseek-ai/dsh-tool-cordis/README.zh.md` | `cordis_inspect_list` / `cordis_inspect_query` / `cordis_inspect_self` 与 `cordis_define/run/stop/undefine` 七个工具的语义（README 正文的“五个工具 / 单个 `cordis_inspect`”已过时，以 14.7 与工具 schema 为准） |
 | Cordis 框架 | `@deepseek-ai/cordis/README.md` | Context、Fiber、`inject`、effect 清理、事件/服务/日志 |
 | 本地插件模板 | 本仓库 `dsh-plugin-template/`（README.md、DEBUGGING.md、`lib/index.js`、`lib/client.js`、`cordis.patch.example.yml`） | 可复制、可运行的最小双半插件 + 挂载示例 + 三层调试指南 |
 | 参考实现 | 本仓库 `plugins/dsh-desktop-bridge/` | 上线的宿主/浏览器集成插件（托盘、通知、目录选择） |
@@ -493,6 +493,7 @@ export default {
 | 服务 | 用途 | 常用方法 |
 | --- | --- | --- |
 | `commands` | 斜杠指令（`/xxx` 直接执行，不经过模型） | `register({ name, description, handler })`，handler 返回 `{ kind: 'success'/'error', text }` |
+| `skills` | 技能注册（模型 `skill` 工具可加载的指令包，见 14.12） | `register({ name, description, content, whenToUse?, source? })`、`registerProvider`、`list()` / `get(name)` |
 | `webServer` | HTTP 路由（浏览器 fetch 直连，curl 可直打） | `register`，`kind` 取 `'exact'` 或 `'prefix'`，`path`、`handler(req, res)` |
 | `fs` | 文件系统 | `resolve` / `readText` / `writeText`（原子写）/ `listDir` / `stat` / `processPath` |
 | `subprocess` | 子进程 | `spawn({ argv, cwd, stdio, graceMs })` |
@@ -565,7 +566,7 @@ window.__ModuleLoader__.load({
 | `cordis_inspect_list` / `cordis_inspect_query` | 查宿主/浏览器当前注册的服务、事件、槽位、主题 token、工具的确切签名（**先查再写**） |
 | `cordis_inspect_self(pluginId, packageId)` | 读某定义的源码、版本指针与运行诊断 |
 | `cordis_define` | 登记一个包：`code.host` 和/或 `code.client`（纯 JS 函数体，无 import/JSX/TS）——**只登记，不执行** |
-| `cordis_run` | `run` = 首次激活/重启/回滚；`update` = 切换/修复版本；带浏览器半且未授权时返回 `awaiting-approval` |
+| `cordis_run` | `run` = 首次激活/重启/回滚；`update` = 切换/修复版本；带浏览器半时：未授权返回 `awaiting-approval`、已授权返回 `starting` 并异步完成（两者都别在同一轮里等最终结果） |
 | `cordis_stop` | 停用但保留定义（可再次 run）；`cordis_undefine` = 彻底删除 |
 
 版本语义：`pluginId` = 稳定实例；`packageId` = 不可变代码版本；`pluginRunId` = 每次激活。更新失败时：编辑修复后用 `update` 补 `nextPackageId` 重试，或用 `run` 回滚到 `currentPackageId`。
@@ -615,29 +616,29 @@ window.__ModuleLoader__.load({
 
 **层级二：多个独立子插件 = 一个组合（Cordis group）**
 
-用 `@cordisjs/plugin-group`（即 `cordis:group`）+ `group: true` 在一个挂载行里声明多个子插件行；子插件各自独立成包、独立版本、独立启停。示例（追加到 `cordis.patch.yml`）：
+用 `cordis:group`（npm 包名 `@cordisjs/plugin-group`）+ `group: true` 在一个挂载行里声明多个子插件行；子插件各自独立成包、独立版本、独立启停。示例（追加到 `cordis.patch.yml`）：
 
 ```yaml
 - insert:
     - id: crm                          # 这个业务方向的组合名
-      name: '@cordisjs/plugin-group'
+      name: cordis:group               # 即 npm 包 @cordisjs/plugin-group
       group: true
       config:
         - id: core                     # 纯逻辑子插件：存储/记忆/业务服务（嵌套 id 即 crm:core）
           name: '@market/crm-core'
           inject: [fs, commands]
-        - id: ui-button                # 纯 UI 子插件：新增按钮
+        - id: ui-button                # 纯 UI 子插件：新增按钮（slots 等浏览器半服务在它的 lib/client.js 里声明，不写进挂载行）
           name: '@market/crm-ui-button'
-          inject: [slots]
-        - id: ui-page                  # 纯 UI 子插件：新增页面
+        - id: ui-page                  # 纯 UI 子插件：新增页面（宿主半提供页面路由需要 webServer；UI 的 slots 同样写在 client.js）
           name: '@market/crm-ui-page'
-          inject: [slots, webServer]
+          inject: [webServer]
 ```
 
 要点：
 
 - group 本身永远启用；停用整个 group → 全部子插件一起停，子插件可单独 disabled；
 - 每个子插件仍是独立 Cordis 插件（独立 fiber、独立 `inject`、独立生命周期清理），group 只是把它们组合在一起；
+- 挂载行里的 `inject` 是**宿主半**的依赖；`slots` 等**浏览器半**服务在每个子包的 `lib/client.js` 里声明（见 14.6），不要写进挂载行；
 - 嵌套 id 用冒号分隔（如 `crm:core`）；所谓"逻辑/UI 拆分"= 拆成哪些 npm 包 + group 里挂哪些行，**不在包内部嵌套**；
 - 业务插件组合**不需要** `isolate` realm（那是 agent 预设做跨会话隔离用的，见编辑组合 SKILL）。
 
@@ -690,7 +691,62 @@ npm install <pkg>    # 或 pnpm add / yarn add
 
 **建议**：面向标准用户用官方 `dsh plugin`（需 pnpm）；要兼容无 pnpm 的环境，就用市场客户端直接对 profile 目录跑 `npm install`。
 
+### 14.12 一站式插件：技能 + 后台 + UI 合体
+
+一个插件包可以**同时携带三类能力**，挂一行 insert 即全部生效：
+
+- **技能**：宿主半用 `ctx.skills.register(...)` 注册一段指令（markdown 正文），模型用 `skill` 工具按名字加载；
+- **后台**：宿主半注册指令 / 路由 / 服务（14.5）；
+- **UI**：浏览器半注册槽位（14.6）。
+
+宿主半示例（`lib/index.js`）：
+
+```javascript
+export default {
+  inject: ['skills', 'commands', 'webServer'],
+
+  apply(ctx) {
+    // 1) 技能：进入 skill 工具目录，模型按 kebab-case 名字加载
+    ctx.effect(() => ctx.skills.register({
+      name: 'crm-ops',                    // 唯一标识（kebab-case）
+      description: 'CRM 运营：查客户、建订单、看报表',
+      whenToUse: '用户要操作 CRM 数据时',   // 可选路由提示
+      source: 'runtime',                  // 来源标签（prompt 可见元数据）
+      content: '# CRM 运营\n\n1. 查客户：调用 `/crm/customers` 路由……\n2. 建订单：调用 `/crm/orders` 路由……'
+      // invocation 缺省 = { modelInvocable: true, userInvocable: true }；provider 缺省 = 'runtime'
+    }))
+
+    // 2) 后台：指令 + HTTP 路由（与 14.5 相同）
+    ctx.effect(() => ctx.commands.register({
+      name: 'crm-customers',
+      description: '列出 CRM 客户',
+      handler: async () => ({ kind: 'success', text: '…' })
+    }))
+
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact',
+      path: '/crm/customers',
+      handler: async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ customers: [] }))
+      }
+    }))
+  }
+}
+```
+
+浏览器半不变（`lib/client.js` 里 `ctx.slots.inject/register`，见 14.6），把按钮/面板指向上面的路由即可。
+
+要点：
+
+- **可见范围（分层）**：经 `cordis.patch.yml` 挂载 → 技能落在**全局层**，所有会话可见；经 agent 预设挂载 → 落在该预设层，仅该预设的 agent 可见。
+- **优先级（同层内）**：project 技能 > runtime（`register()`）技能 > user 技能；重名时高优先级胜出，注册前先 `cordis_inspect` 确认不撞名。
+- **按需加载**：`list()` 只带 name/description，模型调用 `skill` 工具时才 `get()` 注入 `content`，token 开销小。
+- **名字规则**：`[a-z0-9]+(-[a-z0-9]+)*`（kebab-case）。
+- **副作用可逆**：`register()` 返回 disposer，一律 `ctx.effect` 包裹。
+- **长技能/多技能**：改用 `ctx.skills.registerProvider(...)` 把 `SKILL.md` 文件随包分发、按需解析；内联 `register()` 适合短指令。
+
 ---
 
 *文档维护：Plugin 开发小组 / 项目技术负责人*  
-*最后更新：2026-07，已与 npm `@deepseek-ai/dsh` v0.1.0-rc.6 随带官方文档及本仓库 `dsh-plugin-template/` 对齐，并补充"插件组合"与"npm/pnpm 统一管理"讨论结论（详见 Git 提交记录）*
+*最后更新：2026-07，已与 npm `@deepseek-ai/dsh` v0.1.0-rc.6 随带官方文档及本仓库 `dsh-plugin-template/` 对齐，并补充"插件组合"、"npm/pnpm 统一管理"与"一站式技能打包（技能+后台+UI）"讨论结论（详见 Git 提交记录）*
