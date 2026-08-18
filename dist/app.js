@@ -9,12 +9,15 @@
   var viewMode = 'home'
   var autoOpenedUrl = ''
   var loadedFrameUrl = ''
+  var workspacePanelOpen = false
+  var terminalPanelOpen = false
   var marketResult = null
   var marketQuery = ''
   var marketBusy = false
   var marketError = ''
   var marketOperation = null
   var pendingRestartNames = []
+  var localDetecting = false
   var systemThemeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false }
 
   function el(id) { return document.getElementById(id) }
@@ -40,7 +43,7 @@
     setText('theme-message', message)
   }
   function setBusy(busy) {
-    ;['primary-action', 'toggle-dsh', 'enter-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'enter-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-workspace', 'titlebar-terminal', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
@@ -75,8 +78,25 @@
       marketButton.classList.toggle('active', showingMarket)
       marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
     }
+    var workspaceReady = !!(state && state.workspace)
+    var workspaceButton = el('titlebar-workspace')
+    var terminalButton = el('titlebar-terminal')
+    if (workspaceButton) {
+      workspaceButton.disabled = !(showingDsh && workspaceReady)
+      workspaceButton.title = showingDsh && workspaceReady ? (workspacePanelOpen ? '隐藏右侧工作区面板' : '显示右侧工作区面板') : '尚未进入 DSH 或选择工作区'
+      workspaceButton.setAttribute('aria-label', workspaceButton.title)
+      workspaceButton.setAttribute('aria-pressed', workspacePanelOpen ? 'true' : 'false')
+    }
+    if (terminalButton) {
+      terminalButton.disabled = !(showingDsh && workspaceReady)
+      terminalButton.title = showingDsh && workspaceReady ? (terminalPanelOpen ? '关闭下方 PowerShell 面板' : '打开下方 PowerShell 面板') : '尚未进入 DSH 或选择工作区'
+      terminalButton.setAttribute('aria-label', terminalButton.title)
+      terminalButton.setAttribute('aria-pressed', terminalPanelOpen ? 'true' : 'false')
+    }
     var frame = el('dsh-frame')
     if (frame && url && loadedFrameUrl !== url) {
+      workspacePanelOpen = false
+      terminalPanelOpen = false
       loadedFrameUrl = url
       frame.src = url
     }
@@ -114,6 +134,20 @@
       return
     }
     action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })
+  }
+  function postDshMessage(type, payload) {
+    var frame = el('dsh-frame')
+    if (!frame || !frame.contentWindow) return false
+    frame.contentWindow.postMessage(Object.assign({ source: 'dsh-desktop', type: type }, payload || {}), '*')
+    return true
+  }
+  function openWorkspacePanel() {
+    if (!state || !state.workspace || viewMode !== 'dsh') return
+    postDshMessage('workspace-panel-toggle')
+  }
+  function openTerminalPanel() {
+    if (!state || !state.workspace || viewMode !== 'dsh') return
+    postDshMessage('terminal-panel-toggle', { cwd: String(state.workspace) })
   }
   function closeWindow() {
     invokeOrThrow('stop_dsh').then(function () { return refresh() }).then(function () { return invokeOrThrow('hide_window') }).catch(showWindowError)
@@ -304,12 +338,17 @@
     var local = state.localRuntime
     var source = state.runtimeSource || 'managed'
     var localVersion = local && local.version ? local.version : ''
-    setText('runtime-source-title', source === 'local' ? '当前使用本地 DSH' : '当前使用桌面托管 DSH')
-    setText('runtime-source-message', localVersion
-      ? '已检测到 @deepseek-ai/dsh@' + localVersion + '（' + (local.source || '系统 PATH') + '）。' + (source === 'local' ? '当前启动会复用这个本地版本。' : '你也可以直接切换使用它。')
-      : '系统中暂未检测到可复用的本地 @deepseek-ai/dsh；可以安装并使用桌面托管版本。')
-    setHidden('use-local', !localVersion || source === 'local')
-    setHidden('use-managed', source !== 'local')
+    if (localDetecting) {
+      setText('runtime-source-title', '正在检测本地 DSH…')
+      setText('runtime-source-message', '正在调用 npx 探测 @deepseek-ai/dsh 版本，请稍候。')
+    } else {
+      setText('runtime-source-title', source === 'local' ? '当前使用本地 DSH' : '当前使用桌面托管 DSH')
+      setText('runtime-source-message', localVersion
+        ? '已检测到 @deepseek-ai/dsh@' + localVersion + '（' + (local.source || '系统 PATH') + '）。' + (source === 'local' ? '当前启动会复用这个本地版本。' : '你也可以直接切换使用它。')
+        : '系统中暂未检测到可复用的本地 @deepseek-ai/dsh；可以安装并使用桌面托管版本。')
+    }
+    setHidden('use-local', !localVersion || source === 'local' || localDetecting)
+    setHidden('use-managed', source !== 'local' || localDetecting)
     setText('version-summary', '固定版本 ' + (state.pinned || '未设置'))
     setText('update-message', versionHint || (state.available ? '检测到可用版本 ' + state.available + '，安装后切换到托管版。' : '安装只会写入桌面托管目录，不会覆盖系统中的本地版本。'))
     setHidden('error-detail', !state.error)
@@ -364,6 +403,19 @@
       render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '操作失败' }))
     }).finally(function () { setBusy(false); return refresh() })
   }
+  function detectAction(work) {
+    localDetecting = true
+    render(state)
+    versionHint = ''
+    setBusy(true)
+    return Promise.resolve().then(work).catch(function (error) {
+      render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '操作失败' }))
+    }).finally(function () {
+      localDetecting = false
+      setBusy(false)
+      return refresh()
+    })
+  }
   function showWindowError(error) {
     render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '窗口操作失败' }))
   }
@@ -391,6 +443,26 @@
   })
   el('titlebar-market').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-market').addEventListener('click', openMarket)
+  el('titlebar-workspace').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-workspace').addEventListener('click', openWorkspacePanel)
+  el('titlebar-terminal').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-terminal').addEventListener('click', openTerminalPanel)
+  window.addEventListener('message', function (event) {
+    var frame = el('dsh-frame')
+    if (!frame || event.source !== frame.contentWindow) return
+    var data = event.data
+    if (!data || data.source !== 'dsh-open-workspace') return
+    if (data.type === 'workspace-panel-state') workspacePanelOpen = data.open === true
+    if (data.type === 'terminal-panel-state') terminalPanelOpen = data.open === true
+    updateView()
+  })
+  var dshFrame = el('dsh-frame')
+  if (dshFrame) {
+    dshFrame.addEventListener('load', function () {
+      postDshMessage('workspace-panel-state-request')
+      postDshMessage('terminal-panel-state-request')
+    })
+  }
   el('window-minimize').addEventListener('click', function () { invokeOrThrow('minimize_window').catch(showWindowError) })
   el('window-maximize').addEventListener('click', function () {
     invokeOrThrow('toggle_maximize').then(setMaximizeGlyph).catch(showWindowError)
@@ -408,9 +480,9 @@
     event.preventDefault()
     marketSearch(el('market-query').value)
   })
-  el('detect-local').addEventListener('click', function () { action(function () { return invokeOrThrow('detect_local_runtime') }) })
-  el('use-local').addEventListener('click', function () { action(function () { return invokeOrThrow('set_runtime_source', { source: 'local' }) }) })
-  el('use-managed').addEventListener('click', function () { action(function () { return invokeOrThrow('set_runtime_source', { source: 'managed' }) }) })
+  el('detect-local').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('detect_local_runtime') }) })
+  el('use-local').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('set_runtime_source', { source: 'local' }) }) })
+  el('use-managed').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('set_runtime_source', { source: 'managed' }) }) })
   document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
     button.addEventListener('click', function () {
       var theme = button.getAttribute('data-theme-choice')

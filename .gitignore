@@ -18,3 +18,7 @@ runtime-assets/pnpm.cjs
 *.log
 
 example_docs/
+
+# 本地敏感凭证（npm 发布恢复码等），切勿提交
+npm_recovery_codes.txt
+*_recovery_codes.txt

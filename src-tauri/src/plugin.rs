@@ -14,15 +14,15 @@ pub fn ensure_profile_plugin(source: Option<&Path>, dsh_home: &Path) -> Result<b
     };
     let profile = dsh_home.join("profiles").join("web");
     let target = profile.join("node_modules").join(PLUGIN_NAME);
-    if !target.exists() {
-        fs::create_dir_all(
-            target
-                .parent()
-                .ok_or_else(|| "插件目标目录没有父目录".to_string())?,
-        )
-        .map_err(io_error)?;
-        copy_dir(source, &target).map_err(io_error)?;
-    }
+    fs::create_dir_all(
+        target
+            .parent()
+            .ok_or_else(|| "插件目标目录没有父目录".to_string())?,
+    )
+    .map_err(io_error)?;
+    // 该目录由桌面托管，启动时同步受控源文件，确保 bridge 客户端的
+    // UI 变更（例如移除重复的左下角按钮）能覆盖已有 profile 缓存。
+    copy_dir(source, &target).map_err(io_error)?;
     let patch_path = profile.join("cordis.patch.yml");
     let existing = fs::read_to_string(&patch_path).unwrap_or_default();
     let mut content = remove_desktop_overlay(&existing);

@@ -101,14 +101,38 @@ button.titlebar-brand {
 }
 .titlebar-caption {
   overflow: hidden;
+  flex: 0 1 auto;
   color: #657196;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.titlebar-market {
+.titlebar-tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.titlebar-tool {
   min-height: 28px;
-  margin-left: 6px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #b9c4e8;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.titlebar-tool:hover:not(:disabled) { color: #f5f7ff; background: rgba(125, 226, 188, .16); border-color: rgba(125, 226, 188, .20); }
+.titlebar-tool:disabled { cursor: default; opacity: .42; }
+.titlebar-tool:focus-visible { outline: 0; box-shadow: 0 0 0 2px rgba(166, 178, 255, .55); }
+.titlebar-market {
+  margin-left: 0;
+  min-height: 28px;
   padding: 0 11px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -336,6 +360,8 @@ select:disabled { cursor: not-allowed; opacity: .56; }
 :root[data-theme="light"] .titlebar { color: #53617c; background: rgba(255, 255, 255, .86); box-shadow: 0 1px 0 rgba(92, 111, 163, .10); }
 :root[data-theme="light"] .titlebar-brand { color: #18233f; }
 :root[data-theme="light"] .titlebar-caption { color: #7b88a3; }
+:root[data-theme="light"] .titlebar-tool { color: #53617c; }
+:root[data-theme="light"] .titlebar-tool:hover:not(:disabled) { color: #198b68; background: rgba(25, 139, 104, .10); border-color: rgba(25, 139, 104, .16); }
 :root[data-theme="light"] .titlebar-market { color: #53617c; }
 :root[data-theme="light"] .titlebar-market:hover, :root[data-theme="light"] .titlebar-market.active { color: #18233f; background: rgba(102, 120, 217, .12); border-color: rgba(92, 111, 163, .14); }
 :root[data-theme="light"] .titlebar-home:hover:not(:disabled) { color: #5366c9; }
@@ -376,6 +402,8 @@ select:disabled { cursor: not-allowed; opacity: .56; }
   body { min-width: 0; }
   .shell { width: calc(100vw - 32px); padding-top: 26px; }
   .titlebar-caption { display: none; }
+  .titlebar-tools { gap: 2px; }
+  .titlebar-tool { padding: 0 6px; font-size: 10px; }
   .app-actions { gap: 2px; padding: 0 4px; }
   .app-action { padding: 0 6px; font-size: 10px; }
   .titlebar-market { margin-left: 0; padding: 0 7px; font-size: 10px; }

@@ -15,7 +15,11 @@
           <span>DSH Desktop</span>
         </button>
         <span class="titlebar-caption">DeepSeek Harness</span>
-        <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
+        <div class="titlebar-tools" aria-label="工作区工具">
+          <button id="titlebar-workspace" class="titlebar-tool" type="button" title="显示右侧工作区面板" aria-label="显示右侧工作区面板" disabled>文件夹</button>
+          <button id="titlebar-terminal" class="titlebar-tool" type="button" title="打开下方 PowerShell 面板" aria-label="打开下方 PowerShell 面板" disabled>Terminal</button>
+          <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
+        </div>
       </div>
       <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作" hidden>
         <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>

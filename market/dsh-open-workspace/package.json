@@ -1,0 +1,45 @@
+{
+  "name": "@p-dsh-market/dsh-open-workspace",
+  "version": "0.1.4",
+  "description": "DSH 工作区文件浏览器：右侧停靠预览 Markdown、代码和 HTML，并可打开系统文件夹与工作区终端",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "@p-dsh-market",
+    "dsh-open-workspace",
+    "workspace",
+    "file-browser",
+    "markdown",
+    "html"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "工作区文件浏览器",
+      "capabilities": ["skills", "host", "client"]
+    }
+  }
+}

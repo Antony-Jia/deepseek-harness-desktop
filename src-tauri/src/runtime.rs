@@ -11,6 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct RuntimeManager {
     runtimes_dir: PathBuf,
     node_dir: PathBuf,
@@ -119,6 +120,14 @@ impl RuntimeManager {
         let version = parse_version_output(&output.stdout)
             .or_else(|| parse_version_output(&output.stderr))?;
         Some(LocalRuntime { version, command })
+    }
+
+    pub async fn detect_local_async(&self) -> Option<LocalRuntime> {
+        let manager = self.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.detect_local())
+            .await
+            .ok()
+            .flatten()
     }
 
     pub fn ensure_bundled_node(&self, source: Option<&Path>) -> Result<bool, String> {
@@ -295,6 +304,13 @@ impl RuntimeManager {
             .unwrap_or_default();
         versions.sort_by(|a, b| compare_versions(b, a));
         Ok(RegistryInfo { latest, versions })
+    }
+
+    pub async fn registry_info_async(&self) -> Result<RegistryInfo, String> {
+        let manager = self.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.registry_info())
+            .await
+            .map_err(|error| format!("检查上游版本失败: {error}"))?
     }
 
     pub fn cleanup(&self, state: &PersistedState, keep: usize) -> Result<Vec<String>, String> {

@@ -54,10 +54,14 @@ test('desktop shell contract is represented in the project', () => {
 
 test('bridge plugin is inert without desktop environment variables', () => {
   const host = text('plugins/dsh-desktop-bridge/lib/index.js')
+  const client = text('plugins/dsh-desktop-bridge/lib/client.js')
   assert.match(host, /DSH_DESKTOP_CTRL/)
   assert.match(host, /DSH_DESKTOP_TOKEN/)
   assert.match(host, /if \(!CONTROL \|\| !TOKEN\) return/)
   assert.match(host, /turn\/end/)
+  assert.doesNotMatch(client, /dsh-desktop-folder/)
+  assert.doesNotMatch(client, /sidebar\.footer\.action/)
+  assert.doesNotMatch(client, /pick-folder/)
 })
 
 test('plugin market contract is represented in the Rust, UI and fixture layers', () => {
@@ -89,6 +93,50 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.equal(fixture.dsh.client.platform, 'web')
   assert.equal(fixture.dsh.bundle.patch, './cordis.patch.yml')
   assert.deepEqual(fixture.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
+})
+
+test('workspace market plugin is a docked, installable package', () => {
+  const manifest = JSON.parse(text('market/dsh-open-workspace/package.json'))
+  const host = text('market/dsh-open-workspace/lib/index.js')
+  const client = text('market/dsh-open-workspace/lib/client.js')
+  const patch = text('market/dsh-open-workspace/cordis.patch.yml')
+  const html = text('dist/index.html')
+  const rust = text('src-tauri/src/lib.rs')
+  const javascript = text('dist/app.js')
+
+  assert.equal(manifest.name, '@p-dsh-market/dsh-open-workspace')
+  assert.equal(manifest.exports['./client'], './lib/client.js')
+  assert.equal(manifest.exports['./cordis.patch.yml'], './cordis.patch.yml')
+  assert.equal(manifest.dsh.client.platform, 'web')
+  assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
+  assert.deepEqual(manifest.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
+  assert.match(patch, /@p-dsh-market\/dsh-open-workspace/)
+  assert.match(host, /inject: \['commands', 'fs', 'webServer', 'subprocess'\]/)
+  assert.match(host, /\/open-workspace\/list/)
+  assert.match(host, /\/open-workspace\/read/)
+  assert.match(host, /\/open-workspace\/terminal\/open/)
+  assert.match(host, /\/open-workspace\/terminal\/read/)
+  assert.match(host, /\/open-workspace\/terminal\/write/)
+  assert.match(host, /\/open-workspace\/terminal\/close/)
+  assert.match(host, /spawnTerminal/)
+  assert.match(host, /subprocess\.spawn\(/)
+  assert.match(host, /readJson/)
+  assert.match(client, /id: '@p-dsh-market\/dsh-open-workspace'/)
+  assert.match(client, /ctx\.slots\.inject\('details'/)
+  assert.match(client, /name: 'details', priority: -1/)
+  assert.match(client, /workspace-panel-toggle/)
+  assert.match(client, /terminal-panel-toggle/)
+  assert.match(client, /conversation\.composer\.dock/)
+  assert.doesNotMatch(client, /ctx\.slots\.inject\('conversation\.input\.dock'/)
+  assert.doesNotMatch(client, /ctx\.slots\.inject\('sidebar\.footer\.action'/)
+  assert.doesNotMatch(client, /ctx\.slots\.inject\('shell\.overlay'/)
+  assert.match(client, /Markdown \/ HTML \/ 代码/)
+  assert.match(html, /id="titlebar-workspace"/)
+  assert.match(html, /id="titlebar-terminal"/)
+  assert.match(javascript, /workspace-panel-toggle/)
+  assert.match(javascript, /terminal-panel-toggle/)
+  assert.match(rust, /fn open_workspace_folder/)
+  assert.match(rust, /fn open_workspace_terminal/)
 })
 
 test('splash page exposes recovery actions', () => {
@@ -143,6 +191,8 @@ test('javascript artifacts pass node syntax validation', () => {
     'plugins/dsh-desktop-bridge/lib/client.js',
     'plugins/dsh-market-example/lib/index.js',
     'plugins/dsh-market-example/lib/client.js',
+    'market/dsh-open-workspace/lib/index.js',
+    'market/dsh-open-workspace/lib/client.js',
   ]) {
     execFileSync(process.execPath, ['--check', file(path)], { stdio: 'pipe' })
   }

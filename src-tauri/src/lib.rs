@@ -24,7 +24,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard, TryLockError,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -48,7 +48,7 @@ pub struct DesktopContext {
     status: Arc<Mutex<DesktopStatus>>,
     logs: Arc<Mutex<Vec<String>>>,
     start_lock: Arc<Mutex<()>>,
-    market_task_lock: Arc<Mutex<()>>,
+    market_task_lock: Arc<tauri::async_runtime::Mutex<()>>,
     allow_close: Arc<AtomicBool>,
     window_save_revision: Arc<AtomicU64>,
 }
@@ -79,7 +79,7 @@ impl DesktopContext {
             status: Arc::new(Mutex::new(DesktopStatus::default())),
             logs: Arc::new(Mutex::new(Vec::new())),
             start_lock: Arc::new(Mutex::new(())),
-            market_task_lock: Arc::new(Mutex::new(())),
+            market_task_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
             allow_close: Arc::new(AtomicBool::new(false)),
             window_save_revision: Arc::new(AtomicU64::new(0)),
         }
@@ -113,6 +113,8 @@ pub fn run() {
             rollback_to_last_good,
             cleanup_runtimes,
             open_logs,
+            open_workspace_folder,
+            open_workspace_terminal,
             quit_app,
             stop_dsh,
             search_market_plugins,
@@ -137,9 +139,13 @@ pub fn run() {
             {
                 eprintln!("[dsh-desktop] bundled Node bootstrap failed: {error}");
             }
-            if let Ok(mut local_runtime) = context_for_setup.local_runtime.lock() {
-                *local_runtime = context_for_setup.manager.detect_local();
-            }
+            let context_for_detect = context_for_setup.clone();
+            tauri::async_runtime::spawn(async move {
+                let manager = context_for_detect.manager.clone();
+                let detected = manager.detect_local_async().await;
+                cache_local_runtime(&context_for_detect, detected);
+                refresh_common(&context_for_detect);
+            });
             let server =
                 ControlServer::start(app.handle().clone(), context_for_setup.store.clone())?;
             if let Ok(mut control) = context_for_setup.control.lock() {
@@ -224,17 +230,17 @@ fn start_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Resul
 }
 
 #[tauri::command]
-fn detect_local_runtime(
+async fn detect_local_runtime(
     context: tauri::State<'_, DesktopContext>,
 ) -> Result<Option<LocalRuntimeSummary>, String> {
-    let detected = context.manager.detect_local();
+    let detected = context.manager.detect_local_async().await;
     cache_local_runtime(&context, detected.clone());
     refresh_common(&context);
     Ok(detected.as_ref().map(local_runtime_summary))
 }
 
 #[tauri::command]
-fn set_runtime_source(
+async fn set_runtime_source(
     app: AppHandle,
     context: tauri::State<'_, DesktopContext>,
     source: String,
@@ -246,7 +252,7 @@ fn set_runtime_source(
         return Err(format!("不支持的运行来源: {source}"));
     }
     if source == RUNTIME_SOURCE_LOCAL {
-        let detected = context.manager.detect_local().ok_or_else(|| {
+        let detected = context.manager.detect_local_async().await.ok_or_else(|| {
             "当前系统没有可用的本地 @deepseek-ai/dsh，请先执行 npx @deepseek-ai/dsh。".to_string()
         })?;
         cache_local_runtime(&context, Some(detected));
@@ -272,12 +278,19 @@ fn set_runtime_source(
 }
 
 #[tauri::command]
-fn check_for_updates(
+async fn check_for_updates(
     app: AppHandle,
     context: tauri::State<'_, DesktopContext>,
 ) -> Result<RegistryInfoResponse, String> {
+    do_check_for_updates(app, &context).await
+}
+
+async fn do_check_for_updates(
+    app: AppHandle,
+    context: &DesktopContext,
+) -> Result<RegistryInfoResponse, String> {
     set_status(
-        &context,
+        context,
         &app,
         "checking",
         "正在检查上游版本",
@@ -285,7 +298,7 @@ fn check_for_updates(
         None,
         None,
     );
-    let registry = context.manager.registry_info()?;
+    let registry = context.manager.registry_info_async().await?;
     let mut state = context.store.load().map_err(io_error)?;
     if registry.latest != state.pinned {
         state.available = Some(registry.latest.clone());
@@ -293,9 +306,9 @@ fn check_for_updates(
         state.available = None;
     }
     context.store.save(&state).map_err(io_error)?;
-    set_versions(&context, &registry);
+    set_versions(context, &registry);
     set_status(
-        &context,
+        context,
         &app,
         "stopped",
         if state.available.is_some() {
@@ -453,6 +466,77 @@ fn open_logs(context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
     Ok(())
 }
 
+fn current_workspace(context: &DesktopContext) -> Result<PathBuf, String> {
+    let state = context.store.load().map_err(io_error)?;
+    let workspace = state
+        .last_workspace
+        .map(PathBuf::from)
+        .ok_or_else(|| "尚未选择工作区，请先启动 DSH 并选择一个工作区。".to_string())?;
+    if !workspace.is_dir() {
+        return Err(format!("工作区不存在或不是目录：{}", workspace.display()));
+    }
+    Ok(workspace)
+}
+
+#[tauri::command]
+fn open_workspace_folder(context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    let workspace = current_workspace(&context)?;
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("打开工作区文件夹失败：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("打开工作区文件夹失败：{error}"))?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("打开工作区文件夹失败：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_workspace_terminal(context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    let workspace = current_workspace(&context)?;
+    #[cfg(windows)]
+    {
+        // 不使用 -Command 拼接路径：current_dir 直接设置工作目录，避免路径中的
+        // 引号或 PowerShell 元字符被解释，同时保留可交互的独立窗口。
+        Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoExit"])
+            .current_dir(&workspace)
+            .spawn()
+            .map_err(|error| format!("打开 PowerShell 失败：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-a", "Terminal"])
+            .current_dir(&workspace)
+            .spawn()
+            .map_err(|error| format!("打开终端失败：{error}"))?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        Command::new("x-terminal-emulator")
+            .current_dir(&workspace)
+            .spawn()
+            .or_else(|_| Command::new("xterm").current_dir(&workspace).spawn())
+            .map_err(|error| format!("打开终端失败：{error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
     context.allow_close.store(true, Ordering::Relaxed);
@@ -478,51 +562,82 @@ fn stop_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result
 }
 
 #[tauri::command]
-fn search_market_plugins(
+async fn search_market_plugins(
     context: tauri::State<'_, DesktopContext>,
     query: String,
 ) -> Result<MarketSearchResult, String> {
-    let _guard = lock_market_task(&context)?;
+    let _guard = match context.market_task_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err("已有插件操作进行中，请稍后重试。".to_string()),
+    };
     let state = context.store.load().map_err(io_error)?;
-    context
+    let result = context
         .market
         .search(&context.manager, &state, &context.dsh_home, &query)
+        .await;
+    match &result {
+        Ok(value) => add_log(
+            &context,
+            format!(
+                "插件市场搜索 query={:?} runtimeReady={} packageManagerReady={} plugins={} message={:?}",
+                value.query,
+                value.runtime_ready,
+                value.package_manager_ready,
+                value.plugins.len(),
+                value.message
+            ),
+        ),
+        Err(error) => add_log(&context, format!("插件市场搜索失败：{error}")),
+    }
+    result
 }
 
 #[tauri::command]
-fn install_market_plugin(
+async fn install_market_plugin(
     context: tauri::State<'_, DesktopContext>,
     name: String,
     version: String,
 ) -> Result<MarketOperationResult, String> {
-    let _guard = lock_market_task(&context)?;
+    let _guard = match context.market_task_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err("已有插件操作进行中，请稍后重试。".to_string()),
+    };
     let state = context.store.load().map_err(io_error)?;
     let restart_required = is_dsh_running(&context);
-    context.market.install(
-        &context.manager,
-        &state,
-        &context.dsh_home,
-        &name,
-        &version,
-        restart_required,
-    )
+    context
+        .market
+        .install(
+            &context.manager,
+            &state,
+            &context.dsh_home,
+            &name,
+            &version,
+            restart_required,
+        )
+        .await
 }
 
 #[tauri::command]
-fn uninstall_market_plugin(
+async fn uninstall_market_plugin(
     context: tauri::State<'_, DesktopContext>,
     name: String,
 ) -> Result<MarketOperationResult, String> {
-    let _guard = lock_market_task(&context)?;
+    let _guard = match context.market_task_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err("已有插件操作进行中，请稍后重试。".to_string()),
+    };
     let state = context.store.load().map_err(io_error)?;
     let restart_required = is_dsh_running(&context);
-    context.market.uninstall(
-        &context.manager,
-        &state,
-        &context.dsh_home,
-        &name,
-        restart_required,
-    )
+    context
+        .market
+        .uninstall(
+            &context.manager,
+            &state,
+            &context.dsh_home,
+            &name,
+            restart_required,
+        )
+        .await
 }
 
 #[tauri::command]
@@ -682,7 +797,11 @@ fn configure_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 }
             }
             "check-updates" => {
-                let _ = check_for_updates(app.clone(), app.state::<DesktopContext>());
+                let context = app.state::<DesktopContext>().inner().clone();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = do_check_for_updates(app, &context).await;
+                });
             }
             "quit" => {
                 context.allow_close.store(true, Ordering::Relaxed);
@@ -933,14 +1052,6 @@ fn is_dsh_running(context: &DesktopContext) -> bool {
         .ok()
         .and_then(|slot| slot.as_ref().map(DshProcess::is_running))
         .unwrap_or(false)
-}
-
-fn lock_market_task(context: &DesktopContext) -> Result<MutexGuard<'_, ()>, String> {
-    match context.market_task_lock.try_lock() {
-        Ok(guard) => Ok(guard),
-        Err(TryLockError::WouldBlock) => Err("已有插件操作进行中，请稍后重试。".to_string()),
-        Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
-    }
 }
 
 fn control_credentials(context: &DesktopContext) -> Result<(String, String), String> {

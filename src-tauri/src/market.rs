@@ -7,12 +7,12 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{mpsc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const MARKET_SCOPE: &str = "@p-dsh-market/";
@@ -90,6 +90,7 @@ struct CommandResult {
 
 pub struct MarketManager {
     tools_dir: PathBuf,
+    logs_dir: PathBuf,
     pnpm_lock: Mutex<()>,
 }
 
@@ -97,11 +98,28 @@ impl MarketManager {
     pub fn new(base_dir: PathBuf) -> Self {
         Self {
             tools_dir: base_dir.join("tools"),
+            logs_dir: base_dir.join("logs"),
             pnpm_lock: Mutex::new(()),
         }
     }
 
-    pub fn search(
+    fn debug_log(&self, message: impl AsRef<str>) {
+        let _ = fs::create_dir_all(&self.logs_dir);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default();
+        let line = format!("[{timestamp}] {}\n", sanitize_log(message.as_ref()));
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.logs_dir.join("market.log"))
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+
+    pub async fn search(
         &self,
         runtime: &RuntimeManager,
         state: &PersistedState,
@@ -109,28 +127,57 @@ impl MarketManager {
         query: &str,
     ) -> Result<MarketSearchResult, String> {
         let query = normalize_query(query)?;
-        let selected = match select_runtime(runtime, state) {
-            Ok(selected) => selected,
+        let managed_path = runtime
+            .runtime_path(&state.pinned)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "<非法版本路径>".to_string());
+        self.debug_log(format!(
+            "search start query={query:?} source={} pinned={} managed_path={} managed_ready={} dsh_home={}",
+            state.runtime_source,
+            state.pinned,
+            managed_path,
+            runtime.is_ready(&state.pinned),
+            dsh_home.display()
+        ));
+        let selected = match select_runtime(runtime, state).await {
+            Ok(selected) => {
+                self.debug_log(format!(
+                    "runtime selected version={} program={} prefix={:?}",
+                    selected.version,
+                    selected.program.display(),
+                    selected.prefix
+                ));
+                selected
+            }
             Err(message) => {
+                self.debug_log(format!("runtime unavailable: {message}"));
                 return Ok(MarketSearchResult {
                     query,
                     plugins: Vec::new(),
                     runtime_ready: false,
                     package_manager_ready: false,
                     message,
-                })
+                });
             }
         };
         let pnpm = match self.prepare_pnpm(runtime) {
-            Ok(pnpm) => pnpm,
+            Ok(pnpm) => {
+                self.debug_log(format!(
+                    "pnpm ready executable={} bin_dir={}",
+                    pnpm.executable.display(),
+                    pnpm.bin_dir.display()
+                ));
+                pnpm
+            }
             Err(error) => {
+                self.debug_log(format!("pnpm prepare failed: {error}"));
                 return Ok(MarketSearchResult {
                     query,
                     plugins: Vec::new(),
                     runtime_ready: true,
                     package_manager_ready: false,
                     message: format!("私有 pnpm 准备失败：{error}"),
-                })
+                });
             }
         };
 
@@ -139,6 +186,9 @@ impl MarketManager {
         } else {
             query.clone()
         };
+        self.debug_log(format!(
+            "market search term={search_term:?} profile=web search_limit=50"
+        ));
         let search_result = self.run_dsh(
             &selected,
             &pnpm,
@@ -151,13 +201,42 @@ impl MarketManager {
                 "50".to_string(),
             ],
         )?;
-        ensure_command_success("插件搜索", &search_result)?;
-        let candidates = parse_search_json(&combined_output(&search_result))?;
+        if let Err(error) = ensure_command_success("插件搜索", &search_result) {
+            self.debug_log(format!("market search command failed: {error}"));
+            return Err(error);
+        }
+        let search_output = combined_output(&search_result);
+        let mut candidates = match parse_search_json(&search_output) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.debug_log(format!(
+                    "market search JSON parse failed: {error}; output={}",
+                    truncate_log(&sanitize_log(&search_output))
+                ));
+                return Err(error);
+            }
+        };
+        if add_exact_query_candidate(&mut candidates, &query) {
+            self.debug_log(format!(
+                "search result omitted exact market package {query}; adding direct view fallback"
+            ));
+        }
+        let candidate_names = candidates
+            .iter()
+            .take(80)
+            .map(|candidate| candidate.name.as_str())
+            .collect::<Vec<_>>();
+        self.debug_log(format!(
+            "market search parsed candidates={} names={candidate_names:?}",
+            candidates.len()
+        ));
 
         let mut plugins = BTreeMap::new();
         let mut rejected = 0_usize;
+        let mut out_of_scope = 0_usize;
         for candidate in candidates.into_iter().take(50) {
             if validate_market_package_name(&candidate.name).is_err() {
+                out_of_scope += 1;
                 continue;
             }
             let view_result = self.run_dsh(
@@ -171,6 +250,10 @@ impl MarketManager {
                 ],
             )?;
             if !view_result_success(&view_result) {
+                self.debug_log(format!(
+                    "candidate view failed name={} code={:?} timed_out={} log={}",
+                    candidate.name, view_result.code, view_result.timed_out, view_result.log
+                ));
                 rejected += 1;
                 continue;
             }
@@ -178,7 +261,11 @@ impl MarketManager {
                 .and_then(|value| validate_market_manifest(&candidate.name, &value))
             {
                 Ok(manifest) => manifest,
-                Err(_) => {
+                Err(error) => {
+                    self.debug_log(format!(
+                        "candidate rejected name={} reason={error}",
+                        candidate.name
+                    ));
                     rejected += 1;
                     continue;
                 }
@@ -210,8 +297,16 @@ impl MarketManager {
                 "--json".to_string(),
             ],
         )?;
-        ensure_command_success("读取已安装插件", &list_result)?;
-        let installed = parse_installed_json(&combined_output(&list_result));
+        if let Err(error) = ensure_command_success("读取已安装插件", &list_result) {
+            self.debug_log(format!("market installed list failed: {error}"));
+            return Err(error);
+        }
+        let installed_output = combined_output(&list_result);
+        let installed = parse_installed_json(&installed_output);
+        self.debug_log(format!(
+            "market search installed market plugins={:?}",
+            installed.keys().collect::<Vec<_>>()
+        ));
         for plugin in plugins.values_mut() {
             if let Some(version) = installed.get(&plugin.name) {
                 plugin.installed = true;
@@ -230,6 +325,12 @@ impl MarketManager {
         } else {
             String::new()
         };
+        self.debug_log(format!(
+            "search complete query={query:?} accepted={} rejected_manifest_or_view={} out_of_scope={} message={message:?}",
+            plugins.len(),
+            rejected,
+            out_of_scope
+        ));
         Ok(MarketSearchResult {
             query,
             plugins: plugins.into_values().collect(),
@@ -239,7 +340,7 @@ impl MarketManager {
         })
     }
 
-    pub fn install(
+    pub async fn install(
         &self,
         runtime: &RuntimeManager,
         state: &PersistedState,
@@ -250,7 +351,7 @@ impl MarketManager {
     ) -> Result<MarketOperationResult, String> {
         validate_market_package_name(name)?;
         validate_market_version(version)?;
-        let selected = select_runtime(runtime, state)?;
+        let selected = select_runtime(runtime, state).await?;
         let pnpm = self.prepare_pnpm(runtime)?;
         let target = format!("{name}@{version}");
 
@@ -329,7 +430,7 @@ impl MarketManager {
         })
     }
 
-    pub fn uninstall(
+    pub async fn uninstall(
         &self,
         runtime: &RuntimeManager,
         state: &PersistedState,
@@ -338,7 +439,7 @@ impl MarketManager {
         restart_required: bool,
     ) -> Result<MarketOperationResult, String> {
         validate_market_package_name(name)?;
-        let selected = select_runtime(runtime, state)?;
+        let selected = select_runtime(runtime, state).await?;
         let pnpm = self.prepare_pnpm(runtime)?;
         let list_result = self.run_dsh(
             &selected,
@@ -470,14 +571,33 @@ impl MarketManager {
         args.extend(operation.iter().cloned());
         let workdir = profile_workdir(dsh_home)?;
         let _ = &pnpm.executable;
-        run_command(
+        self.debug_log(format!(
+            "command start version={} program={} args={args:?} cwd={} dsh_home={} pnpm_bin={}",
+            selected.version,
+            selected.program.display(),
+            workdir.display(),
+            dsh_home.display(),
+            pnpm.bin_dir.display()
+        ));
+        let result = run_command(
             &selected.program,
             &args,
             &workdir,
             dsh_home,
             Some(&pnpm.bin_dir),
-        )
-        .map_err(|error| {
+        );
+        match &result {
+            Ok(result) => self.debug_log(format!(
+                "command end code={:?} timed_out={} stdout_bytes={} stderr_bytes={} log={}",
+                result.code,
+                result.timed_out,
+                result.stdout.len(),
+                result.stderr.len(),
+                result.log
+            )),
+            Err(error) => self.debug_log(format!("command spawn failed: {error}")),
+        }
+        result.map_err(|error| {
             format!(
                 "执行 DSH 插件命令失败（运行时 {}）: {error}",
                 selected.version
@@ -486,13 +606,14 @@ impl MarketManager {
     }
 }
 
-fn select_runtime(
+async fn select_runtime(
     runtime: &RuntimeManager,
     state: &PersistedState,
 ) -> Result<RuntimeCommand, String> {
     if state.runtime_source == crate::state::RUNTIME_SOURCE_LOCAL {
         let local = runtime
-            .detect_local()
+            .detect_local_async()
+            .await
             .ok_or_else(|| "当前选择的本地 DSH 运行时不可用，市场已保持只读。".to_string())?;
         return Ok(local_runtime_command(local));
     }
@@ -915,6 +1036,23 @@ fn candidate_from_value(value: &Value) -> Option<MarketSearchCandidate> {
     })
 }
 
+fn add_exact_query_candidate(candidates: &mut Vec<MarketSearchCandidate>, query: &str) -> bool {
+    if validate_market_package_name(query).is_err()
+        || candidates.iter().any(|candidate| candidate.name == query)
+    {
+        return false;
+    }
+    candidates.insert(
+        0,
+        MarketSearchCandidate {
+            name: query.to_string(),
+            version: None,
+            description: String::new(),
+        },
+    );
+    true
+}
+
 fn parse_manifest(raw: &str) -> Result<Value, String> {
     let value = parse_json_value(raw).map_err(|error| format!("插件清单 JSON 无效: {error}"))?;
     if let Some(items) = value.as_array() {
@@ -1066,6 +1204,28 @@ mod tests {
         ] {
             assert!(validate_market_package_name(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn adds_exact_market_query_when_search_index_omits_it() {
+        let mut candidates = vec![MarketSearchCandidate {
+            name: "@p-dsh-market/other".to_string(),
+            version: Some("1.0.0".to_string()),
+            description: String::new(),
+        }];
+        assert!(add_exact_query_candidate(
+            &mut candidates,
+            "@p-dsh-market/dsh-open-workspace"
+        ));
+        assert_eq!(candidates[0].name, "@p-dsh-market/dsh-open-workspace");
+        assert!(!add_exact_query_candidate(
+            &mut candidates,
+            "@p-dsh-market/dsh-open-workspace"
+        ));
+        assert!(!add_exact_query_candidate(
+            &mut candidates,
+            "dsh-open-workspace"
+        ));
     }
 
     #[test]
