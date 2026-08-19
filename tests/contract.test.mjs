@@ -108,6 +108,7 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.deepEqual(fixture.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
   assert.equal(catalog.schemaVersion, 1)
   assert.deepEqual(catalog.packages, [
+    '@p-dsh-market/akshare-market-analysis',
     '@p-dsh-market/dsh-open-workspace',
     '@p-dsh-market/neon-agent-theme',
   ])
