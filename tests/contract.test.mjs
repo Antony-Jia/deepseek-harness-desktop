@@ -70,6 +70,9 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   const html = text('dist/index.html')
   const javascript = text('dist/app.js')
   const fixture = JSON.parse(text('plugins/dsh-market-example/package.json'))
+  const catalog = JSON.parse(text('market/catalog-v1.json'))
+  const catalogWorkflow = text('.github/workflows/market-catalog.yml')
+  const catalogValidator = text('scripts/validate-market-catalog.mjs')
 
   assert.match(mainRust, /search_market_plugins/)
   assert.match(mainRust, /install_market_plugin/)
@@ -79,7 +82,10 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.match(rust, /dsh\.client\.platform/)
   assert.match(rust, /dsh\.bundle\.patch/)
   assert.match(rust, /dsh\.market\.capabilities/)
-  assert.match(rust, /--search-limit/)
+  assert.match(rust, /MARKET_CATALOG_URL/)
+  assert.match(rust, /EMBEDDED_MARKET_CATALOG/)
+  assert.match(rust, /market-catalog-v1\.json/)
+  assert.doesNotMatch(rust, /"--search-limit"\.to_string\(\)/)
   assert.match(rust, /pnpm\.cmd/)
   assert.match(rust, /DSH_HOME/)
   assert.match(html, /titlebar-market/)
@@ -94,6 +100,11 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.equal(fixture.dsh.client.platform, 'web')
   assert.equal(fixture.dsh.bundle.patch, './cordis.patch.yml')
   assert.deepEqual(fixture.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
+  assert.equal(catalog.schemaVersion, 1)
+  assert.deepEqual(catalog.packages, ['@p-dsh-market/dsh-open-workspace'])
+  assert.match(catalogWorkflow, /schedule:/)
+  assert.match(catalogWorkflow, /validate-market-catalog\.mjs/)
+  assert.match(catalogValidator, /function npmView/)
 })
 
 test('workspace market plugin is a floating, protocol-contributing package', () => {

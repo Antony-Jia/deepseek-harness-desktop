@@ -2,7 +2,7 @@ use crate::{
     runtime::{LocalRuntime, RuntimeManager},
     state::PersistedState,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,11 +18,17 @@ use std::{
 pub const MARKET_SCOPE: &str = "@p-dsh-market/";
 pub const PINNED_PNPM_VERSION: &str = "10.12.4";
 
+const MARKET_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/Antony-Jia/deepseek-harness-desktop/main/market/catalog-v1.json";
+const EMBEDDED_MARKET_CATALOG: &str = include_str!("../../market/catalog-v1.json");
 const MAX_QUERY_LENGTH: usize = 120;
 const MAX_PACKAGE_NAME_LENGTH: usize = 128;
 const MAX_VERSION_LENGTH: usize = 128;
+const MAX_CATALOG_BYTES: usize = 128 * 1024;
+const MAX_CATALOG_PACKAGES: usize = 50;
 const MAX_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024;
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +131,19 @@ pub struct MarketSearchCandidate {
     pub description: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MarketCatalog {
+    schema_version: u32,
+    packages: Vec<String>,
+}
+
+#[derive(Debug)]
+struct LoadedMarketCatalog {
+    packages: Vec<String>,
+    source: &'static str,
+}
+
 #[derive(Debug, Clone)]
 struct PnpmTool {
     executable: PathBuf,
@@ -150,6 +169,7 @@ struct CommandResult {
 pub struct MarketManager {
     tools_dir: PathBuf,
     logs_dir: PathBuf,
+    catalog_cache: PathBuf,
     pnpm_lock: Mutex<()>,
 }
 
@@ -158,6 +178,7 @@ impl MarketManager {
         Self {
             tools_dir: base_dir.join("tools"),
             logs_dir: base_dir.join("logs"),
+            catalog_cache: base_dir.join("market-catalog-v1.json"),
             pnpm_lock: Mutex::new(()),
         }
     }
@@ -176,6 +197,45 @@ impl MarketManager {
         {
             let _ = file.write_all(line.as_bytes());
         }
+    }
+
+    fn load_catalog(&self) -> Result<LoadedMarketCatalog, String> {
+        match fetch_market_catalog() {
+            Ok(raw) => match parse_market_catalog(&raw) {
+                Ok(packages) => {
+                    if let Some(parent) = self.catalog_cache.parent() {
+                        if let Err(error) = fs::create_dir_all(parent) {
+                            self.debug_log(format!("catalog cache directory failed: {error}"));
+                        } else if let Err(error) = fs::write(&self.catalog_cache, raw) {
+                            self.debug_log(format!("catalog cache write failed: {error}"));
+                        }
+                    }
+                    return Ok(LoadedMarketCatalog {
+                        packages,
+                        source: "remote",
+                    });
+                }
+                Err(error) => self.debug_log(format!("remote catalog rejected: {error}")),
+            },
+            Err(error) => self.debug_log(format!("remote catalog unavailable: {error}")),
+        }
+
+        if let Ok(raw) = fs::read_to_string(&self.catalog_cache) {
+            match parse_market_catalog(&raw) {
+                Ok(packages) => {
+                    return Ok(LoadedMarketCatalog {
+                        packages,
+                        source: "cache",
+                    })
+                }
+                Err(error) => self.debug_log(format!("cached catalog rejected: {error}")),
+            }
+        }
+
+        Ok(LoadedMarketCatalog {
+            packages: parse_market_catalog(EMBEDDED_MARKET_CATALOG)?,
+            source: "embedded",
+        })
     }
 
     pub async fn search(
@@ -240,60 +300,35 @@ impl MarketManager {
             }
         };
 
-        let search_term = if query.is_empty() {
-            MARKET_SCOPE.to_string()
-        } else {
-            query.clone()
-        };
-        self.debug_log(format!(
-            "market search term={search_term:?} profile=web search_limit=50"
-        ));
-        let search_result = self.run_dsh(
-            &selected,
-            &pnpm,
-            dsh_home,
-            &[
-                "search".to_string(),
-                search_term,
-                "--json".to_string(),
-                "--search-limit".to_string(),
-                "50".to_string(),
-            ],
-        )?;
-        if let Err(error) = ensure_command_success("插件搜索", &search_result) {
-            self.debug_log(format!("market search command failed: {error}"));
-            return Err(error);
-        }
-        let search_output = combined_output(&search_result);
-        let mut candidates = match parse_search_json(&search_output) {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                self.debug_log(format!(
-                    "market search JSON parse failed: {error}; output={}",
-                    truncate_log(&sanitize_log(&search_output))
-                ));
-                return Err(error);
-            }
-        };
+        let catalog = self.load_catalog()?;
+        let catalog_source = catalog.source;
+        let mut candidates = catalog
+            .packages
+            .into_iter()
+            .map(|name| MarketSearchCandidate {
+                name,
+                version: None,
+                description: String::new(),
+            })
+            .collect::<Vec<_>>();
         if add_exact_query_candidate(&mut candidates, &query) {
             self.debug_log(format!(
-                "search result omitted exact market package {query}; adding direct view fallback"
+                "catalog omitted exact market package {query}; adding direct view fallback"
             ));
         }
         let candidate_names = candidates
             .iter()
-            .take(80)
             .map(|candidate| candidate.name.as_str())
             .collect::<Vec<_>>();
         self.debug_log(format!(
-            "market search parsed candidates={} names={candidate_names:?}",
+            "market catalog source={catalog_source} candidates={} names={candidate_names:?}",
             candidates.len()
         ));
 
         let mut plugins = BTreeMap::new();
         let mut rejected = 0_usize;
         let mut out_of_scope = 0_usize;
-        for candidate in candidates.into_iter().take(50) {
+        for candidate in candidates.into_iter().take(MAX_CATALOG_PACKAGES) {
             if validate_market_package_name(&candidate.name).is_err() {
                 out_of_scope += 1;
                 continue;
@@ -342,7 +377,9 @@ impl MarketManager {
                 installed: false,
                 installed_version: None,
             };
-            plugins.insert(plugin.name.clone(), plugin);
+            if market_plugin_matches_query(&plugin, &query) {
+                plugins.insert(plugin.name.clone(), plugin);
+            }
         }
 
         let list_result = self.run_dsh(
@@ -373,17 +410,24 @@ impl MarketManager {
             }
         }
 
-        let message = if plugins.is_empty() {
+        let mut messages = Vec::new();
+        if catalog_source == "cache" {
+            messages.push("远程市场目录暂不可用，当前使用本地缓存。".to_string());
+        } else if catalog_source == "embedded" {
+            messages.push("远程市场目录暂不可用，当前使用内置目录。".to_string());
+        }
+        if plugins.is_empty() {
             if rejected > 0 {
-                format!("没有找到符合市场协议的插件，已过滤 {rejected} 个候选包。")
+                messages.push(format!(
+                    "没有找到符合市场协议的插件，已过滤 {rejected} 个候选包。"
+                ));
             } else {
-                "没有找到符合条件的插件。".to_string()
+                messages.push("没有找到符合条件的插件。".to_string());
             }
         } else if rejected > 0 {
-            format!("已过滤 {rejected} 个不符合市场协议的候选包。")
-        } else {
-            String::new()
-        };
+            messages.push(format!("已过滤 {rejected} 个不符合市场协议的候选包。"));
+        }
+        let message = messages.join(" ");
         self.debug_log(format!(
             "search complete query={query:?} accepted={} rejected_manifest_or_view={} out_of_scope={} message={message:?}",
             plugins.len(),
@@ -935,6 +979,71 @@ fn combined_output(result: &CommandResult) -> String {
     }
 }
 
+fn fetch_market_catalog() -> Result<String, String> {
+    let response = ureq::get(MARKET_CATALOG_URL)
+        .set("Accept", "application/json")
+        .set("User-Agent", "dsh-desktop-market")
+        .timeout(CATALOG_TIMEOUT)
+        .call()
+        .map_err(|error| format!("请求 GitHub Catalog 失败: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take((MAX_CATALOG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("读取 GitHub Catalog 失败: {error}"))?;
+    if bytes.len() > MAX_CATALOG_BYTES {
+        return Err(format!(
+            "GitHub Catalog 超过 {MAX_CATALOG_BYTES} 字节限制。"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("GitHub Catalog 不是 UTF-8: {error}"))
+}
+
+fn parse_market_catalog(raw: &str) -> Result<Vec<String>, String> {
+    if raw.len() > MAX_CATALOG_BYTES {
+        return Err(format!("市场目录超过 {MAX_CATALOG_BYTES} 字节限制。"));
+    }
+    let catalog: MarketCatalog =
+        serde_json::from_str(raw).map_err(|error| format!("市场目录 JSON 无效: {error}"))?;
+    if catalog.schema_version != 1 {
+        return Err(format!(
+            "不支持市场目录 schemaVersion {}。",
+            catalog.schema_version
+        ));
+    }
+    if catalog.packages.len() > MAX_CATALOG_PACKAGES {
+        return Err(format!("市场目录不能超过 {MAX_CATALOG_PACKAGES} 个插件。"));
+    }
+    let mut packages = BTreeSet::new();
+    for name in catalog.packages {
+        validate_market_package_name(&name)?;
+        if !packages.insert(name.clone()) {
+            return Err(format!("市场目录包含重复插件: {name}"));
+        }
+    }
+    Ok(packages.into_iter().collect())
+}
+
+fn market_plugin_matches_query(plugin: &MarketPlugin, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty()
+        || matches!(
+            query.as_str(),
+            "@p-dsh-market" | "@p-dsh-market/" | "@p-dsh-market/*"
+        )
+    {
+        return true;
+    }
+    plugin.name.to_ascii_lowercase().contains(&query)
+        || plugin.display_name.to_ascii_lowercase().contains(&query)
+        || plugin.description.to_ascii_lowercase().contains(&query)
+        || plugin
+            .capabilities
+            .iter()
+            .any(|capability| capability.to_ascii_lowercase().contains(&query))
+}
+
 pub fn normalize_query(query: &str) -> Result<String, String> {
     let query = query.trim();
     if query.chars().count() > MAX_QUERY_LENGTH {
@@ -979,31 +1088,6 @@ pub fn validate_market_version(version: &str) -> Result<(), String> {
         return Err(format!("非法插件版本: {version}"));
     }
     Ok(())
-}
-
-pub fn parse_search_json(raw: &str) -> Result<Vec<MarketSearchCandidate>, String> {
-    let mut line_values = Vec::new();
-    for line in raw.lines() {
-        if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
-            if value.is_array() {
-                line_values.extend(search_values(&value).into_iter().cloned());
-            } else if value.is_object() {
-                line_values.push(value);
-            }
-        }
-    }
-    if !line_values.is_empty() {
-        return Ok(line_values
-            .iter()
-            .filter_map(candidate_from_value)
-            .collect());
-    }
-    let value = parse_json_value(raw).map_err(|error| format!("插件搜索 JSON 无效: {error}"))?;
-    let values = search_values(&value);
-    Ok(values
-        .into_iter()
-        .filter_map(candidate_from_value)
-        .collect())
 }
 
 pub fn validate_market_manifest(
@@ -1359,42 +1443,6 @@ fn parse_json_value(raw: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str(trimmed)
 }
 
-fn search_values(value: &Value) -> Vec<&Value> {
-    if let Some(items) = value.as_array() {
-        return items.iter().collect();
-    }
-    if let Some(object) = value.as_object() {
-        for key in ["objects", "packages", "results", "items"] {
-            if let Some(items) = object.get(key).and_then(Value::as_array) {
-                return items.iter().collect();
-            }
-        }
-    }
-    vec![value]
-}
-
-fn candidate_from_value(value: &Value) -> Option<MarketSearchCandidate> {
-    let object = value.as_object()?;
-    let nested = object.get("package").and_then(Value::as_object);
-    let source = nested.unwrap_or(object);
-    let name = source.get("name").and_then(Value::as_str)?.to_string();
-    let version = source
-        .get("version")
-        .or_else(|| source.get("latest"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let description = source
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    Some(MarketSearchCandidate {
-        name,
-        version,
-        description,
-    })
-}
-
 fn add_exact_query_candidate(candidates: &mut Vec<MarketSearchCandidate>, query: &str) -> bool {
     if validate_market_package_name(query).is_err()
         || candidates.iter().any(|candidate| candidate.name == query)
@@ -1566,7 +1614,48 @@ mod tests {
     }
 
     #[test]
-    fn adds_exact_market_query_when_search_index_omits_it() {
+    fn validates_embedded_market_catalog() {
+        let packages = parse_market_catalog(EMBEDDED_MARKET_CATALOG)
+            .expect("embedded market catalog should be valid");
+        assert_eq!(
+            packages,
+            vec!["@p-dsh-market/dsh-open-workspace".to_string()]
+        );
+        assert!(parse_market_catalog(
+            r#"{"schemaVersion":2,"packages":["@p-dsh-market/example"]}"#
+        )
+        .is_err());
+        assert!(parse_market_catalog(
+            r#"{"schemaVersion":1,"packages":["@p-dsh-market/example","@p-dsh-market/example"]}"#
+        )
+        .is_err());
+        assert!(
+            parse_market_catalog(r#"{"schemaVersion":1,"packages":["@other/example"]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_scope_queries_list_all_and_keywords_filter_plugins() {
+        let plugin = MarketPlugin {
+            name: "@p-dsh-market/dsh-open-workspace".to_string(),
+            display_name: "工作区文件浏览器".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Markdown 预览".to_string(),
+            capabilities: vec!["desktop-shell".to_string()],
+            installed: false,
+            installed_version: None,
+        };
+        for query in ["", "@p-dsh-market", "@p-dsh-market/", "@p-dsh-market/*"] {
+            assert!(market_plugin_matches_query(&plugin, query));
+        }
+        assert!(market_plugin_matches_query(&plugin, "workspace"));
+        assert!(market_plugin_matches_query(&plugin, "markdown"));
+        assert!(market_plugin_matches_query(&plugin, "desktop-shell"));
+        assert!(!market_plugin_matches_query(&plugin, "terminal-theme"));
+    }
+
+    #[test]
+    fn adds_exact_market_query_when_catalog_omits_it() {
         let mut candidates = vec![MarketSearchCandidate {
             name: "@p-dsh-market/other".to_string(),
             version: Some("1.0.0".to_string()),
@@ -1588,22 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_search_array_and_ignores_malformed_entries_later() {
-        let parsed = parse_search_json(
-            r#"[{"name":"@p-dsh-market/example","version":"1.0.0","description":"ok"},{"name":3},"bad"]"#,
-        )
-        .expect("search JSON should parse");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].name, "@p-dsh-market/example");
-    }
-
-    #[test]
-    fn parses_newline_delimited_json_and_json_with_trailing_logs() {
-        let parsed = parse_search_json(
-            "{\"name\":\"@p-dsh-market/one\",\"version\":\"1.0.0\"}\n{\"name\":\"@p-dsh-market/two\",\"version\":\"2.0.0\"}\n",
-        )
-        .expect("NDJSON should parse");
-        assert_eq!(parsed.len(), 2);
+    fn parses_manifest_json_with_trailing_logs() {
         let manifest = parse_manifest(
             "{\"name\":\"@p-dsh-market/example\",\"version\":\"1.2.3\"}\nwarning: done",
         )

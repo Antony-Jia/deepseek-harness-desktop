@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    "@p-dsh-market/dsh-open-workspace"
+  ]
+}
