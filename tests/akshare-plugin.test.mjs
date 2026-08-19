@@ -25,7 +25,7 @@ const text = (relativePath) => readFileSync(`${root}/${relativePath}`, 'utf8')
 test('AKShare package manifest and bundle patch are complete', () => {
   const manifest = JSON.parse(text('market/akshare-market-analysis/package.json'))
   assert.equal(manifest.name, PLUGIN_ID)
-  assert.equal(manifest.version, '0.1.0')
+  assert.equal(manifest.version, '0.1.1')
   assert.equal(manifest.main, 'lib/index.js')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.protocolVersion, 1)
@@ -93,7 +93,7 @@ test('host registers a skill, three tools, and a health route with reversible ef
   }
   const plugin = createHost({ manager })
   const returned = plugin.apply(ctx)
-  assert.equal(returned, manager)
+  assert.equal(returned, undefined)
   assert.equal(skills.length, 1)
   assert.equal(tools.length, 3)
   assert.equal(routes[0].path, '/akshare-market/health')

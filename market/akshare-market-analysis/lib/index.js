@@ -242,6 +242,13 @@ function jsonResponse(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
+function registrationEffect(register, value) {
+  return () => {
+    const disposer = register(value)
+    return typeof disposer === 'function' ? disposer : undefined
+  }
+}
+
 function endpointFor(name) {
   if (name === TOOL_NAMES.snapshot) return '/v1/market/snapshot'
   if (name === TOOL_NAMES.history) return '/v1/stock/history'
@@ -266,7 +273,7 @@ export function createHost(options = {}) {
         requestImpl: options.requestImpl
       })
 
-      if (skills?.register) ctx.effect(() => skills.register({
+      if (skills?.register) ctx.effect(registrationEffect(skills.register.bind(skills), {
         name: 'akshare-market-analysis',
         description: '使用固定 AKShare 数据源查询 A 股或港股行情并分析 K 线。',
         whenToUse: '用户询问股票行情、历史走势、K 线、技术指标或要求对比筛选时。',
@@ -282,10 +289,10 @@ export function createHost(options = {}) {
             : normalizeHistoryArgs(args, { analysis: name === TOOL_NAMES.analysis })
           return manager.request(endpointFor(name), normalized, exec?.signal)
         })
-        for (const definition of definitions) ctx.effect(() => tools.register(definition))
+        for (const definition of definitions) ctx.effect(registrationEffect(tools.register.bind(tools), definition))
       }
 
-      if (webServer?.register) ctx.effect(() => webServer.register({
+      if (webServer?.register) ctx.effect(registrationEffect(webServer.register.bind(webServer), {
         kind: 'exact',
         path: '/akshare-market/health',
         handler: async (_req, res) => {
@@ -299,7 +306,6 @@ export function createHost(options = {}) {
       }))
 
       ctx.effect(() => () => { void manager.dispose() })
-      return manager
     }
   }
 }

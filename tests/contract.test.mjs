@@ -128,7 +128,7 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   const javascript = text('dist/app.js')
 
   assert.equal(manifest.name, '@p-dsh-market/dsh-open-workspace')
-  assert.equal(manifest.version, '0.1.6')
+  assert.equal(manifest.version, '0.1.7')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.exports['./cordis.patch.yml'], './cordis.patch.yml')
   assert.equal(manifest.dsh.client.platform, 'web')
@@ -152,8 +152,8 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   assert.match(client, /var inject = \['slots', 'workspaces', 'sessions', 'timer'\]/)
   assert.match(client, /sessions && sessions\.list/)
   assert.match(client, /snapshot\.current/)
-  assert.match(client, /currentSession\.cwd/)
-  assert.match(client, /var root = sessionRoot \|\| snap\.root/)
+  assert.match(client, /useSessions\(function \(snapshot\)/)
+  assert.match(client, /var root = sessionRoot === undefined \? snap\.root : sessionRoot/)
   assert.match(client, /ctx\.slots\.inject\('shell\.overlay'/)
   assert.match(client, /name: 'shell\.overlay', id: 'open-workspace-floating'/)
   assert.match(client, /owsp-float-resize/)
@@ -183,6 +183,34 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   assert.match(javascript, /desktop\.titlebar\.workspaceActions/)
   assert.match(rust, /fn get_desktop_contributions/)
   assert.match(desktopRust, /DESKTOP_TITLEBAR_WORKSPACE_ACTIONS/)
+})
+
+test('workspace plugin resolves cwd from the selected conversation', () => {
+  const source = text('market/dsh-open-workspace/lib/client.js')
+  let moduleExports
+  vm.runInNewContext(source, {
+    Symbol,
+    window: {
+      __ModuleLoader__: {
+        load: (entry) => {
+          moduleExports = entry.factory((name) => name === 'react' ? {} : undefined)
+        },
+      },
+    },
+  })
+
+  const sessions = {
+    current: 'conversation-a',
+    byId: {
+      'conversation-a': { id: 'conversation-a', cwd: 'D:\\Code\\alpha' },
+      'conversation-b': { id: 'conversation-b', cwd: 'D:\\Code\\beta' },
+      'conversation-empty': { id: 'conversation-empty' },
+    },
+  }
+  assert.equal(moduleExports.resolveSessionCwd(sessions), 'D:\\Code\\alpha')
+  assert.equal(moduleExports.resolveSessionCwd({ ...sessions, current: 'conversation-b' }), 'D:\\Code\\beta')
+  assert.equal(moduleExports.resolveSessionCwd({ ...sessions, current: 'conversation-empty' }), null)
+  assert.equal(moduleExports.resolveSessionCwd(null), undefined)
 })
 
 test('splash page exposes recovery actions', () => {

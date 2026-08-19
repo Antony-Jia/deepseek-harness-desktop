@@ -14,7 +14,7 @@ DSH 市场插件：通过受控 AKShare sidecar 提供 A 股/港股实时快照�
 ## 安装与挂载
 
 ```powershell
-dsh plugin --profile web add @p-dsh-market/akshare-market-analysis@0.1.0
+dsh plugin --profile web add @p-dsh-market/akshare-market-analysis@0.1.1
 ```
 
 安装后将包内 `cordis.patch.yml` 的 insert 挂载到 web profile。市场安装器会在安装后提示重启 DSH。

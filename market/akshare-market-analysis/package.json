@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/akshare-market-analysis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH AKShare A股/港股行情、历史K线与描述性技术分析插件",
   "keywords": [
     "dsh",

@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
       React.useEffect(function () { return subscribe(function () { setSnap(getState()) }) }, [])
       return snap
     }
-    function useCurrentSession(sessions) {
+    function useSessionList(sessions) {
       var source = sessions && sessions.list
       var pair = React.useState(function () {
         return source && typeof source.getSnapshot === 'function' ? source.getSnapshot() : null
@@ -83,8 +83,32 @@ window.__ModuleLoader__.load({
         update()
         return source.subscribe(update)
       }, [source])
-      var currentId = snapshot && snapshot.current
-      return currentId && snapshot.byId ? snapshot.byId[currentId] || null : null
+      return snapshot
+    }
+    function resolveSessionCwd(snapshot, sessionId) {
+      if (!snapshot || !snapshot.byId) return undefined
+      var currentId = sessionId || snapshot.current || snapshot.currentId
+      if (currentId && typeof currentId === 'object') currentId = currentId.id
+      if (!currentId) return undefined
+      var session = snapshot.byId[currentId]
+      if (!session) return undefined
+      var cwd = typeof session.cwd === 'string'
+        ? session.cwd
+        : (session.header && typeof session.header.cwd === 'string' ? session.header.cwd : null)
+      return cwd && cwd.trim() !== '' ? cwd : null
+    }
+    function useCurrentSessionCwd(props) {
+      var sessions = props && props.sessions
+      var fallbackSnapshot = useSessionList(sessions)
+      var useSessions = props && props.useSessions
+      var sessionId = props && props.sessionId
+      if (typeof useSessions === 'function') {
+        return useSessions(function (snapshot) { return resolveSessionCwd(snapshot, sessionId) })
+      }
+      var resolved = resolveSessionCwd(fallbackSnapshot, sessionId)
+      if (resolved !== undefined) return resolved
+      var ownerCwd = props && props.session && props.session.header && props.session.header.cwd
+      return typeof ownerCwd === 'string' && ownerCwd.trim() !== '' ? ownerCwd : undefined
     }
     function getTerminalState() { return terminalStore }
     function setTerminalState(patch) {
@@ -496,11 +520,8 @@ window.__ModuleLoader__.load({
     }
     function TerminalPanel(props) {
       var snap = useTerminalState()
-      var currentSession = useCurrentSession(props && props.sessions)
-      var sessionCwd = currentSession && currentSession.cwd
-        ? currentSession.cwd
-        : (props && props.session && props.session.header ? props.session.header.cwd : null)
-      var cwd = sessionCwd || snap.cwd || null
+      var sessionCwd = useCurrentSessionCwd(props)
+      var cwd = sessionCwd === undefined ? (snap.cwd || null) : sessionCwd
       var outputPair = React.useState('')
       var output = outputPair[0]
       var setOutput = outputPair[1]
@@ -622,7 +643,6 @@ window.__ModuleLoader__.load({
 
     function FloatingWorkspacePanel(props) {
       var ctx = props && props.ctx
-      var currentSession = useCurrentSession(props && props.sessions)
       var snap = usePanelState()
       var directoriesPair = React.useState({})
       var directories = directoriesPair[0]
@@ -639,10 +659,11 @@ window.__ModuleLoader__.load({
       var activePair = React.useState(null)
       var active = activePair[0]
       var setActive = activePair[1]
-      var sessionRoot = currentSession && typeof currentSession.cwd === 'string' && currentSession.cwd.trim() !== ''
-        ? currentSession.cwd
-        : null
-      var root = sessionRoot || snap.root
+      var sessionRoot = useCurrentSessionCwd(props)
+      // The desktop-supplied root is only a bootstrap fallback. Once the DSH
+      // session list resolves, its selected conversation (including an
+      // explicit "no cwd" value) is authoritative.
+      var root = sessionRoot === undefined ? snap.root : sessionRoot
 
       function loadDirectory(path, force) {
         if (!path) return
@@ -962,13 +983,14 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('shell.overlay', function () {
         return ctx.slots.register(
           { name: 'shell.overlay', id: 'open-workspace-floating', order: 40, label: '工作区文件浏览器' },
-          function () { return React.createElement(FloatingWorkspacePanel, { ctx: ctx, sessions: sessions }) }
+          function (props) { return React.createElement(FloatingWorkspacePanel, Object.assign({}, props, { ctx: ctx, sessions: sessions })) }
         )
       })
     }
 
     exports.inject = inject
     exports.apply = apply
+    exports.resolveSessionCwd = resolveSessionCwd
     return module.exports
   }
 })

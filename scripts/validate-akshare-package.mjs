@@ -9,7 +9,7 @@ const read = (relativePath) => readFileSync(path.join(packageRoot, relativePath)
 const manifest = JSON.parse(read('package.json'))
 
 assert.equal(manifest.name, '@p-dsh-market/akshare-market-analysis')
-assert.match(manifest.version, /^0\.1\.0$/)
+assert.match(manifest.version, /^0\.1\.1$/)
 assert.equal(manifest.main, 'lib/index.js')
 assert.equal(manifest.exports['./client'], './lib/client.js')
 assert.equal(manifest.exports['./cordis.patch.yml'], './cordis.patch.yml')

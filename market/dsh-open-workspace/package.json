@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/dsh-open-workspace",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "DSH 工作区文件浏览器：悬浮层级目录、Markdown/代码/HTML 预览与工作区终端",
   "keywords": [
     "dsh",
