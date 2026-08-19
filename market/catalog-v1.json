@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "packages": [
-    "@p-dsh-market/dsh-open-workspace"
+    "@p-dsh-market/dsh-open-workspace",
+    "@p-dsh-market/neon-agent-theme"
   ]
 }

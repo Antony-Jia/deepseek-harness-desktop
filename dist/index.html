@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div id="theme-background" aria-hidden="true"></div>
     <header class="titlebar">
       <div id="titlebar-drag" class="titlebar-drag">
         <button id="titlebar-home" class="titlebar-brand titlebar-home" type="button" title="DSH 未启动，无法切换页面" aria-label="切换首页和 DSH 页面" disabled>
@@ -84,8 +85,8 @@
 
       <section class="card appearance-card">
         <div>
-          <p class="eyebrow">外观</p>
-          <h2>主题模式</h2>
+          <p class="eyebrow">外观模式</p>
+          <h2>亮色、暗色或跟随系统</h2>
           <p id="theme-message" class="muted">跟随系统主题。</p>
         </div>
         <div class="theme-options" role="radiogroup" aria-label="主题模式">
@@ -93,6 +94,40 @@
           <button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false">暗色</button>
           <button class="theme-option" type="button" data-theme-choice="system" aria-pressed="false">跟随系统</button>
         </div>
+      </section>
+
+      <section class="card skin-card">
+        <div class="skin-heading">
+          <div>
+            <p class="eyebrow">界面皮肤</p>
+            <h2>受控 Theme Pack</h2>
+            <p id="skin-message" class="muted">默认主题不读取外部资源。</p>
+          </div>
+          <span id="skin-status-pill" class="pill neutral">默认主题</span>
+        </div>
+        <div id="skin-options" class="skin-options" role="list" aria-label="界面皮肤"></div>
+        <div class="skin-preferences">
+          <label class="range-control" for="background-intensity">
+            <span>背景强度</span>
+            <input id="background-intensity" type="range" min="0" max="1" step="0.01" value="0.32" />
+            <output id="background-intensity-value" for="background-intensity">32%</output>
+          </label>
+          <label class="effects-toggle">
+            <input id="reduce-effects" type="checkbox" />
+            <span>减少光晕和模糊效果</span>
+          </label>
+        </div>
+        <div id="theme-preview-banner" class="theme-preview-banner" hidden>
+          <div>
+            <strong id="theme-preview-title">正在预览主题</strong>
+            <span id="theme-preview-countdown">15 秒后自动恢复</span>
+          </div>
+          <div class="theme-preview-actions">
+            <button id="confirm-theme-preview" class="button primary" type="button">保留主题</button>
+            <button id="cancel-theme-preview" class="button secondary" type="button">取消预览</button>
+          </div>
+        </div>
+        <button id="reset-theme" class="button ghost reset-theme" type="button">恢复默认主题</button>
       </section>
 
       <section id="update-card" class="card update-card" hidden>
@@ -148,12 +183,12 @@
 
         <section class="card market-search-card">
           <form id="market-search-form" class="market-search" autocomplete="off">
-            <label class="market-search-label" for="market-query">搜索市场插件</label>
+            <label class="market-search-label" for="market-query">搜索市场插件或主题包</label>
             <div class="market-search-row">
-              <input id="market-query" class="market-query" type="search" maxlength="120" placeholder="输入插件名称或关键词，留空列出远程目录" />
+              <input id="market-query" class="market-query" type="search" maxlength="120" placeholder="输入插件、主题包名称或关键词，留空列出远程目录" />
               <button id="market-search-button" class="button primary" type="submit">搜索</button>
             </div>
-            <p class="muted market-search-hint">目录由 GitHub 远程更新，仅展示属于 <code>@p-dsh-market</code> scope 且通过清单协议校验的公开插件。</p>
+            <p class="muted market-search-hint">目录由 GitHub 远程更新，仅展示属于 <code>@p-dsh-market</code> scope 且通过清单协议校验的公开插件和主题包。</p>
           </form>
         </section>
 
@@ -162,7 +197,7 @@
 
         <section id="market-operation-card" class="card market-operation" hidden aria-live="polite">
           <div>
-            <p class="eyebrow">插件操作</p>
+            <p class="eyebrow">插件/主题包操作</p>
             <h2 id="market-operation-title">正在处理</h2>
             <p id="market-operation-message" class="muted"></p>
           </div>

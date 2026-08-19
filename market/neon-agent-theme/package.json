@@ -1,0 +1,49 @@
+{
+  "name": "@p-dsh-market/neon-agent-theme",
+  "version": "0.1.1",
+  "description": "DSH 声明式 Neon Agent 主题包，提供受控语义 token 与本地背景资源。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./theme": "./theme/theme.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "theme/theme.json",
+    "assets/background.png",
+    "assets/preview.png",
+    "cordis.patch.yml",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-ui-theme"],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "Neon Agent",
+      "capabilities": ["skills", "host", "client", "theme-pack", "desktop-theme", "web-theme"]
+    },
+    "theme": {
+      "schemaVersion": 1,
+      "id": "neon-agent",
+      "displayName": "Neon Agent",
+      "entry": "./theme/theme.json",
+      "preview": "./assets/preview.png",
+      "supportedAppearances": ["dark"]
+    }
+  }
+}

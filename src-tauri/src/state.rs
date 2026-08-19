@@ -11,6 +11,8 @@ pub const RUNTIME_SOURCE_LOCAL: &str = "local";
 pub const THEME_LIGHT: &str = "light";
 pub const THEME_DARK: &str = "dark";
 pub const THEME_SYSTEM: &str = "system";
+pub const DEFAULT_SKIN_ID: &str = "builtin.default";
+pub const DEFAULT_BACKGROUND_INTENSITY: f32 = 0.32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +46,18 @@ pub struct PersistedState {
     pub runtime_source: String,
     #[serde(default)]
     pub window_bounds: Option<WindowBounds>,
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    #[serde(default = "default_appearance_mode")]
+    pub appearance_mode: String,
+    #[serde(default = "default_skin_id")]
+    pub skin_id: String,
+    #[serde(default = "default_background_intensity")]
+    pub background_intensity: f32,
+    #[serde(default)]
+    pub reduce_effects: bool,
+    /// Compatibility-only field for state.json written by versions before
+    /// Theme Pack support. It is migrated on load and never written back.
+    #[serde(rename = "theme", default, skip_serializing)]
+    pub legacy_theme: Option<String>,
 }
 
 impl Default for PersistedState {
@@ -60,7 +72,11 @@ impl Default for PersistedState {
             notify_on_turn_end: true,
             runtime_source: RUNTIME_SOURCE_MANAGED.to_string(),
             window_bounds: None,
-            theme: THEME_SYSTEM.to_string(),
+            appearance_mode: THEME_SYSTEM.to_string(),
+            skin_id: DEFAULT_SKIN_ID.to_string(),
+            background_intensity: DEFAULT_BACKGROUND_INTENSITY,
+            reduce_effects: false,
+            legacy_theme: None,
         }
     }
 }
@@ -105,7 +121,11 @@ pub struct DesktopStatus {
     pub available: Option<String>,
     pub workspace: Option<String>,
     pub runtime_source: String,
-    pub theme: String,
+    pub appearance_mode: String,
+    pub skin_id: String,
+    pub background_intensity: f32,
+    pub reduce_effects: bool,
+    pub theme_preview_until: Option<u64>,
     pub local_runtime: Option<LocalRuntimeSummary>,
     pub versions: Vec<RuntimeSummary>,
     pub logs: Vec<String>,
@@ -125,7 +145,11 @@ impl Default for DesktopStatus {
             available: None,
             workspace: None,
             runtime_source: RUNTIME_SOURCE_MANAGED.to_string(),
-            theme: THEME_SYSTEM.to_string(),
+            appearance_mode: THEME_SYSTEM.to_string(),
+            skin_id: DEFAULT_SKIN_ID.to_string(),
+            background_intensity: DEFAULT_BACKGROUND_INTENSITY,
+            reduce_effects: false,
+            theme_preview_until: None,
             local_runtime: None,
             versions: Vec::new(),
             logs: Vec::new(),
@@ -171,17 +195,43 @@ impl StateStore {
         ) {
             state.runtime_source = RUNTIME_SOURCE_MANAGED.to_string();
         }
+        let mut migrated = false;
+        if let Some(theme) = state.legacy_theme.take() {
+            state.appearance_mode = theme;
+            migrated = true;
+        }
         if !matches!(
-            state.theme.as_str(),
+            state.appearance_mode.as_str(),
             THEME_LIGHT | THEME_DARK | THEME_SYSTEM
         ) {
-            state.theme = THEME_SYSTEM.to_string();
+            state.appearance_mode = THEME_SYSTEM.to_string();
+            migrated = true;
+        }
+        if state.skin_id.trim().is_empty() {
+            state.skin_id = DEFAULT_SKIN_ID.to_string();
+            migrated = true;
+        }
+        if !state.background_intensity.is_finite() {
+            state.background_intensity = DEFAULT_BACKGROUND_INTENSITY;
+            migrated = true;
+        }
+        let clamped_intensity = state.background_intensity.clamp(0.0, 1.0);
+        if clamped_intensity != state.background_intensity {
+            state.background_intensity = clamped_intensity;
+            migrated = true;
+        }
+        if migrated {
+            self.save_unlocked(&state)?;
         }
         Ok(state)
     }
 
     pub fn save(&self, state: &PersistedState) -> io::Result<()> {
         let _guard = self.lock.lock().expect("state lock poisoned");
+        self.save_unlocked(state)
+    }
+
+    fn save_unlocked(&self, state: &PersistedState) -> io::Result<()> {
         let parent = self.path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent")
         })?;
@@ -209,6 +259,38 @@ fn default_runtime_source() -> String {
     RUNTIME_SOURCE_MANAGED.to_string()
 }
 
-fn default_theme() -> String {
+fn default_appearance_mode() -> String {
     THEME_SYSTEM.to_string()
+}
+
+fn default_skin_id() -> String {
+    DEFAULT_SKIN_ID.to_string()
+}
+
+fn default_background_intensity() -> f32 {
+    DEFAULT_BACKGROUND_INTENSITY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn migrates_legacy_theme_into_appearance_mode_and_writes_new_shape() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dsh-state-{suffix}.json"));
+        fs::write(&path, r#"{"pinned":"0.1.0-rc.6","theme":"dark"}"#).expect("write legacy state");
+        let store = StateStore::new(path.clone());
+        let state = store.load().expect("load migrated state");
+        assert_eq!(state.appearance_mode, THEME_DARK);
+        assert_eq!(state.skin_id, DEFAULT_SKIN_ID);
+        let persisted = fs::read_to_string(&path).expect("read migrated state");
+        assert!(persisted.contains("appearanceMode"));
+        assert!(!persisted.contains("\"theme\""));
+        let _ = fs::remove_file(path);
+    }
 }

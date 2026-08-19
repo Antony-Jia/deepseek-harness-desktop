@@ -39,8 +39,18 @@ pub struct MarketPlugin {
     pub version: String,
     pub description: String,
     pub capabilities: Vec<String>,
+    pub theme: Option<MarketTheme>,
     pub installed: bool,
     pub installed_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketTheme {
+    pub id: String,
+    pub display_name: String,
+    pub preview: Option<String>,
+    pub supported_appearances: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,6 +384,7 @@ impl MarketManager {
                     manifest.description
                 },
                 capabilities: manifest.capabilities,
+                theme: manifest.theme,
                 installed: false,
                 installed_version: None,
             };
@@ -1175,6 +1186,7 @@ pub fn validate_market_manifest(
         }
     }
     let desktop = validate_desktop_manifest(dsh, &capabilities, expected_name)?;
+    let theme = validate_theme_market_manifest(dsh, &capabilities)?;
     Ok(MarketManifestPublic {
         name: actual_name,
         version,
@@ -1182,6 +1194,7 @@ pub fn validate_market_manifest(
         description: string_field(manifest, "description").unwrap_or_default(),
         capabilities,
         desktop,
+        theme,
     })
 }
 
@@ -1193,6 +1206,109 @@ pub struct MarketManifestPublic {
     pub description: String,
     pub capabilities: Vec<String>,
     pub desktop: Option<DesktopManifestPublic>,
+    pub theme: Option<MarketTheme>,
+}
+
+fn validate_theme_market_manifest(
+    dsh: &serde_json::Map<String, Value>,
+    capabilities: &[String],
+) -> Result<Option<MarketTheme>, String> {
+    let has_theme_capability = capabilities.iter().any(|item| item == "theme-pack");
+    let Some(theme_value) = dsh.get("theme") else {
+        if has_theme_capability {
+            return Err("声明 theme-pack capability 时必须提供 dsh.theme。".to_string());
+        }
+        return Ok(None);
+    };
+    if !has_theme_capability {
+        return Err("声明 dsh.theme 时必须包含 theme-pack capability。".to_string());
+    }
+    if dsh.get("protocolVersion").and_then(Value::as_u64)
+        != Some(u64::from(DESKTOP_PROTOCOL_VERSION))
+    {
+        return Err(format!(
+            "主题包必须声明 dsh.protocolVersion: {DESKTOP_PROTOCOL_VERSION}。"
+        ));
+    }
+    let theme = theme_value
+        .as_object()
+        .ok_or_else(|| "dsh.theme 必须是对象。".to_string())?;
+    if theme.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("dsh.theme.schemaVersion 必须为 1。".to_string());
+    }
+    let id = theme
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "dsh.theme.id 必须是非空字符串。".to_string())?;
+    if id.chars().count() > 80
+        || !id.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
+    {
+        return Err("dsh.theme.id 只能包含小写字母、数字、点、下划线和连字符。".to_string());
+    }
+    let display_name = theme
+        .get("displayName")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "dsh.theme.displayName 必须是非空字符串。".to_string())?;
+    if display_name.chars().count() > 512 {
+        return Err("dsh.theme.displayName 过长。".to_string());
+    }
+    let entry = theme
+        .get("entry")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "dsh.theme.entry 必须是非空字符串。".to_string())?;
+    validate_theme_package_path("dsh.theme.entry", entry)?;
+    let preview = theme
+        .get("preview")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(preview) = preview.as_deref() {
+        validate_theme_package_path("dsh.theme.preview", preview)?;
+    }
+    let supported_appearances = match theme.get("supportedAppearances") {
+        None => vec!["dark".to_string()],
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| "dsh.theme.supportedAppearances 必须是字符串数组。".to_string())?
+            .iter()
+            .map(|value| {
+                let appearance = value.as_str().ok_or_else(|| {
+                    "dsh.theme.supportedAppearances 必须只包含字符串。".to_string()
+                })?;
+                if appearance != "dark" && appearance != "light" {
+                    return Err(
+                        "dsh.theme.supportedAppearances 只能包含 dark 或 light。".to_string()
+                    );
+                }
+                Ok(appearance.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    };
+    if supported_appearances.is_empty() {
+        return Err("dsh.theme.supportedAppearances 不能为空。".to_string());
+    }
+    Ok(Some(MarketTheme {
+        id: id.to_string(),
+        display_name: display_name.to_string(),
+        preview,
+        supported_appearances,
+    }))
+}
+
+fn validate_theme_package_path(field: &str, value: &str) -> Result<(), String> {
+    if value.chars().count() > 256
+        || value.contains('\0')
+        || value.contains("://")
+        || value.starts_with('/')
+        || value.starts_with('\\')
+    {
+        return Err(format!("{field} 必须是包内相对路径。"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1619,7 +1735,10 @@ mod tests {
             .expect("embedded market catalog should be valid");
         assert_eq!(
             packages,
-            vec!["@p-dsh-market/dsh-open-workspace".to_string()]
+            vec![
+                "@p-dsh-market/dsh-open-workspace".to_string(),
+                "@p-dsh-market/neon-agent-theme".to_string(),
+            ]
         );
         assert!(parse_market_catalog(
             r#"{"schemaVersion":2,"packages":["@p-dsh-market/example"]}"#
@@ -1642,6 +1761,7 @@ mod tests {
             version: "1.0.0".to_string(),
             description: "Markdown 预览".to_string(),
             capabilities: vec!["desktop-shell".to_string()],
+            theme: None,
             installed: false,
             installed_version: None,
         };
@@ -1692,6 +1812,7 @@ mod tests {
             .expect("manifest should be accepted");
         assert_eq!(result.display_name, "测试插件");
         assert_eq!(result.capabilities.len(), 3);
+        assert!(result.theme.is_none());
 
         let mut broken = manifest;
         broken["dsh"]["market"]["capabilities"] = serde_json::json!(["host", "client"]);
@@ -1724,6 +1845,30 @@ mod tests {
 
         manifest["dsh"]["desktop"]["permissions"] = serde_json::json!(["shell:titlebar"]);
         assert!(validate_market_manifest("@p-dsh-market/workspace", &manifest).is_err());
+    }
+
+    #[test]
+    fn validates_theme_pack_market_metadata() {
+        let mut manifest = valid_manifest("@p-dsh-market/theme");
+        manifest["dsh"]["protocolVersion"] = serde_json::json!(1);
+        manifest["dsh"]["market"]["capabilities"] =
+            serde_json::json!(["skills", "host", "client", "theme-pack"]);
+        manifest["dsh"]["theme"] = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "neon-agent",
+            "displayName": "Neon Agent",
+            "entry": "./theme/theme.json",
+            "preview": "./assets/preview.png",
+            "supportedAppearances": ["dark"]
+        });
+        let result = validate_market_manifest("@p-dsh-market/theme", &manifest)
+            .expect("theme pack metadata should be accepted");
+        let theme = result.theme.expect("theme metadata should be present");
+        assert_eq!(theme.id, "neon-agent");
+        assert_eq!(theme.supported_appearances, vec!["dark"]);
+
+        manifest["dsh"]["market"]["capabilities"] = serde_json::json!(["skills", "host", "client"]);
+        assert!(validate_market_manifest("@p-dsh-market/theme", &manifest).is_err());
     }
 
     #[test]

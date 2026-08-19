@@ -7,6 +7,7 @@ mod process;
 mod runtime;
 mod single_instance;
 mod state;
+mod theme;
 
 use control::ControlServer;
 use market::{
@@ -17,7 +18,8 @@ use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
 use state::{
     DesktopStatus, LocalRuntimeSummary, RuntimeSummary, StateStore, WindowBounds,
-    RUNTIME_SOURCE_LOCAL, RUNTIME_SOURCE_MANAGED, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
+    DEFAULT_BACKGROUND_INTENSITY, DEFAULT_SKIN_ID, RUNTIME_SOURCE_LOCAL, RUNTIME_SOURCE_MANAGED,
+    THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
 };
 use std::{
     collections::BTreeMap,
@@ -29,7 +31,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -51,8 +53,16 @@ pub struct DesktopContext {
     logs: Arc<Mutex<Vec<String>>>,
     start_lock: Arc<Mutex<()>>,
     market_task_lock: Arc<tauri::async_runtime::Mutex<()>>,
+    theme_preview: Arc<Mutex<Option<ThemePreview>>>,
     allow_close: Arc<AtomicBool>,
     window_save_revision: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+struct ThemePreview {
+    id: String,
+    previous_skin_id: String,
+    expires_at: u64,
 }
 
 impl DesktopContext {
@@ -82,6 +92,7 @@ impl DesktopContext {
             logs: Arc::new(Mutex::new(Vec::new())),
             start_lock: Arc::new(Mutex::new(())),
             market_task_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
+            theme_preview: Arc::new(Mutex::new(None)),
             allow_close: Arc::new(AtomicBool::new(false)),
             window_save_revision: Arc::new(AtomicU64::new(0)),
         }
@@ -125,6 +136,13 @@ pub fn run() {
             install_market_plugin,
             uninstall_market_plugin,
             set_theme,
+            list_theme_packs,
+            get_active_theme_pack,
+            preview_theme_pack,
+            confirm_theme_pack,
+            cancel_theme_preview,
+            reset_theme_pack,
+            set_background_preferences,
             minimize_window,
             toggle_maximize,
             hide_window,
@@ -664,7 +682,7 @@ async fn install_market_plugin(
     };
     let state = context.store.load().map_err(io_error)?;
     let restart_required = is_dsh_running(&context);
-    context
+    let mut result = context
         .market
         .install(
             &context.manager,
@@ -674,7 +692,36 @@ async fn install_market_plugin(
             &version,
             restart_required,
         )
-        .await
+        .await?;
+    if let Err(error) = theme::validate_installed_theme_package(&context.dsh_home, &name) {
+        let rollback = context
+            .market
+            .uninstall(
+                &context.manager,
+                &state,
+                &context.dsh_home,
+                &name,
+                restart_required,
+            )
+            .await;
+        let detail = rollback
+            .err()
+            .map(|rollback_error| format!("主题包回滚卸载也失败：{rollback_error}"))
+            .unwrap_or_else(|| "已回滚主题包安装。".to_string());
+        return Err(format!("主题包安装后校验失败：{error} {detail}"));
+    }
+    if theme::installed_theme_for_package(&context.dsh_home, &name)
+        .map_err(|error| format!("读取主题包状态失败：{error}"))?
+        .is_some()
+    {
+        result.message = if restart_required {
+            format!("已安装主题包 {name}@{version}，重启 DSH 后可在设置中预览。")
+        } else {
+            format!("已安装主题包 {name}@{version}，可在设置中预览。")
+        };
+    }
+    refresh_common(&context);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -688,7 +735,29 @@ async fn uninstall_market_plugin(
     };
     let state = context.store.load().map_err(io_error)?;
     let restart_required = is_dsh_running(&context);
-    context
+    let state_before = state.clone();
+    let preview_before = current_theme_preview(&context);
+    let theme_pack = theme::installed_theme_for_package(&context.dsh_home, &name)?;
+    let fallback_active = state.skin_id == name
+        || preview_before
+            .as_ref()
+            .is_some_and(|preview| preview.id == name)
+        || theme_pack.as_ref().is_some_and(|pack| {
+            state.skin_id == pack.id
+                || state.skin_id == pack.package_name
+                || preview_before
+                    .as_ref()
+                    .is_some_and(|preview| preview.id == pack.id)
+        });
+    if fallback_active {
+        let mut fallback = state.clone();
+        fallback.skin_id = DEFAULT_SKIN_ID.to_string();
+        context.store.save(&fallback).map_err(io_error)?;
+        cancel_theme_preview_inner(&context);
+        refresh_common(&context);
+    }
+
+    let result = context
         .market
         .uninstall(
             &context.manager,
@@ -697,7 +766,30 @@ async fn uninstall_market_plugin(
             &name,
             restart_required,
         )
-        .await
+        .await;
+    match result {
+        Ok(mut result) => {
+            if fallback_active {
+                result.message = if restart_required {
+                    format!("已卸载主题包 {name}，当前主题已回退为默认主题，重启 DSH 后生效。")
+                } else {
+                    format!("已卸载主题包 {name}，当前主题已回退为默认主题。")
+                };
+            }
+            refresh_common(&context);
+            Ok(result)
+        }
+        Err(error) => {
+            if fallback_active {
+                let _ = context.store.save(&state_before);
+                if let Ok(mut slot) = context.theme_preview.lock() {
+                    *slot = preview_before;
+                }
+                refresh_common(&context);
+            }
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -706,7 +798,141 @@ fn set_theme(context: tauri::State<'_, DesktopContext>, theme: String) -> Result
         return Err(format!("不支持的主题模式: {theme}"));
     }
     let mut state = context.store.load().map_err(io_error)?;
-    state.theme = theme;
+    state.appearance_mode = theme;
+    context.store.save(&state).map_err(io_error)?;
+    refresh_common(&context);
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemePreviewResult {
+    id: String,
+    expires_at: u64,
+    seconds: u64,
+}
+
+#[tauri::command]
+fn list_theme_packs(
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<Vec<theme::ThemePackSummary>, String> {
+    theme::list_theme_packs(&context.dsh_home)
+}
+
+#[tauri::command]
+fn get_active_theme_pack(
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<theme::ThemePackSummary, String> {
+    let state = context.store.load().map_err(io_error)?;
+    let preview = current_theme_preview(&context);
+    let id = theme::active_skin_id(&state, preview.as_ref().map(|item| item.id.as_str()));
+    theme::get_theme_pack(&context.dsh_home, &id)
+}
+
+#[tauri::command]
+fn preview_theme_pack(
+    context: tauri::State<'_, DesktopContext>,
+    id: String,
+) -> Result<ThemePreviewResult, String> {
+    let pack = theme::get_theme_pack(&context.dsh_home, &id)?;
+    if !pack.protocol_compatible || !pack.enabled {
+        return Err(pack
+            .error
+            .unwrap_or_else(|| format!("主题包 {id} 当前不可用。")));
+    }
+    let state = context.store.load().map_err(io_error)?;
+    if state.appearance_mode != THEME_SYSTEM
+        && !pack
+            .supported_appearances
+            .iter()
+            .any(|appearance| appearance == &state.appearance_mode)
+    {
+        return Err(format!(
+            "主题 {} 不支持当前 {} 外观模式，请先切换外观模式。",
+            pack.display_name, state.appearance_mode
+        ));
+    }
+    let now = now_millis();
+    let expires_at = now.saturating_add(15_000);
+    let previous_skin_id = context
+        .theme_preview
+        .lock()
+        .map_err(|_| "主题预览锁已损坏。".to_string())?
+        .as_ref()
+        .map(|item| item.previous_skin_id.clone())
+        .unwrap_or_else(|| state.skin_id.clone());
+    context
+        .theme_preview
+        .lock()
+        .map_err(|_| "主题预览锁已损坏。".to_string())?
+        .replace(ThemePreview {
+            id: pack.id.clone(),
+            previous_skin_id,
+            expires_at,
+        });
+    refresh_common(&context);
+    Ok(ThemePreviewResult {
+        id: pack.id,
+        expires_at,
+        seconds: 15,
+    })
+}
+
+#[tauri::command]
+fn confirm_theme_pack(context: tauri::State<'_, DesktopContext>, id: String) -> Result<(), String> {
+    let preview = context
+        .theme_preview
+        .lock()
+        .map_err(|_| "主题预览锁已损坏。".to_string())?
+        .clone()
+        .ok_or_else(|| "当前没有待确认的主题预览。".to_string())?;
+    if preview.expires_at <= now_millis() || preview.id != id {
+        cancel_theme_preview_inner(&context);
+        return Err("主题预览已过期，请重新预览。".to_string());
+    }
+    let mut state = context.store.load().map_err(io_error)?;
+    state.skin_id = id;
+    context.store.save(&state).map_err(io_error)?;
+    if let Ok(mut slot) = context.theme_preview.lock() {
+        *slot = None;
+    }
+    refresh_common(&context);
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_theme_preview(context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    cancel_theme_preview_inner(&context);
+    refresh_common(&context);
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_theme_pack(context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    if let Ok(mut slot) = context.theme_preview.lock() {
+        *slot = None;
+    }
+    let mut state = context.store.load().map_err(io_error)?;
+    state.skin_id = DEFAULT_SKIN_ID.to_string();
+    state.background_intensity = DEFAULT_BACKGROUND_INTENSITY;
+    state.reduce_effects = false;
+    context.store.save(&state).map_err(io_error)?;
+    refresh_common(&context);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_background_preferences(
+    context: tauri::State<'_, DesktopContext>,
+    intensity: f32,
+    reduce_effects: bool,
+) -> Result<(), String> {
+    if !intensity.is_finite() || !(0.0..=1.0).contains(&intensity) {
+        return Err("背景强度必须在 0..1。".to_string());
+    }
+    let mut state = context.store.load().map_err(io_error)?;
+    state.background_intensity = intensity;
+    state.reduce_effects = reduce_effects;
     context.store.save(&state).map_err(io_error)?;
     refresh_common(&context);
     Ok(())
@@ -1141,6 +1367,7 @@ fn local_runtime_summary(runtime: &LocalRuntime) -> LocalRuntimeSummary {
 
 fn refresh_common(context: &DesktopContext) {
     let state = context.store.load().unwrap_or_default();
+    let preview = current_theme_preview(context);
     let mut versions = context.manager.list_installed().unwrap_or_default();
     for version in [Some(state.pinned.clone()), state.available.clone()]
         .into_iter()
@@ -1169,6 +1396,8 @@ fn refresh_common(context: &DesktopContext) {
         .lock()
         .ok()
         .and_then(|slot| slot.as_ref().map(|process| process.url.clone()));
+    let active_skin_id =
+        theme::active_skin_id(&state, preview.as_ref().map(|item| item.id.as_str()));
     if let Ok(mut status) = context.status.lock() {
         status.web_url = web_url;
         status.pinned = state.pinned;
@@ -1176,11 +1405,37 @@ fn refresh_common(context: &DesktopContext) {
         status.available = state.available;
         status.workspace = state.last_workspace;
         status.runtime_source = state.runtime_source;
-        status.theme = state.theme;
+        status.appearance_mode = state.appearance_mode.clone();
+        status.skin_id = active_skin_id;
+        status.background_intensity = state.background_intensity;
+        status.reduce_effects = state.reduce_effects;
+        status.theme_preview_until = preview.as_ref().map(|item| item.expires_at);
         status.local_runtime = local_runtime;
         status.versions = versions;
         status.logs = logs;
     }
+}
+
+fn current_theme_preview(context: &DesktopContext) -> Option<ThemePreview> {
+    let now = now_millis();
+    let mut preview = context.theme_preview.lock().ok()?;
+    if preview.as_ref().is_some_and(|item| item.expires_at <= now) {
+        *preview = None;
+    }
+    preview.clone()
+}
+
+fn cancel_theme_preview_inner(context: &DesktopContext) {
+    if let Ok(mut preview) = context.theme_preview.lock() {
+        *preview = None;
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 fn set_versions(context: &DesktopContext, registry: &RegistryInfo) {

@@ -1,0 +1,4 @@
+- insert:
+    - id: p-dsh-market-neon-agent-theme
+      name: '@p-dsh-market/neon-agent-theme'
+      inject: []

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import vm from 'node:vm'
 
 const root = new URL('..', import.meta.url)
 const file = (path) => fileURLToPath(new URL(path, root))
@@ -77,6 +78,9 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.match(mainRust, /search_market_plugins/)
   assert.match(mainRust, /install_market_plugin/)
   assert.match(mainRust, /uninstall_market_plugin/)
+  assert.match(mainRust, /validate_installed_theme_package/)
+  assert.match(rust, /pub struct MarketTheme/)
+  assert.match(rust, /validate_theme_market_manifest/)
   assert.match(mainRust, /restart_dsh/)
   assert.match(rust, /@p-dsh-market\//)
   assert.match(rust, /dsh\.client\.platform/)
@@ -95,13 +99,18 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.match(javascript, /search_market_plugins/)
   assert.match(javascript, /install_market_plugin/)
   assert.match(javascript, /uninstall_market_plugin/)
+  assert.match(javascript, /previewMarketTheme/)
+  assert.match(javascript, /卸载此主题包；当前主题会先回退默认主题/)
   assert.equal(fixture.name, '@p-dsh-market/example')
   assert.equal(fixture.exports['./client'], './lib/client.js')
   assert.equal(fixture.dsh.client.platform, 'web')
   assert.equal(fixture.dsh.bundle.patch, './cordis.patch.yml')
   assert.deepEqual(fixture.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
   assert.equal(catalog.schemaVersion, 1)
-  assert.deepEqual(catalog.packages, ['@p-dsh-market/dsh-open-workspace'])
+  assert.deepEqual(catalog.packages, [
+    '@p-dsh-market/dsh-open-workspace',
+    '@p-dsh-market/neon-agent-theme',
+  ])
   assert.match(catalogWorkflow, /schedule:/)
   assert.match(catalogWorkflow, /validate-market-catalog\.mjs/)
   assert.match(catalogValidator, /function npmView/)
@@ -139,6 +148,11 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   assert.match(host, /subprocess\.spawn\(/)
   assert.match(host, /readJson/)
   assert.match(client, /id: '@p-dsh-market\/dsh-open-workspace'/)
+  assert.match(client, /var inject = \['slots', 'workspaces', 'sessions', 'timer'\]/)
+  assert.match(client, /sessions && sessions\.list/)
+  assert.match(client, /snapshot\.current/)
+  assert.match(client, /currentSession\.cwd/)
+  assert.match(client, /var root = sessionRoot \|\| snap\.root/)
   assert.match(client, /ctx\.slots\.inject\('shell\.overlay'/)
   assert.match(client, /name: 'shell\.overlay', id: 'open-workspace-floating'/)
   assert.match(client, /owsp-float-resize/)
@@ -211,9 +225,141 @@ test('splash page exposes recovery actions', () => {
   assert.match(javascript, /function closeWindow/)
   assert.match(javascript, /set_runtime_source/)
   assert.match(javascript, /set_theme/)
+  assert.match(javascript, /Apply the visual mode before the Tauri round trip/)
   assert.match(javascript, /prefers-color-scheme: dark/)
   assert.match(javascript, /detect_local_runtime/)
   assert.equal(existsSync(file('runtime-assets/node/README.md')), true)
+})
+
+test('theme pack contract keeps the skin declarative and local', () => {
+  const rust = text('src-tauri/src/theme.rs')
+  const mainRust = text('src-tauri/src/lib.rs')
+  const state = text('src-tauri/src/state.rs')
+  const html = text('dist/index.html')
+  const javascript = text('dist/app.js')
+  const styles = text('dist/styles.css')
+  const manifest = JSON.parse(text('market/neon-agent-theme/package.json'))
+  const theme = JSON.parse(text('market/neon-agent-theme/theme/theme.json'))
+  const client = text('market/neon-agent-theme/lib/client.js')
+
+  assert.match(state, /appearance_mode/)
+  assert.match(state, /skin_id/)
+  assert.match(state, /background_intensity/)
+  assert.match(state, /reduce_effects/)
+  assert.match(mainRust, /preview_theme_pack/)
+  assert.match(mainRust, /confirm_theme_pack/)
+  assert.match(mainRust, /cancel_theme_preview/)
+  assert.match(mainRust, /reset_theme_pack/)
+  assert.match(rust, /safe_join/)
+  assert.match(rust, /MAX_IMAGE_BYTES/)
+  assert.match(rust, /ALLOWED_TOKENS/)
+  assert.match(html, /theme-background/)
+  assert.match(html, /skin-options/)
+  assert.match(html, /background-intensity/)
+  assert.match(html, /confirm-theme-preview/)
+  assert.match(javascript, /dsh-theme-apply/)
+  assert.match(javascript, /preview_theme_pack/)
+  assert.match(javascript, /set_background_preferences/)
+  assert.match(styles, /data-skin="neon-agent"/)
+  assert.equal(manifest.name, '@p-dsh-market/neon-agent-theme')
+  assert.equal(manifest.version, '0.1.1')
+  assert.deepEqual(manifest.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-theme'])
+  assert.equal(manifest.dsh.theme.schemaVersion, 1)
+  assert.deepEqual(manifest.dsh.theme.supportedAppearances, ['dark'])
+  assert.ok(manifest.dsh.market.capabilities.includes('theme-pack'))
+  assert.match(client, /service\.register\(/)
+  assert.match(client, /id: 'neon-agent'/)
+  assert.equal(theme.background.image, '../assets/background.png')
+  assert.equal(existsSync(file('dist/assets/neon-agent-background.png')), true)
+  assert.equal(existsSync(file('dist/assets/neon-agent-background-with-operator.png')), true)
+  assert.equal(existsSync(file('market/neon-agent-theme/assets/preview.png')), true)
+})
+
+test('desktop bridge projects theme packs through the DSH Web ThemeService', () => {
+  const source = text('plugins/dsh-desktop-bridge/lib/client.js')
+  assert.match(source, /ctx\.get\('theme'\)/)
+  assert.match(source, /service\.register\(definition\)/)
+  assert.match(source, /service\.setTheme\(skinId\)/)
+  assert.match(source, /--dsw-alias-bg-base/)
+  assert.doesNotMatch(source, /querySelector\(/)
+
+  let moduleExports
+  const listeners = new Map()
+  const messages = []
+  const parent = { postMessage: (message) => messages.push(message) }
+  const browserWindow = {
+    parent,
+    addEventListener: (type, listener) => listeners.set(type, listener),
+    removeEventListener: (type) => listeners.delete(type),
+  }
+  // The bundle registers itself through the module loader so the test can
+  // exercise the real exported client rather than a copied helper.
+  vm.runInNewContext(source, {
+    Symbol,
+    window: {
+      ...browserWindow,
+      __ModuleLoader__: {
+        load: (entry) => {
+          moduleExports = entry.factory(() => ({}))
+        },
+      },
+    },
+  })
+
+  const registered = []
+  let current = 'system'
+  const service = {
+    getTheme: () => ({ themes: [
+      { id: 'light', colorScheme: 'light', tokens: {} },
+      { id: 'dark', colorScheme: 'dark', tokens: {} },
+      ...registered,
+    ] }),
+    register: (definition) => {
+      registered.push(definition)
+      return () => {
+        const index = registered.indexOf(definition)
+        if (index >= 0) registered.splice(index, 1)
+      }
+    },
+    setTheme: (id) => { current = id },
+  }
+  const client = moduleExports
+  const cleanup = client.apply({ get: (name) => name === 'theme' ? service : undefined })
+  const listener = listeners.get('message')
+  assert.equal(typeof listener, 'function')
+  listener({
+    source: parent,
+    data: {
+      source: 'dsh-desktop',
+      type: 'dsh-theme-apply',
+      skinId: 'neon-agent',
+      appearance: 'dark',
+      appearanceMode: 'dark',
+      tokens: {
+        'color.background.base': '#02040D',
+        'web.sidebar.surface': 'rgba(3, 8, 24, 0.88)',
+      },
+    },
+  })
+  assert.equal(current, 'neon-agent')
+  assert.equal(registered[0].tokens['--dsw-alias-bg-base'], '#02040D')
+  assert.equal(registered[0].tokens['--dsw-specific-sidebar-fill'], 'rgba(3, 8, 24, 0.88)')
+  assert.equal(messages.at(-1).type, 'theme-applied')
+
+  listener({
+    source: parent,
+    data: {
+      source: 'dsh-desktop',
+      type: 'dsh-theme-apply',
+      skinId: 'builtin.default',
+      appearance: 'light',
+      appearanceMode: 'light',
+      tokens: {},
+    },
+  })
+  assert.equal(current, 'light')
+  assert.equal(registered.length, 0)
+  cleanup()
 })
 
 test('javascript artifacts pass node syntax validation', () => {
@@ -225,6 +371,8 @@ test('javascript artifacts pass node syntax validation', () => {
     'plugins/dsh-market-example/lib/client.js',
     'market/dsh-open-workspace/lib/index.js',
     'market/dsh-open-workspace/lib/client.js',
+    'market/neon-agent-theme/lib/index.js',
+    'market/neon-agent-theme/lib/client.js',
   ]) {
     execFileSync(process.execPath, ['--check', file(path)], { stdio: 'pipe' })
   }

@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "appearance": "dark",
+  "tokens": {
+    "shared": {
+      "color.background.base": "#02040D",
+      "color.surface.primary": "rgba(7, 14, 38, 0.90)",
+      "color.surface.secondary": "rgba(12, 23, 58, 0.82)",
+      "color.text.primary": "#EDF4FF",
+      "color.text.secondary": "#879AC8",
+      "color.border.default": "rgba(61, 105, 255, 0.35)",
+      "color.accent.primary": "#1976FF",
+      "color.accent.secondary": "#7B4DFF",
+      "color.success": "#3BD6AF",
+      "color.warning": "#F4C563",
+      "color.danger": "#FF708C",
+      "focus.ring": "0 0 0 3px rgba(25, 118, 255, 0.32)"
+    },
+    "desktop": {
+      "titlebar.background": "rgba(2, 6, 22, 0.90)",
+      "panel.backdropBlur": "12px"
+    },
+    "web": {
+      "conversation.surface": "rgba(4, 10, 29, 0.76)",
+      "sidebar.surface": "rgba(3, 8, 24, 0.88)"
+    },
+    "components": {
+      "button.background": "rgba(22, 61, 155, 0.32)",
+      "button.hoverBackground": "rgba(37, 91, 230, 0.50)",
+      "button.activeBackground": "rgba(55, 105, 255, 0.62)",
+      "button.disabledBackground": "rgba(38, 55, 105, 0.34)",
+      "button.text": "#EDF4FF",
+      "button.hoverText": "#FFFFFF",
+      "button.border": "rgba(53, 112, 255, 0.55)",
+      "button.radius": "8px",
+      "button.shadow": "0 0 18px rgba(35, 103, 255, 0.18)",
+      "input.background": "rgba(3, 10, 30, 0.78)",
+      "input.border": "rgba(74, 116, 255, 0.38)",
+      "input.focusBorder": "#397CFF",
+      "input.placeholder": "#6576A5",
+      "input.caret": "#6CA5FF",
+      "panel.radius": "10px",
+      "panel.shadow": "0 0 24px rgba(21, 60, 180, 0.20)"
+    }
+  },
+  "background": {
+    "image": "../assets/background.png",
+    "targets": ["desktop.home", "desktop.market", "web.shell"],
+    "fit": "cover",
+    "position": "center",
+    "opacity": 0.32,
+    "overlay": "rgba(1, 4, 15, 0.66)",
+    "blur": "0px",
+    "fixed": true
+  }
+}

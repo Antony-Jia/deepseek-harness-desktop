@@ -11,7 +11,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
     var React = require('react')
 
-    var inject = ['slots', 'workspaces', 'timer']
+    var inject = ['slots', 'workspaces', 'sessions', 'timer']
 
     // ── 共享面板状态 ────────────────────────────────────────────────
     // 悬浮面板的总宽度可调整；目录树使用独立的固定宽度，拉宽面板时不会按比例膨胀。
@@ -66,6 +66,25 @@ window.__ModuleLoader__.load({
       var setSnap = pair[1]
       React.useEffect(function () { return subscribe(function () { setSnap(getState()) }) }, [])
       return snap
+    }
+    function useCurrentSession(sessions) {
+      var source = sessions && sessions.list
+      var pair = React.useState(function () {
+        return source && typeof source.getSnapshot === 'function' ? source.getSnapshot() : null
+      })
+      var snapshot = pair[0]
+      var setSnapshot = pair[1]
+      React.useEffect(function () {
+        if (!source || typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') {
+          setSnapshot(null)
+          return
+        }
+        function update() { setSnapshot(source.getSnapshot()) }
+        update()
+        return source.subscribe(update)
+      }, [source])
+      var currentId = snapshot && snapshot.current
+      return currentId && snapshot.byId ? snapshot.byId[currentId] || null : null
     }
     function getTerminalState() { return terminalStore }
     function setTerminalState(patch) {
@@ -477,8 +496,11 @@ window.__ModuleLoader__.load({
     }
     function TerminalPanel(props) {
       var snap = useTerminalState()
-      var sessionCwd = props && props.session && props.session.header ? props.session.header.cwd : null
-      var cwd = snap.cwd || sessionCwd || null
+      var currentSession = useCurrentSession(props && props.sessions)
+      var sessionCwd = currentSession && currentSession.cwd
+        ? currentSession.cwd
+        : (props && props.session && props.session.header ? props.session.header.cwd : null)
+      var cwd = sessionCwd || snap.cwd || null
       var outputPair = React.useState('')
       var output = outputPair[0]
       var setOutput = outputPair[1]
@@ -600,6 +622,7 @@ window.__ModuleLoader__.load({
 
     function FloatingWorkspacePanel(props) {
       var ctx = props && props.ctx
+      var currentSession = useCurrentSession(props && props.sessions)
       var snap = usePanelState()
       var directoriesPair = React.useState({})
       var directories = directoriesPair[0]
@@ -616,7 +639,10 @@ window.__ModuleLoader__.load({
       var activePair = React.useState(null)
       var active = activePair[0]
       var setActive = activePair[1]
-      var root = snap.root
+      var sessionRoot = currentSession && typeof currentSession.cwd === 'string' && currentSession.cwd.trim() !== ''
+        ? currentSession.cwd
+        : null
+      var root = sessionRoot || snap.root
 
       function loadDirectory(path, force) {
         if (!path) return
@@ -884,6 +910,8 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      var sessions = ctx.sessions
+      if (ctx.get) sessions = ctx.get('sessions') || sessions
       ctx.effect(function () {
         return function () {
           setState({ open: false, root: null })
@@ -926,7 +954,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('conversation.composer.dock', function () {
         return ctx.slots.register(
           { name: 'conversation.composer.dock', id: 'open-workspace-terminal', order: 10, label: 'Terminal' },
-          function (props) { return React.createElement(TerminalPanel, props) }
+          function (props) { return React.createElement(TerminalPanel, Object.assign({}, props, { sessions: sessions })) }
         )
       })
 
@@ -934,7 +962,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('shell.overlay', function () {
         return ctx.slots.register(
           { name: 'shell.overlay', id: 'open-workspace-floating', order: 40, label: '工作区文件浏览器' },
-          function () { return React.createElement(FloatingWorkspacePanel, { ctx: ctx }) }
+          function () { return React.createElement(FloatingWorkspacePanel, { ctx: ctx, sessions: sessions }) }
         )
       })
     }

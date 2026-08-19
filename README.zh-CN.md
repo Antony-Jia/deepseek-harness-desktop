@@ -23,7 +23,8 @@ DSH Desktop 是一个基于 Windows/Tauri 的轻量桌面客户端，用于管�
 - 支持系统中的本地 DSH，也支持独立的桌面托管 DSH。托管版本安装在独立目录中，不会覆盖系统 npm。
 - 在恢复首页显示启动、安装、更新和失败日志。
 - 提供可见的系统托盘图标、原生通知桥接和无边框窗口控制。
-- 将窗口位置、尺寸、最大化状态，以及亮色、暗色或跟随系统主题保存到 `%LOCALAPPDATA%/dsh-desktop/state.json`。
+- 将窗口位置、尺寸、最大化状态、外观模式、界面皮肤、背景强度和减少效果偏好保存到 `%LOCALAPPDATA%/dsh-desktop/state.json`。
+- 提供受控的 Neon Agent Theme Pack 预览、15 秒确认回退、本地背景资源和默认主题恢复；主题包不能携带任意 CSS、selector、远程资源或桌面命令。
 
 ## 运行时与数据位置
 

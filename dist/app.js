@@ -22,6 +22,16 @@
   var marketOperation = null
   var pendingRestartNames = []
   var localDetecting = false
+  var themePacks = []
+  var themePacksLoaded = false
+  var themePacksRequest = null
+  var themePreviewId = ''
+  var themePreviewUntil = 0
+  var themePreferencesTimer = null
+  var themeWebStatus = 'idle'
+  var themeWebStatusTimer = null
+  var themePostedSkin = ''
+  var themeActionError = ''
   var systemThemeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false }
 
   function el(id) { return document.getElementById(id) }
@@ -30,11 +40,92 @@
   function effectiveTheme(theme) {
     return theme === 'light' || theme === 'dark' ? theme : (systemThemeMedia.matches ? 'dark' : 'light')
   }
-  function applyTheme(theme) {
-    var preference = theme === 'light' || theme === 'dark' || theme === 'system' ? theme : 'system'
+  function fallbackThemePacks() {
+    return [
+      { packageName: 'builtin.default', id: 'builtin.default', displayName: '默认主题', version: 'builtin', source: 'builtin', installed: true, enabled: true, protocolCompatible: true, appearance: 'light', supportedAppearances: ['light', 'dark'], tokens: {}, background: null, previewUrl: null },
+      { packageName: '@p-dsh-market/neon-agent-theme', id: 'neon-agent', displayName: 'Neon Agent', version: '0.1.0', source: 'builtin', installed: true, enabled: true, protocolCompatible: true, appearance: 'dark', supportedAppearances: ['dark'], tokens: {
+        'color.background.base': '#02040D', 'color.surface.primary': 'rgba(7, 14, 38, 0.90)', 'color.surface.secondary': 'rgba(12, 23, 58, 0.82)', 'color.text.primary': '#EDF4FF', 'color.text.secondary': '#879AC8', 'color.border.default': 'rgba(61, 105, 255, 0.35)', 'color.accent.primary': '#1976FF', 'color.accent.secondary': '#7B4DFF', 'color.success': '#3BD6AF', 'color.warning': '#F4C563', 'color.danger': '#FF708C', 'focus.ring': '0 0 0 3px rgba(25, 118, 255, 0.32)', 'desktop.titlebar.background': 'rgba(2, 6, 22, 0.90)', 'desktop.panel.backdropBlur': '12px', 'web.conversation.surface': 'rgba(4, 10, 29, 0.76)', 'web.sidebar.surface': 'rgba(3, 8, 24, 0.88)', 'components.button.background': 'rgba(22, 61, 155, 0.32)', 'components.button.hoverBackground': 'rgba(37, 91, 230, 0.50)', 'components.button.activeBackground': 'rgba(55, 105, 255, 0.62)', 'components.button.disabledBackground': 'rgba(38, 55, 105, 0.34)', 'components.button.text': '#EDF4FF', 'components.button.hoverText': '#FFFFFF', 'components.button.border': 'rgba(53, 112, 255, 0.55)', 'components.button.radius': '8px', 'components.button.shadow': '0 0 18px rgba(35, 103, 255, 0.18)', 'components.input.background': 'rgba(3, 10, 30, 0.78)', 'components.input.border': 'rgba(74, 116, 255, 0.38)', 'components.input.focusBorder': '#397CFF', 'components.input.placeholder': '#6576A5', 'components.input.caret': '#6CA5FF', 'components.panel.radius': '10px', 'components.panel.shadow': '0 0 24px rgba(21, 60, 180, 0.20)'
+      }, background: { imageUrl: './assets/neon-agent-background.png', targets: ['desktop.home', 'desktop.market', 'web.shell'], fit: 'cover', position: 'center', opacity: 0.32, overlay: 'rgba(1, 4, 15, 0.66)', blur: '0px', fixed: true }, previewUrl: './assets/neon-agent-background-with-operator.png' }
+    ]
+  }
+  function availableThemePacks() {
+    var packs = themePacks.length ? themePacks : fallbackThemePacks()
+    var byId = {}
+    packs.forEach(function (pack) {
+      if (!pack || !pack.id) return
+      var current = byId[pack.id]
+      if (!current || (pack.source === 'profile' && current.source !== 'profile')) byId[pack.id] = pack
+    })
+    return Object.keys(byId).map(function (id) { return byId[id] })
+  }
+  function themePackById(id) {
+    var packs = availableThemePacks()
+    return packs.find(function (pack) { return pack.id === id }) || packs[0]
+  }
+  function packSupportsAppearance(pack, appearance) {
+    return !!(pack && Array.isArray(pack.supportedAppearances) && pack.supportedAppearances.indexOf(appearance) >= 0)
+  }
+  function activeSkinFor(snapshot) {
+    var id = snapshot && snapshot.skinId ? String(snapshot.skinId) : 'builtin.default'
+    if (themePreviewId) id = themePreviewId
+    var pack = themePackById(id)
+    var active = effectiveTheme(snapshot && snapshot.appearanceMode ? snapshot.appearanceMode : 'system')
+    return pack && pack.id !== 'builtin.default' && packSupportsAppearance(pack, active) && pack.protocolCompatible !== false && pack.enabled !== false
+      ? pack
+      : themePackById('builtin.default')
+  }
+  function setTokenVariables(pack) {
+    var root = document.documentElement
+    var tokens = pack && pack.tokens ? pack.tokens : {}
+    var values = {
+      '--accent': tokens['color.accent.primary'],
+      '--accent-strong': tokens['color.accent.secondary'],
+      '--muted': tokens['color.text.secondary'],
+      '--success': tokens['color.success'],
+      '--danger': tokens['color.danger'],
+      '--skin-background-base': tokens['color.background.base'],
+      '--skin-surface-primary': tokens['color.surface.primary'],
+      '--skin-surface-secondary': tokens['color.surface.secondary'],
+      '--skin-text-primary': tokens['color.text.primary'],
+      '--skin-border': tokens['color.border.default'],
+      '--skin-focus-ring': tokens['focus.ring'],
+      '--skin-button-background': tokens['components.button.background'],
+      '--skin-button-hover-background': tokens['components.button.hoverBackground'],
+      '--skin-button-active-background': tokens['components.button.activeBackground'],
+      '--skin-button-disabled-background': tokens['components.button.disabledBackground'],
+      '--skin-button-text': tokens['components.button.text'],
+      '--skin-button-hover-text': tokens['components.button.hoverText'],
+      '--skin-button-border': tokens['components.button.border'],
+      '--skin-button-radius': tokens['components.button.radius'],
+      '--skin-button-shadow': tokens['components.button.shadow'],
+      '--skin-input-background': tokens['components.input.background'],
+      '--skin-input-border': tokens['components.input.border'],
+      '--skin-input-focus-border': tokens['components.input.focusBorder'],
+      '--skin-input-placeholder': tokens['components.input.placeholder'],
+      '--skin-input-caret': tokens['components.input.caret'],
+      '--skin-panel-radius': tokens['components.panel.radius'],
+      '--skin-panel-shadow': tokens['components.panel.shadow'],
+      '--skin-titlebar-background': tokens['desktop.titlebar.background'],
+      '--skin-panel-blur': tokens['desktop.panel.backdropBlur']
+    }
+    Object.keys(values).forEach(function (name) {
+      if (values[name]) root.style.setProperty(name, values[name])
+      else root.style.removeProperty(name)
+    })
+  }
+  function applyTheme(input) {
+    var snapshot = typeof input === 'string' ? Object.assign({}, state || {}, { appearanceMode: input }) : (input || state || {})
+    if (!snapshot.appearanceMode && snapshot.theme) snapshot = Object.assign({}, snapshot, { appearanceMode: snapshot.theme })
+    var preference = snapshot.appearanceMode === 'light' || snapshot.appearanceMode === 'dark' || snapshot.appearanceMode === 'system' ? snapshot.appearanceMode : 'system'
     var active = effectiveTheme(preference)
+    var pack = activeSkinFor(snapshot)
     document.documentElement.dataset.theme = active
+    document.documentElement.dataset.appearance = active
     document.documentElement.dataset.themePreference = preference
+    document.documentElement.dataset.skin = pack.id
+    document.documentElement.dataset.skinSource = pack.source || 'builtin'
+    setTokenVariables(pack)
+    applyThemeBackground(pack, snapshot)
     document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
       var selected = button.getAttribute('data-theme-choice') === preference
       button.classList.toggle('active', selected)
@@ -45,13 +136,125 @@
       ? '跟随系统：当前使用' + (active === 'dark' ? '暗色。' : '亮色。')
       : '当前使用' + labels[preference] + '。'
     setText('theme-message', message)
+    renderSkinOptions(snapshot, pack)
+    renderThemePreview(snapshot, pack)
+    postActiveTheme(pack, snapshot, active)
+  }
+  function applyThemeBackground(pack, snapshot) {
+    var layer = el('theme-background')
+    if (!layer) return
+    var background = pack && pack.background
+    var intensity = snapshot && Number.isFinite(Number(snapshot.backgroundIntensity)) ? Math.max(0, Math.min(1, Number(snapshot.backgroundIntensity))) : 0
+    var enabled = !!(background && background.imageUrl && pack.id !== 'builtin.default' && intensity > 0)
+    layer.hidden = !enabled
+    if (!enabled) {
+      layer.style.backgroundImage = ''
+      layer.style.opacity = '0'
+      return
+    }
+    layer.style.backgroundImage = 'url("' + String(background.imageUrl).replace(/"/g, '%22') + '")'
+    layer.style.backgroundSize = background.fit || 'cover'
+    layer.style.backgroundPosition = background.position || 'center'
+    layer.style.setProperty('--theme-overlay', background.overlay || 'rgba(1, 4, 15, .66)')
+    layer.style.opacity = String(intensity)
+    layer.style.filter = snapshot.reduceEffects ? 'none' : ('blur(' + (background.blur || '0px') + ')')
+  }
+  function postActiveTheme(pack, snapshot, appearance) {
+    if (!pack) return
+    var sent = postDshMessage('dsh-theme-apply', {
+      skinId: pack.id,
+      appearanceMode: snapshot.appearanceMode || 'system',
+      appearance: appearance,
+      tokens: pack.tokens || {},
+      background: pack.background || null,
+      backgroundIntensity: snapshot.backgroundIntensity,
+      reduceEffects: !!snapshot.reduceEffects
+    })
+    if (sent && pack.id !== 'builtin.default' && themePostedSkin !== pack.id) {
+      themePostedSkin = pack.id
+      themeWebStatus = 'pending'
+      if (themeWebStatusTimer) window.clearTimeout(themeWebStatusTimer)
+      themeWebStatusTimer = window.setTimeout(function () {
+        if (themeWebStatus === 'pending') {
+          themeWebStatus = 'unavailable'
+          renderSkinOptions(state || snapshot, activeSkinFor(state || snapshot))
+        }
+      }, 2500)
+    } else if (pack.id === 'builtin.default') {
+      themeWebStatus = 'idle'
+      themePostedSkin = pack.id
+    }
+  }
+  function renderSkinOptions(snapshot, activePack) {
+    var container = el('skin-options')
+    if (!container) return
+    container.replaceChildren()
+    availableThemePacks().forEach(function (pack) {
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'skin-option' + (activePack && activePack.id === pack.id ? ' active' : '')
+      button.setAttribute('role', 'listitem')
+      button.setAttribute('aria-pressed', activePack && activePack.id === pack.id ? 'true' : 'false')
+      button.disabled = desktopActionsBusy || pack.protocolCompatible === false || pack.enabled === false
+      var preview = document.createElement('span')
+      preview.className = 'skin-preview'
+      if (pack.previewUrl) preview.style.backgroundImage = 'url("' + String(pack.previewUrl).replace(/"/g, '%22') + '")'
+      button.appendChild(preview)
+      var text = document.createElement('span')
+      text.className = 'skin-option-copy'
+      text.appendChild(makeNode('strong', null, pack.displayName || pack.id))
+      text.appendChild(makeNode('small', null, pack.id === 'builtin.default' ? '宿主内建' : (pack.source === 'profile' ? '已安装 · ' + pack.version : '本地示例 · 暗色')))
+      button.appendChild(text)
+      if (pack.error) button.title = pack.error
+      button.addEventListener('click', function () { previewThemePack(pack) })
+      container.appendChild(button)
+    })
+    var selected = activePack && activePack.id !== 'builtin.default' ? activePack.displayName : '默认主题'
+    setText('skin-status-pill', selected)
+    var skinMessage = themeActionError || (activePack && activePack.id !== 'builtin.default' ? activePack.description : '默认主题不读取外部资源。')
+    if (!themeActionError && activePack && activePack.id !== 'builtin.default' && viewMode === 'dsh') {
+      skinMessage += themeWebStatus === 'applied'
+        ? ' Web 主题服务已回执。'
+        : themeWebStatus === 'error'
+          ? ' Web 主题服务报告应用失败，Desktop 外框仍已保留。'
+          : themeWebStatus === 'unavailable'
+            ? ' Web 主题服务未回执，当前仅 Desktop 外框生效。'
+            : ' Web 主题服务等待回执，Desktop 外框已先应用。'
+    }
+    setText('skin-message', skinMessage)
+    var intensity = snapshot && snapshot.backgroundIntensity != null ? Number(snapshot.backgroundIntensity) : 0.32
+    var range = el('background-intensity')
+    if (range && document.activeElement !== range) range.value = String(Math.max(0, Math.min(1, intensity)))
+    setText('background-intensity-value', Math.round(Math.max(0, Math.min(1, intensity)) * 100) + '%')
+    var reduce = el('reduce-effects')
+    if (reduce && document.activeElement !== reduce) reduce.checked = !!(snapshot && snapshot.reduceEffects)
+  }
+  function renderThemePreview(snapshot, activePack) {
+    var until = themePreviewUntil || (snapshot && snapshot.themePreviewUntil) || 0
+    var id = themePreviewId || (snapshot && snapshot.themePreviewUntil ? snapshot.skinId : '')
+    if (until && until <= Date.now()) {
+      themePreviewUntil = 0
+      themePreviewId = ''
+      until = 0
+      id = ''
+    }
+    var banner = el('theme-preview-banner')
+    if (!banner) return
+    banner.hidden = !until
+    if (until) {
+      var seconds = Math.max(0, Math.ceil((until - Date.now()) / 1000))
+      setText('theme-preview-title', '正在预览 ' + ((themePackById(id) || activePack || {}).displayName || '主题'))
+      setText('theme-preview-countdown', seconds + ' 秒后自动恢复')
+    }
   }
   function setBusy(busy) {
     desktopActionsBusy = !!busy
-    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
+    document.querySelectorAll('[data-theme-choice]').forEach(function (button) { button.disabled = !!busy })
+    renderSkinOptions(state || {}, activeSkinFor(state || {}))
     renderDesktopActions()
   }
   function updateView() {
@@ -317,7 +520,8 @@
     var operationCard = el('market-operation-card')
     if (operationCard) operationCard.hidden = !marketOperation
     if (marketOperation) {
-      setText('market-operation-title', marketOperation.running ? '正在' + (marketOperation.operation === 'install' ? '安装' : '卸载') : (marketOperation.ok ? '插件操作完成' : '插件操作失败'))
+      var operationNoun = marketOperation.theme ? '主题包' : '插件'
+      setText('market-operation-title', marketOperation.running ? '正在' + (marketOperation.operation === 'install' ? '安装' : '卸载') + operationNoun : (marketOperation.ok ? operationNoun + '操作完成' : operationNoun + '操作失败'))
       setText('market-operation-message', marketOperation.message || '')
       var details = el('market-operation-details')
       if (details) details.hidden = !marketOperation.log
@@ -337,19 +541,47 @@
     var meta = makeNode('div', 'market-plugin-meta')
     meta.appendChild(makeNode('span', 'market-plugin-version', '最新版本 ' + plugin.version))
     if (plugin.installed) meta.appendChild(makeNode('span', 'pill good', '已安装 · ' + (plugin.installedVersion || '未知版本')))
+    if (plugin.theme) {
+      meta.appendChild(makeNode('span', 'pill neutral', '主题包'))
+      var appearances = Array.isArray(plugin.theme.supportedAppearances) ? plugin.theme.supportedAppearances : []
+      if (appearances.length) meta.appendChild(makeNode('span', 'market-plugin-version', '支持 ' + appearances.join(' / ')))
+    }
     card.appendChild(meta)
     var capabilities = makeNode('div', 'market-capabilities')
     ;(plugin.capabilities || []).forEach(function (capability) { capabilities.appendChild(makeNode('span', 'market-capability', capability)) })
     card.appendChild(capabilities)
     var footer = makeNode('div', 'market-plugin-footer')
-    var actionButton = makeNode('button', 'button ' + (plugin.installed ? 'danger-button' : 'primary'), plugin.installed ? '卸载' : '安装')
+    if (plugin.theme && plugin.installed) {
+      var previewButton = makeNode('button', 'button secondary', '预览主题')
+      previewButton.type = 'button'
+      previewButton.disabled = !enabled || marketBusy
+      previewButton.title = '在 Desktop 设置中预览此主题包'
+      previewButton.addEventListener('click', function () { previewMarketTheme(plugin) })
+      footer.appendChild(previewButton)
+    }
+    var actionButton = makeNode('button', 'button ' + (plugin.installed ? 'danger-button' : 'primary'), plugin.installed ? (plugin.theme ? '卸载主题' : '卸载') : (plugin.theme ? '安装主题' : '安装'))
     actionButton.type = 'button'
     actionButton.disabled = !enabled || marketBusy
-    actionButton.title = plugin.installed ? '从 web profile 卸载此插件' : '安装搜索结果中的确定版本 ' + plugin.version
+    actionButton.title = plugin.installed ? (plugin.theme ? '卸载此主题包；当前主题会先回退默认主题' : '从 web profile 卸载此插件') : '安装搜索结果中的确定版本 ' + plugin.version
     actionButton.addEventListener('click', function () { runMarketOperation(plugin, plugin.installed ? 'uninstall' : 'install') })
     footer.appendChild(actionButton)
     card.appendChild(footer)
     return card
+  }
+  function previewMarketTheme(plugin) {
+    if (!plugin || marketBusy) return
+    loadThemePacks(true).then(function () {
+      var metadata = plugin.theme || {}
+      var pack = availableThemePacks().find(function (item) {
+        return item.packageName === plugin.name || item.id === metadata.id
+      })
+      if (!pack) throw new Error('主题包已安装但未通过本地主题校验。')
+      showHome('skin-options')
+      previewThemePack(pack)
+    }).catch(function (error) {
+      marketError = messageOf(error)
+      renderMarket()
+    })
   }
   function marketSearch(queryValue) {
     if (marketBusy) return Promise.resolve()
@@ -381,12 +613,12 @@
     if (typeof window.confirm === 'function' && !window.confirm(confirmation)) return
     marketBusy = true
     marketError = ''
-    marketOperation = { running: true, operation: operation, name: plugin.name, message: '正在' + actionText + '，请稍候…', log: '' }
+    marketOperation = { running: true, operation: operation, name: plugin.name, theme: !!plugin.theme, message: '正在' + actionText + '，请稍候…', log: '' }
     renderMarket()
     var command = operation === 'install' ? 'install_market_plugin' : 'uninstall_market_plugin'
     var args = operation === 'install' ? { name: plugin.name, version: plugin.version } : { name: plugin.name }
     invokeOrThrow(command, args).then(function (result) {
-      marketOperation = Object.assign({}, result || {}, { running: false, operation: operation, name: plugin.name, ok: true })
+      marketOperation = Object.assign({}, result || {}, { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: true })
       if (result && result.restartRequired && pendingRestartNames.indexOf(plugin.name) < 0) pendingRestartNames.push(plugin.name)
       return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (next) {
         marketResult = next || marketResult
@@ -394,24 +626,104 @@
       }).catch(function (error) {
         marketError = '操作已完成，但刷新插件列表失败：' + messageOf(error)
       }).then(function () {
-        return refreshDesktopContributions(true)
+        return loadThemePacks(true).then(function () { return refreshDesktopContributions(true) })
       })
     }).catch(function (error) {
-      marketOperation = { running: false, operation: operation, name: plugin.name, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
+      marketOperation = { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
       marketError = messageOf(error)
     }).finally(function () {
       marketBusy = false
       renderMarket()
     })
   }
+  function loadThemePacks(force) {
+    if (!invoke) return Promise.resolve(themePacks)
+    if (!force && themePacksLoaded) return Promise.resolve(themePacks)
+    if (themePacksRequest) return themePacksRequest
+    themePacksRequest = invokeOrThrow('list_theme_packs').then(function (packs) {
+      themePacks = Array.isArray(packs) ? packs : []
+      themePacksLoaded = true
+      applyTheme(state)
+      return themePacks
+    }).catch(function (error) {
+      themePacksLoaded = themePacksLoaded || !force
+      if (window.console && console.warn) console.warn('[dsh-desktop] theme pack load failed:', messageOf(error))
+      applyTheme(state)
+      return themePacks
+    }).finally(function () {
+      themePacksRequest = null
+    })
+    return themePacksRequest
+  }
+  function previewThemePack(pack) {
+    if (!pack || pack.protocolCompatible === false || pack.enabled === false || desktopActionsBusy) return
+    var currentAppearance = effectiveTheme((state && state.appearanceMode) || 'system')
+    if (!packSupportsAppearance(pack, currentAppearance)) {
+      themeActionError = (pack.displayName || pack.id) + ' 仅支持' + (pack.supportedAppearances || []).join(' / ') + '外观，请先切换外观模式。'
+      renderSkinOptions(state || {}, activeSkinFor(state || {}))
+      return
+    }
+    var previousPreviewId = themePreviewId
+    var previousPreviewUntil = themePreviewUntil
+    themeActionError = ''
+    themePreviewId = pack.id
+    themePreviewUntil = Date.now() + 15000
+    applyTheme(Object.assign({}, state || {}, { skinId: pack.id }))
+    setBusy(true)
+    invokeOrThrow('preview_theme_pack', { id: pack.id }).then(function (result) {
+      themePreviewId = result && result.id ? String(result.id) : pack.id
+      themePreviewUntil = result && result.expiresAt ? Number(result.expiresAt) : Date.now() + 15000
+      themeActionError = ''
+      render(state)
+    }).catch(function (error) {
+      themePreviewId = previousPreviewId
+      themePreviewUntil = previousPreviewUntil
+      themeActionError = '主题预览失败：' + messageOf(error)
+      applyTheme(state)
+      render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '主题预览失败' }))
+    }).finally(function () {
+      setBusy(false)
+      refresh()
+    })
+  }
+  function finishThemePreview(command, args) {
+    if (!themePreviewUntil && !themePreviewId) return
+    setBusy(true)
+    invokeOrThrow(command, args || {}).then(function () {
+      themePreviewId = ''
+      themePreviewUntil = 0
+    }).catch(function (error) {
+      themeActionError = '主题预览操作失败：' + messageOf(error)
+      render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '主题预览操作失败' }))
+    }).finally(function () {
+      setBusy(false)
+      refresh()
+    })
+  }
+  function scheduleThemePreferencesSave() {
+    var range = el('background-intensity')
+    var reduce = el('reduce-effects')
+    var intensity = range ? Math.max(0, Math.min(1, Number(range.value))) : 0.32
+    var reduceEffects = !!(reduce && reduce.checked)
+    var optimistic = Object.assign({}, state || {}, { backgroundIntensity: intensity, reduceEffects: reduceEffects })
+    applyTheme(optimistic)
+    if (themePreferencesTimer) window.clearTimeout(themePreferencesTimer)
+    themePreferencesTimer = window.setTimeout(function () {
+      invokeOrThrow('set_background_preferences', { intensity: intensity, reduceEffects: reduceEffects }).catch(function (error) {
+        if (window.console && console.warn) console.warn('[dsh-desktop] background preference save failed:', messageOf(error))
+      })
+    }, 180)
+  }
   function render(next) {
     var wasRunning = !!(state && state.webUrl)
     state = next || state || {}
+    if (state.themePreviewUntil) themePreviewUntil = Number(state.themePreviewUntil)
+    else if (themePreviewUntil && themePreviewUntil <= Date.now()) { themePreviewUntil = 0; themePreviewId = '' }
     if (!!state.webUrl && !wasRunning && pendingRestartNames.length) {
       pendingRestartNames = []
       if (viewMode === 'market' && !marketBusy) window.setTimeout(function () { marketSearch(marketQuery) }, 0)
     }
-    applyTheme(state.theme || 'system')
+    applyTheme(state)
     updateView()
     renderMarket()
     var meta = statusMeta(state.status)
@@ -579,7 +891,14 @@
     var frame = el('dsh-frame')
     if (!frame || event.source !== frame.contentWindow) return
     var data = event.data
-    if (!data || data.source !== 'dsh-open-workspace') return
+    if (!data) return
+    if (data.source === 'dsh-desktop-theme') {
+      themeWebStatus = data.type === 'theme-applied' ? 'applied' : 'error'
+      if (themeWebStatusTimer) window.clearTimeout(themeWebStatusTimer)
+      renderSkinOptions(state || {}, activeSkinFor(state || {}))
+      return
+    }
+    if (data.source !== 'dsh-open-workspace') return
     if (data.type === 'workspace-panel-state') workspacePanelOpen = data.open === true
     if (data.type === 'terminal-panel-state') terminalPanelOpen = data.open === true
     updateView()
@@ -587,8 +906,10 @@
   var dshFrame = el('dsh-frame')
   if (dshFrame) {
     dshFrame.addEventListener('load', function () {
+      themePostedSkin = ''
       postDshMessage('workspace-panel-state-request')
       postDshMessage('terminal-panel-state-request')
+      postActiveTheme(activeSkinFor(state || {}), state || {}, effectiveTheme((state && state.appearanceMode) || 'system'))
     })
   }
   el('window-minimize').addEventListener('click', function () { invokeOrThrow('minimize_window').catch(showWindowError) })
@@ -614,7 +935,33 @@
   document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
     button.addEventListener('click', function () {
       var theme = button.getAttribute('data-theme-choice')
+      if (desktopActionsBusy || !theme) return
+      themeActionError = ''
+      // Apply the visual mode before the Tauri round trip so a click never
+      // looks inert while state.json is being written.
+      applyTheme(Object.assign({}, state || {}, { appearanceMode: theme }))
       action(function () { return invokeOrThrow('set_theme', { theme: theme }) })
+    })
+  })
+  el('background-intensity').addEventListener('input', scheduleThemePreferencesSave)
+  el('reduce-effects').addEventListener('change', scheduleThemePreferencesSave)
+  el('confirm-theme-preview').addEventListener('click', function () {
+    finishThemePreview('confirm_theme_pack', { id: themePreviewId || (state && state.skinId) })
+  })
+  el('cancel-theme-preview').addEventListener('click', function () {
+    finishThemePreview('cancel_theme_preview')
+  })
+  el('reset-theme').addEventListener('click', function () {
+    setBusy(true)
+    invokeOrThrow('reset_theme_pack').then(function () {
+      themePreviewId = ''
+      themePreviewUntil = 0
+      themeActionError = ''
+    }).catch(function (error) {
+      render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '恢复默认主题失败' }))
+    }).finally(function () {
+      setBusy(false)
+      refresh()
     })
   })
   el('toggle-dsh').addEventListener('click', toggleDsh)
@@ -648,10 +995,11 @@
   el('open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })
   el('quit').addEventListener('click', function () { action(function () { return invokeOrThrow('quit_app') }) })
   var onSystemThemeChanged = function () {
-    if (!state || (state.theme || 'system') === 'system') applyTheme('system')
+    if (!state || (state.appearanceMode || state.theme || 'system') === 'system') applyTheme(state || 'system')
   }
   if (systemThemeMedia.addEventListener) systemThemeMedia.addEventListener('change', onSystemThemeChanged)
   else if (systemThemeMedia.addListener) systemThemeMedia.addListener(onSystemThemeChanged)
+  loadThemePacks()
   refresh()
   poller = window.setInterval(refresh, 1500)
   window.addEventListener('beforeunload', function () { if (poller) window.clearInterval(poller) })
