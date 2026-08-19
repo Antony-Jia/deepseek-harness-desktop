@@ -1,7 +1,7 @@
 {
   "name": "@p-dsh-market/dsh-open-workspace",
-  "version": "0.1.5",
-  "description": "DSH 工作区文件浏览器：右侧停靠预览 Markdown、代码和 HTML，并可打开系统文件夹与工作区终端",
+  "version": "0.1.6",
+  "description": "DSH 工作区文件浏览器：悬浮层级目录、Markdown/代码/HTML 预览与工作区终端",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -31,6 +31,7 @@
     "access": "public"
   },
   "dsh": {
+    "protocolVersion": 1,
     "client": {
       "platform": "web"
     },
@@ -39,7 +40,44 @@
     },
     "market": {
       "displayName": "工作区文件浏览器",
-      "capabilities": ["skills", "host", "client"]
+      "capabilities": ["skills", "host", "client", "desktop-shell"]
+    },
+    "desktop": {
+      "permissions": [
+        "shell:titlebar",
+        "workspace:read",
+        "native:open-folder",
+        "native:open-terminal"
+      ],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "open-folder",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "文件夹",
+            "icon": "folder",
+            "order": 100,
+            "when": ["workspaceSelected", "dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "native",
+              "command": "workspace.openFolder"
+            }
+          },
+          {
+            "id": "open-terminal",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "Terminal",
+            "icon": "terminal",
+            "order": 110,
+            "when": ["workspaceSelected", "dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "native",
+              "command": "workspace.openTerminal"
+            }
+          }
+        ]
+      },
+      "storage": []
     }
   }
 }

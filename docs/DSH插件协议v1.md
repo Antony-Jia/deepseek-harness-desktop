@@ -1,8 +1,15 @@
 # DSH Plugin Contract v1
 
-> 状态：设计草案，尚未完整实现。
+> 状态：第一阶段桌面标题栏贡献已落地；存储、生命周期授权和通用插件 RPC 注册仍是后续实施项。
 >
-> 本文定义 DSH 市场插件在 npm 包清单、Tauri 桌面外框扩展、权限、存储和生命周期方面的统一协议。当前代码与本文不一致之处，应视为后续实施项，而不是现有能力。
+> 本文定义 DSH 市场插件在 npm 包清单、Tauri 桌面外框扩展、权限、存储和生命周期方面的统一协议。当前实现已覆盖 `protocolVersion: 1`、`desktop.titlebar.workspaceActions`、清单校验和受控工作区按钮；未覆盖部分仍视为后续实施项。
+
+## 当前代码映射（第一阶段）
+
+- `src-tauri/src/market.rs` 校验 `protocolVersion`、`desktop-shell`、桌面权限、标题栏 slot、条件、ID 和受控动作，并只读取 web profile 中已安装的市场插件贡献。
+- `src-tauri/src/lib.rs` 的 `get_desktop_contributions` 向外框提供经过校验的贡献清单；外框只渲染 `desktop.titlebar.workspaceActions`，不执行任意 Tauri command。
+- `dist/app.js` 将 `workspace.openFolder` / `workspace.openTerminal` 映射为受控的 iframe `postMessage`；插件 Web UI 使用 `shell.overlay` 显示悬浮文件面板。
+- 当前尚未对通用 `pluginRpc` 建立跨插件注册中心，因此外框只接受已登记的两个内部工作区方法；其他 RPC 贡献不会显示。
 
 ## 1. 目标
 

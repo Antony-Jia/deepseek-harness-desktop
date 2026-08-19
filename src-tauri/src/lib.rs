@@ -9,7 +9,9 @@ mod single_instance;
 mod state;
 
 use control::ControlServer;
-use market::{MarketManager, MarketOperationResult, MarketSearchResult};
+use market::{
+    DesktopContributionsResult, MarketManager, MarketOperationResult, MarketSearchResult,
+};
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
@@ -104,8 +106,10 @@ pub fn run() {
         .manage(context)
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_desktop_contributions,
             choose_workspace,
             start_dsh,
+            restart_dsh,
             detect_local_runtime,
             set_runtime_source,
             check_for_updates,
@@ -196,6 +200,46 @@ fn get_status(context: tauri::State<'_, DesktopContext>) -> Result<DesktopStatus
 }
 
 #[tauri::command]
+async fn get_desktop_contributions(
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<DesktopContributionsResult, String> {
+    let persisted = context.store.load().map_err(io_error)?;
+    let dsh_running = context
+        .process
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|process| !process.url.is_empty()))
+        .unwrap_or(false);
+    let workspace_selected = persisted.last_workspace.is_some();
+    if !dsh_running {
+        return Ok(DesktopContributionsResult::unavailable(
+            "DSH 尚未运行，暂不显示桌面插件贡献。",
+            false,
+            workspace_selected,
+        ));
+    }
+    match context
+        .market
+        .desktop_contributions(&context.manager, &persisted, &context.dsh_home)
+        .await
+    {
+        Ok(contributions) => Ok(DesktopContributionsResult {
+            protocol_version: market::DESKTOP_PROTOCOL_VERSION,
+            contributions,
+            runtime_ready: true,
+            dsh_running: true,
+            workspace_selected,
+            message: String::new(),
+        }),
+        Err(error) => Ok(DesktopContributionsResult::unavailable(
+            format!("读取桌面插件贡献失败：{error}"),
+            true,
+            workspace_selected,
+        )),
+    }
+}
+
+#[tauri::command]
 fn choose_workspace(
     app: AppHandle,
     context: tauri::State<'_, DesktopContext>,
@@ -225,6 +269,22 @@ fn choose_workspace(
 
 #[tauri::command]
 fn start_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    spawn_start(app, context.inner().clone(), None);
+    Ok(())
+}
+
+#[tauri::command]
+fn restart_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result<(), String> {
+    stop_current(&context);
+    set_status(
+        &context,
+        &app,
+        "starting",
+        "正在重启 DSH",
+        "正在停止旧进程并启动当前工作区。",
+        None,
+        None,
+    );
     spawn_start(app, context.inner().clone(), None);
     Ok(())
 }

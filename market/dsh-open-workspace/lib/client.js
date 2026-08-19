@@ -1,8 +1,8 @@
 // dsh-open-workspace — browser half
 // 1) 外层标题栏/会话头部按钮：开/关右侧文件浏览器
-// 2) details 右侧停靠面板：左=目录/文件列表，右=多 tab 预览（Markdown / HTML / 代码）
+// 2) shell.overlay 悬浮文件面板：左=层级目录树，右=多 tab 预览（Markdown / HTML / 代码）
 // 3) conversation.composer.dock 下方嵌入 PowerShell 面板
-// 4) 使用 DSH 原生 details 列，外层宽度由布局拖拽手柄控制
+// 4) 文件面板完全使用 DSH 官方 overlay 插槽，不修改宿主 DOM 或 details 布局
 window.__ModuleLoader__.load({
   id: '@p-dsh-market/dsh-open-workspace',
   factory: (require) => {
@@ -11,12 +11,25 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
     var React = require('react')
 
-    var inject = ['slots', 'workspaces', 'timer', 'layout']
+    var inject = ['slots', 'workspaces', 'timer']
 
     // ── 共享面板状态 ────────────────────────────────────────────────
-    // 右侧预览区默认占 details 面板的 64%；拖拽后也始终保留至少 61%。
-    var store = { open: false, dir: null, width: 560, split: 0.36 }
-    var layoutController = null
+    // 悬浮面板的总宽度可调整；目录树使用独立的固定宽度，拉宽面板时不会按比例膨胀。
+    function loadPreferences() {
+      try {
+        var raw = window.localStorage.getItem('dsh-open-workspace:floating')
+        var value = raw ? JSON.parse(raw) : null
+        return value && typeof value === 'object' ? value : {}
+      } catch (_) { return {} }
+    }
+    var preferences = loadPreferences()
+    var store = {
+      open: false,
+      root: null,
+      width: clampNumber(preferences.width, 520, 1120, 720),
+      treeWidth: clampNumber(preferences.treeWidth, 200, 420, 270),
+      pinned: preferences.pinned === true
+    }
     var listeners = []
     var terminalStore = { open: false, cwd: null }
     var terminalListeners = []
@@ -24,9 +37,22 @@ window.__ModuleLoader__.load({
       if (window.parent === window) return
       window.parent.postMessage(Object.assign({ source: 'dsh-open-workspace', type: type }, payload || {}), '*')
     }
+    function clampNumber(value, lo, hi, fallback) {
+      return typeof value === 'number' && isFinite(value) ? clamp(value, lo, hi) : fallback
+    }
+    function savePreferences() {
+      try {
+        window.localStorage.setItem('dsh-open-workspace:floating', JSON.stringify({
+          width: store.width,
+          treeWidth: store.treeWidth,
+          pinned: store.pinned
+        }))
+      } catch (_) { /* localStorage may be unavailable in an embedded profile */ }
+    }
     function getState() { return store }
     function setState(patch) {
       store = Object.assign({}, store, patch)
+      if (Object.prototype.hasOwnProperty.call(patch, 'width') || Object.prototype.hasOwnProperty.call(patch, 'treeWidth') || Object.prototype.hasOwnProperty.call(patch, 'pinned')) savePreferences()
       for (var i = 0; i < listeners.length; i++) listeners[i]()
       announceDesktop('workspace-panel-state', { open: store.open })
     }
@@ -58,15 +84,13 @@ window.__ModuleLoader__.load({
       terminalListeners.push(fn)
       return function () { terminalListeners = terminalListeners.filter(function (f) { return f !== fn }) }
     }
-    function openPanel() {
-      setState({ open: true, dir: null })
-      if (layoutController !== null) layoutController.openDetails()
+    function openPanel(cwd) {
+      setState({ open: true, root: cwd || store.root || null })
     }
     function closePanel() {
       setState({ open: false })
-      if (layoutController !== null) layoutController.closeDetails()
     }
-    function togglePanel() { if (store.open) closePanel(); else openPanel() }
+    function togglePanel(cwd) { if (store.open) closePanel(); else openPanel(cwd) }
     function toggleTerminal(cwd) {
       if (terminalStore.open) setTerminalState({ open: false })
       else setTerminalState({ open: true, cwd: cwd || terminalStore.cwd || null })
@@ -347,6 +371,27 @@ window.__ModuleLoader__.load({
       '.owsp-hbtn:hover{background:var(--dsw-alias-interactive-bg-hover)}' +
       '.owsp-hbtn[data-active]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}' +
       '.owsp-panel{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);flex-direction:column;display:flex;overflow:hidden;font-size:13px}' +
+      '.owsp-overlay{position:absolute;inset:0;z-index:30;display:flex;justify-content:flex-end;align-items:stretch;padding:12px;box-sizing:border-box;pointer-events:none}' +
+      '.owsp-float{box-sizing:border-box;position:relative;display:flex;flex-direction:column;min-width:520px;max-width:calc(100% - 24px);min-height:0;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.24);overflow:visible;pointer-events:auto;font-size:13px}' +
+      '.owsp-float[data-pinned]{position:absolute;top:0;right:0;bottom:0;max-width:100%;border-radius:0;border-top:0;border-right:0;border-bottom:0}' +
+      '.owsp-float-resize{position:absolute;left:-5px;top:8px;bottom:8px;width:10px;cursor:col-resize;z-index:2}' +
+      '.owsp-float-resize:hover{background:var(--dsw-alias-interactive-bg-hover);border-radius:5px}' +
+      '.owsp-float-head{box-sizing:border-box;display:flex;align-items:center;gap:3px;flex:none;min-height:48px;padding:7px 8px 7px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:14px 14px 0 0}' +
+      '.owsp-float[data-pinned] .owsp-float-head{border-radius:0}' +
+      '.owsp-float-title{display:flex;flex-direction:column;justify-content:center;min-width:0;flex:1;gap:2px}' +
+      '.owsp-float-title strong{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.owsp-float-root{font:11px ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.owsp-pin{width:auto;padding:0 8px;font-size:11px}' +
+      '.owsp-float-main{display:flex;flex:1;min-height:0;overflow:hidden;border-radius:0 0 14px 14px}' +
+      '.owsp-float[data-pinned] .owsp-float-main{border-radius:0}' +
+      '.owsp-float-tree{box-sizing:border-box;flex:0 0 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-layer-1)}' +
+      '.owsp-float-tree-divider{flex:none;width:6px;cursor:col-resize;background:transparent;border-left:1px solid var(--dsw-alias-border-l1);border-right:1px solid transparent}' +
+      '.owsp-float-tree-divider:hover{background:var(--dsw-alias-interactive-bg-hover);border-right-color:var(--dsw-alias-border-l2)}' +
+      '.owsp-float-preview{display:flex;flex:1;min-width:0;min-height:0;flex-direction:column}' +
+      '.owsp-tree-row{box-sizing:border-box;display:flex;align-items:center;gap:5px;width:100%;min-height:29px;padding-top:4px;padding-bottom:4px;padding-right:7px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;text-align:left;cursor:pointer;overflow:hidden}' +
+      '.owsp-tree-row:hover{background:var(--dsw-alias-interactive-bg-hover)}' +
+      '.owsp-tree-chevron{flex:none;width:12px;color:var(--dsw-alias-label-tertiary);font-size:12px;text-align:center}' +
+      '.owsp-tree-empty{color:var(--dsw-alias-label-tertiary);padding-top:8px;padding-bottom:8px;font-size:12px}' +
       '.owsp-phead{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;min-height:40px;gap:2px;padding:6px 8px;display:flex}' +
       '.owsp-ptitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden;font-size:13px;font-weight:500}' +
       '.owsp-pbtn{cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:8px;flex:none;width:28px;height:28px;justify-content:center;align-items:center;padding:0;display:inline-flex}' +
@@ -553,14 +598,296 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    function FloatingWorkspacePanel(props) {
+      var ctx = props && props.ctx
+      var snap = usePanelState()
+      var directoriesPair = React.useState({})
+      var directories = directoriesPair[0]
+      var setDirectories = directoriesPair[1]
+      var expandedPair = React.useState({})
+      var expanded = expandedPair[0]
+      var setExpanded = expandedPair[1]
+      var notePair = React.useState(null)
+      var note = notePair[0]
+      var setNote = notePair[1]
+      var tabsPair = React.useState([])
+      var tabs = tabsPair[0]
+      var setTabs = tabsPair[1]
+      var activePair = React.useState(null)
+      var active = activePair[0]
+      var setActive = activePair[1]
+      var root = snap.root
+
+      function loadDirectory(path, force) {
+        if (!path) return
+        var current = directories[path]
+        if (!force && current && current.status === 'loading') return
+        setDirectories(function (previous) {
+          return Object.assign({}, previous, { [path]: { status: 'loading', entries: [], error: null } })
+        })
+        fetch('/open-workspace/list?path=' + encodeURIComponent(path))
+          .then(function (res) {
+            return res.json().catch(function () {
+              throw new Error('文件列表服务不可用（HTTP ' + res.status + '）——若刚更新过插件，请重启 dsh 后再试')
+            })
+          })
+          .then(function (data) {
+            if (data && data.error) throw new Error(data.error)
+            setDirectories(function (previous) {
+              return Object.assign({}, previous, { [path]: { status: 'ready', entries: data && data.entries ? data.entries : [], error: null } })
+            })
+          })
+          .catch(function (error) {
+            setDirectories(function (previous) {
+              return Object.assign({}, previous, { [path]: { status: 'error', entries: [], error: String(error && error.message ? error.message : error) } })
+            })
+          })
+      }
+
+      React.useEffect(function () {
+        if (!snap.open || !root) return
+        setDirectories({})
+        setExpanded({ [root]: true })
+        setTabs([])
+        setActive(null)
+        loadDirectory(root, true)
+      }, [snap.open, root])
+
+      React.useEffect(function () {
+        if (note === null) return
+        var dispose = ctx.timeout(function () { setNote(null) }, 3000)
+        return dispose
+      }, [note])
+
+      function toggleDirectory(path) {
+        var nextOpen = !expanded[path]
+        setExpanded(function (previous) { return Object.assign({}, previous, { [path]: nextOpen }) })
+        if (nextOpen && (!directories[path] || directories[path].status === 'error')) loadDirectory(path, true)
+      }
+
+      function openNative(entry) {
+        ctx.workspaces.openPath(entry.path)
+          .then(function () { setNote('已打开：' + entry.name) })
+          .catch(function (err) { setNote('打开失败：' + (err && err.message ? err.message : String(err))) })
+      }
+
+      function openEntry(entry) {
+        if (entry.type === 'directory') {
+          toggleDirectory(entry.path)
+          return
+        }
+        var kind = previewKind(entry.name)
+        if (kind === null) {
+          setNote('正在用默认应用打开…')
+          openNative(entry)
+          return
+        }
+        var existing = tabs.find(function (t) { return t.path === entry.path })
+        if (existing !== undefined) { setActive(existing.path); return }
+        setActive(entry.path)
+        setTabs(function (prev) {
+          var next = prev.slice()
+          if (next.length >= 15) next.shift()
+          next.push({ path: entry.path, name: baseName(entry.path), kind: kind, status: 'loading' })
+          return next
+        })
+        fetch('/open-workspace/read?path=' + encodeURIComponent(entry.path))
+          .then(function (res) {
+            return res.json().catch(function () { throw new Error('读取服务不可用（HTTP ' + res.status + '）') })
+          })
+          .then(function (data) {
+            setTabs(function (prev) {
+              return prev.map(function (t) {
+                if (t.path !== entry.path) return t
+                if (data && data.error && !data.content) return { path: t.path, name: t.name, kind: t.kind, status: 'error', error: data.error }
+                if (data && data.tooLarge) return { path: t.path, name: t.name, kind: t.kind, status: 'toolarge', size: data.size }
+                if (data && data.binary) return { path: t.path, name: t.name, kind: t.kind, status: 'binary' }
+                return { path: t.path, name: t.name, kind: t.kind, status: 'ready', content: data.content || '' }
+              })
+            })
+          })
+          .catch(function (err) {
+            setTabs(function (prev) {
+              return prev.map(function (t) {
+                return t.path === entry.path ? { path: t.path, name: t.name, kind: t.kind, status: 'error', error: String(err && err.message ? err.message : err) } : t
+              })
+            })
+          })
+      }
+
+      function closeTab(path) {
+        var idx = tabs.findIndex(function (t) { return t.path === path })
+        var next = tabs.filter(function (t) { return t.path !== path })
+        setTabs(next)
+        if (active === path) {
+          var neighbor = next[idx] || next[next.length - 1] || null
+          setActive(neighbor ? neighbor.path : null)
+        }
+      }
+
+      function treeRows(path, depth, seen) {
+        if (!path || seen[path]) return []
+        var nextSeen = Object.assign({}, seen, { [path]: true })
+        var record = directories[path]
+        if (!record) return [React.createElement('div', { key: path + ':loading', className: 'owsp-loading' }, '加载中…')]
+        if (record.status === 'loading') return [React.createElement('div', { key: path + ':loading', className: 'owsp-loading' }, '加载中…')]
+        if (record.status === 'error') return [React.createElement('div', { key: path + ':error', className: 'owsp-error' }, record.error || '目录读取失败')]
+        if (!record.entries || record.entries.length === 0) return [React.createElement('div', { key: path + ':empty', className: 'owsp-tree-empty', style: { paddingLeft: (12 + depth * 16) + 'px' } }, '（空目录）')]
+        var rows = []
+        record.entries.forEach(function (entry) {
+          var isDir = entry.type === 'directory'
+          var isOpen = isDir && expanded[entry.path]
+          rows.push(React.createElement('button', {
+            key: entry.path,
+            type: 'button',
+            className: entry.name.charAt(0) === '.' ? 'owsp-tree-row owsp-hidden' : 'owsp-tree-row',
+            style: { paddingLeft: (8 + depth * 16) + 'px' },
+            title: entry.path,
+            onClick: function () { openEntry(entry) }
+          }, [
+            React.createElement('span', { key: 'chevron', className: 'owsp-tree-chevron' }, isDir ? (isOpen ? '▾' : '▸') : '·'),
+            React.createElement('span', { key: 'icon', className: 'owsp-rowicon' }, isDir ? folderIcon() : fileIcon()),
+            React.createElement('span', { key: 'name', className: 'owsp-rowname' }, entry.name),
+            React.createElement('span', { key: 'size', className: 'owsp-rowsize' }, isDir ? '' : formatSize(entry.size))
+          ]))
+          if (isDir && isOpen) rows = rows.concat(treeRows(entry.path, depth + 1, nextSeen))
+        })
+        return rows
+      }
+
+      function refreshTree() {
+        if (!root) return
+        setDirectories({})
+        setExpanded({ [root]: true })
+        loadDirectory(root, true)
+      }
+
+      function createRootDirectory() {
+        if (!root) return
+        var name = window.prompt('新建文件夹名称', '新建文件夹')
+        if (name === null || name.trim() === '') return
+        ctx.workspaces.createDirectory(root, name.trim())
+          .then(function () { setNote('已创建：' + name.trim()); refreshTree() })
+          .catch(function (err) { setNote('创建失败：' + (err && err.message ? err.message : String(err))) })
+      }
+
+      function onPanelResizeStart(event) {
+        event.preventDefault()
+        event.stopPropagation()
+        var startX = event.clientX
+        var startWidth = snap.width
+        var maxWidth = Math.max(520, Math.min(1120, Math.floor((window.innerWidth || 1400) * 0.88)))
+        function move(nextEvent) {
+          setState({ width: clamp(startWidth + startX - nextEvent.clientX, 520, maxWidth) })
+        }
+        function up() {
+          window.removeEventListener('mousemove', move)
+          window.removeEventListener('mouseup', up)
+        }
+        window.addEventListener('mousemove', move)
+        window.addEventListener('mouseup', up)
+      }
+
+      function onTreeResizeStart(event) {
+        event.preventDefault()
+        event.stopPropagation()
+        var startX = event.clientX
+        var startWidth = snap.treeWidth
+        function move(nextEvent) { setState({ treeWidth: clamp(startWidth + nextEvent.clientX - startX, 200, 420) }) }
+        function up() {
+          window.removeEventListener('mousemove', move)
+          window.removeEventListener('mouseup', up)
+        }
+        window.addEventListener('mousemove', move)
+        window.addEventListener('mouseup', up)
+      }
+
+      if (!snap.open) return null
+
+      var activeTab = null
+      for (var ti = 0; ti < tabs.length; ti++) { if (tabs[ti].path === active) { activeTab = tabs[ti]; break } }
+      var preview
+      if (activeTab === null) {
+        preview = React.createElement('div', { className: 'owsp-phint' }, '点击左侧文件在右侧预览\n支持 Markdown / HTML / 代码高亮')
+      } else if (activeTab.status === 'loading') {
+        preview = React.createElement('div', { className: 'owsp-loading' }, '加载中…')
+      } else if (activeTab.status === 'error') {
+        preview = React.createElement('div', { className: 'owsp-error' }, String(activeTab.error))
+      } else if (activeTab.status === 'toolarge') {
+        preview = React.createElement('div', { className: 'owsp-note' }, [
+          '文件过大（' + formatSize(activeTab.size) + '），无法在面板内预览。', React.createElement('br'),
+          React.createElement('button', { type: 'button', className: 'owsp-linkbtn', onClick: function () { openNative({ path: activeTab.path, name: activeTab.name }) } }, '用默认应用打开')
+        ])
+      } else if (activeTab.status === 'binary') {
+        preview = React.createElement('div', { className: 'owsp-note' }, [
+          '这是二进制文件，无法预览文本内容。', React.createElement('br'),
+          React.createElement('button', { type: 'button', className: 'owsp-linkbtn', onClick: function () { openNative({ path: activeTab.path, name: activeTab.name }) } }, '用默认应用打开')
+        ])
+      } else if (activeTab.kind === 'html') {
+        preview = React.createElement('iframe', { sandbox: '', srcDoc: activeTab.content, style: { width: '100%', height: '100%', border: 'none', display: 'block', background: '#ffffff' } })
+      } else if (activeTab.kind === 'md') {
+        preview = React.createElement('div', { className: 'owsp-md', dangerouslySetInnerHTML: { __html: renderMarkdown(activeTab.content) } })
+      } else {
+        var codeLanguage = languageForName(activeTab.name)
+        preview = React.createElement('pre', { className: 'owsp-text owsp-code-preview', 'data-language': codeLanguage, dangerouslySetInnerHTML: { __html: '<code>' + highlightCode(activeTab.content, codeLanguage) + '</code>' } })
+      }
+
+      var tabBar = React.createElement('div', { className: 'owsp-tabs' }, tabs.map(function (tab) {
+        return React.createElement('div', {
+          key: tab.path,
+          className: 'owsp-tab',
+          'data-active': tab.path === active || undefined,
+          title: tab.path,
+          onClick: function () { setActive(tab.path) }
+        }, [
+          React.createElement('span', { key: 'name', className: 'owsp-tabname' }, tab.name),
+          React.createElement('span', { key: 'close', className: 'owsp-tabclose', role: 'button', 'aria-label': '关闭 ' + tab.name, onClick: function (event) { event.stopPropagation(); closeTab(tab.path) } }, xIcon())
+        ])
+      }))
+
+      var treeBody
+      if (!root) treeBody = React.createElement('div', { className: 'owsp-note' }, '当前没有可用的工作区')
+      else treeBody = React.createElement('div', { className: 'owsp-lbody' }, treeRows(root, 0, {}))
+
+      return React.createElement('div', {
+        className: 'owsp-overlay',
+        onMouseDown: function (event) { if (event.target === event.currentTarget && !snap.pinned) closePanel() }
+      }, React.createElement('section', {
+        className: 'owsp-float',
+        'data-pinned': snap.pinned ? 'true' : undefined,
+        style: { width: snap.width + 'px' },
+        role: 'region',
+        'aria-label': '文件浏览器',
+        onMouseDown: function (event) { event.stopPropagation() }
+      }, [
+        React.createElement('div', { key: 'resize', className: 'owsp-float-resize', title: '拖拽调整悬浮面板宽度', onMouseDown: onPanelResizeStart }),
+        React.createElement('div', { key: 'head', className: 'owsp-float-head' }, [
+          React.createElement('div', { key: 'title', className: 'owsp-float-title' }, [
+            React.createElement('strong', { key: 'name' }, root ? baseName(root) : '文件浏览器'),
+            React.createElement('span', { key: 'path', className: 'owsp-float-root', title: root || '' }, root || '未设置工作区')
+          ]),
+          React.createElement('button', { key: 'pin', type: 'button', className: 'owsp-pbtn owsp-pin', 'data-active': snap.pinned || undefined, title: snap.pinned ? '取消固定（允许点击面板外关闭）' : '固定面板（保持打开）', onClick: function () { setState({ pinned: !snap.pinned }) } }, snap.pinned ? '取消固定' : '固定'),
+          React.createElement('button', { key: 'refresh', type: 'button', className: 'owsp-pbtn', title: '刷新目录树', disabled: !root, onClick: refreshTree }, refreshIcon()),
+          React.createElement('button', { key: 'new', type: 'button', className: 'owsp-pbtn', title: '在工作区根目录新建文件夹', disabled: !root, onClick: createRootDirectory }, plusIcon()),
+          React.createElement('button', { key: 'close', type: 'button', className: 'owsp-pbtn', title: '关闭悬浮文件面板', onClick: closePanel }, closeIcon())
+        ]),
+        note !== null ? React.createElement('div', { key: 'note', className: note.indexOf('失败') >= 0 ? 'owsp-error' : 'owsp-note' }, note) : null,
+        React.createElement('div', { key: 'main', className: 'owsp-float-main' }, [
+          React.createElement('div', { key: 'tree', className: 'owsp-float-tree', style: { width: snap.treeWidth + 'px' } }, treeBody),
+          React.createElement('div', { key: 'divider', className: 'owsp-float-tree-divider', title: '拖拽调整目录宽度', onMouseDown: onTreeResizeStart }),
+          React.createElement('div', { key: 'preview', className: 'owsp-float-preview' }, [
+            tabBar,
+            React.createElement('div', { key: 'body', className: 'owsp-preview' }, preview)
+          ])
+        ])
+      ]))
+    }
+
     function apply(ctx) {
-      layoutController = ctx.layout
       ctx.effect(function () {
         return function () {
-          if (layoutController === ctx.layout) layoutController = null
-          setState({ open: false, dir: null })
+          setState({ open: false, root: null })
           setTerminalState({ open: false, cwd: null })
-          ctx.layout.closeDetails()
         }
       })
       ctx.effect(function () {
@@ -579,8 +906,8 @@ window.__ModuleLoader__.load({
           if (event.source !== window.parent) return
           var data = event.data
           if (!data || data.source !== 'dsh-desktop') return
-          if (data.type === 'workspace-panel-toggle') togglePanel()
-          else if (data.type === 'workspace-panel-open') openPanel()
+          if (data.type === 'workspace-panel-toggle') togglePanel(data.cwd)
+          else if (data.type === 'workspace-panel-open') openPanel(data.cwd)
           else if (data.type === 'workspace-panel-close') closePanel()
           else if (data.type === 'terminal-panel-toggle') toggleTerminal(data.cwd)
           else if (data.type === 'terminal-panel-open') setTerminalState({ open: true, cwd: data.cwd || terminalStore.cwd || null })
@@ -594,24 +921,6 @@ window.__ModuleLoader__.load({
         return function () { window.removeEventListener('message', onDesktopMessage) }
       })
 
-      // 会话头部按钮
-      ctx.slots.inject('conversation.session.header.actions', function () {
-        return ctx.slots.register(
-          { name: 'conversation.session.header.actions', id: 'open-workspace-header', order: 15, label: '文件' },
-          function () {
-            var snap = usePanelState()
-            return React.createElement('button', {
-              type: 'button',
-              className: 'owsp-hbtn',
-              'data-active': snap.open || undefined,
-              'aria-label': '文件浏览器（工作区）',
-              title: '文件浏览器（工作区）',
-              onClick: togglePanel
-            }, folderIcon())
-          }
-        )
-      })
-
       // composer.dock 位于输入框所属 card 的下方；input.dock 会渲染到
       // card 上方，不能用于这里的终端面板。
       ctx.slots.inject('conversation.composer.dock', function () {
@@ -621,282 +930,11 @@ window.__ModuleLoader__.load({
         )
       })
 
-      // 对话右侧停靠面板：details 是 DSH 原生三列布局中的右列，
-      // 不使用 shell.overlay，避免文件浏览器覆盖在消息流上方。
-      ctx.slots.inject('details', function () {
+      // 官方 overlay 插槽提供独立的悬浮层，不占用宿主 details 列，也不依赖 DOM 选择器。
+      ctx.slots.inject('shell.overlay', function () {
         return ctx.slots.register(
-          // `details` 是单槽位；优先级必须与内置 DetailsPanel 不同。
-          // DSH 的单槽位按最低优先级渲染，因此 -1 明确 shadow 内置的 0。
-          { name: 'details', priority: -1 },
-          function (props) {
-            var snap = usePanelState()
-            var useWorkspaces = props.useWorkspaces
-            var useSessions = props.useSessions
-            var sessionId = props.sessionId
-            if (typeof useWorkspaces !== 'function' || typeof useSessions !== 'function') return null
-
-            var sessionCwd = useSessions(function (s) { return sessionId !== undefined && s.byId[sessionId] ? s.byId[sessionId].cwd : null })
-            var recentId = useWorkspaces(function (s) { return s.recentWorkspaceId })
-            var items = useWorkspaces(function (s) { return s.items })
-            var root = sessionCwd || null
-            if (recentId !== undefined) {
-              var found = items.find(function (w) { return w.workspaceId === recentId })
-              if (root === null && found !== undefined) root = found.path
-            }
-            if (root === null && items.length > 0) root = items[0].path
-
-            var dir = snap.dir !== null ? snap.dir : root
-
-            var listPair = React.useState(null)
-            var listing = listPair[0]
-            var setListing = listPair[1]
-            var loadPair = React.useState(false)
-            var loading = loadPair[0]
-            var setLoading = loadPair[1]
-            var revPair = React.useState(0)
-            var revision = revPair[0]
-            var setRevision = revPair[1]
-            var notePair = React.useState(null)
-            var note = notePair[0]
-            var setNote = notePair[1]
-            var tabsPair = React.useState([])
-            var tabs = tabsPair[0]
-            var setTabs = tabsPair[1]
-            var activePair = React.useState(null)
-            var active = activePair[0]
-            var setActive = activePair[1]
-
-            var firstSessionRef = React.useRef(sessionId)
-            React.useEffect(function () {
-              if (firstSessionRef.current === sessionId) return
-              firstSessionRef.current = sessionId
-              setState({ open: false, dir: null })
-            }, [sessionId])
-
-            React.useEffect(function () {
-              if (note === null) return
-              var dispose = ctx.timeout(function () { setNote(null) }, 3000)
-              return dispose
-            }, [note])
-
-            React.useEffect(function () {
-              if (!snap.open) return
-              if (dir === null) {
-                setListing({ error: '当前没有可用的工作区' })
-                return
-              }
-              var cancelled = false
-              setLoading(true)
-              fetch('/open-workspace/list?path=' + encodeURIComponent(dir))
-                .then(function (res) {
-                  return res.json().catch(function () {
-                    throw new Error('文件列表服务不可用（HTTP ' + res.status + '）——若刚更新过插件，请重启 dsh 后再试')
-                  })
-                })
-                .then(function (data) {
-                  if (cancelled) return
-                  setListing(data)
-                  setLoading(false)
-                })
-                .catch(function (err) {
-                  if (cancelled) return
-                  setListing({ error: String(err && err.message ? err.message : err) })
-                  setLoading(false)
-                })
-              return function () { cancelled = true }
-            }, [snap.open, dir, revision])
-
-            function openEntry(entry) {
-              if (entry.type === 'directory') {
-                setState({ dir: entry.path })
-                return
-              }
-              var kind = previewKind(entry.name)
-              if (kind === null) {
-                setNote('正在用默认应用打开…')
-                ctx.workspaces.openPath(entry.path)
-                  .then(function () { setNote('已打开：' + entry.name) })
-                  .catch(function (err) { setNote('打开失败：' + (err && err.message ? err.message : String(err))) })
-                return
-              }
-              var existing = tabs.find(function (t) { return t.path === entry.path })
-              if (existing !== undefined) { setActive(existing.path); return }
-              setActive(entry.path)
-              setTabs(function (prev) {
-                var next = prev.slice()
-                if (next.length >= 15) next.shift()
-                next.push({ path: entry.path, name: baseName(entry.path), kind: kind, status: 'loading' })
-                return next
-              })
-              fetch('/open-workspace/read?path=' + encodeURIComponent(entry.path))
-                .then(function (res) {
-                  return res.json().catch(function () { throw new Error('读取服务不可用（HTTP ' + res.status + '）') })
-                })
-                .then(function (data) {
-                  setTabs(function (prev) {
-                    return prev.map(function (t) {
-                      if (t.path !== entry.path) return t
-                      if (data && data.error && !data.content) return { path: t.path, name: t.name, kind: t.kind, status: 'error', error: data.error }
-                      if (data && data.tooLarge) return { path: t.path, name: t.name, kind: t.kind, status: 'toolarge', size: data.size }
-                      if (data && data.binary) return { path: t.path, name: t.name, kind: t.kind, status: 'binary' }
-                      return { path: t.path, name: t.name, kind: t.kind, status: 'ready', content: data.content || '' }
-                    })
-                  })
-                })
-                .catch(function (err) {
-                  setTabs(function (prev) {
-                    return prev.map(function (t) {
-                      return t.path === entry.path ? { path: t.path, name: t.name, kind: t.kind, status: 'error', error: String(err && err.message ? err.message : err) } : t
-                    })
-                  })
-                })
-            }
-
-            function closeTab(path) {
-              var idx = tabs.findIndex(function (t) { return t.path === path })
-              var next = tabs.filter(function (t) { return t.path !== path })
-              setTabs(next)
-              if (active === path) {
-                var neighbor = next[idx] || next[next.length - 1] || null
-                setActive(neighbor ? neighbor.path : null)
-              }
-            }
-
-            function openNative(entry) {
-              ctx.workspaces.openPath(entry.path)
-                .then(function () { setNote('已打开：' + entry.name) })
-                .catch(function (err) { setNote('打开失败：' + (err && err.message ? err.message : String(err))) })
-            }
-
-            function onSplitStart(e) {
-              e.preventDefault()
-              var startX = e.clientX
-              var startSplit = store.split || 0.42
-              var w = store.width || 560
-              function move(ev) {
-                // 预览区至少保留 61%，代码阅读不会被左侧目录挤窄。
-                setState({ split: clamp(startSplit + (ev.clientX - startX) / w, 0.22, 0.39) })
-              }
-              function up() {
-                window.removeEventListener('mousemove', move)
-                window.removeEventListener('mouseup', up)
-              }
-              window.addEventListener('mousemove', move)
-              window.addEventListener('mouseup', up)
-            }
-
-            if (!snap.open) return null
-
-            var panelWidth = store.width || 560
-            var leftWidth = Math.round(panelWidth * (store.split || 0.36))
-
-            var headerBtns = []
-            var parent = parentDir(dir)
-            headerBtns.push(React.createElement('button', { key: 'up', type: 'button', className: 'owsp-pbtn', title: '上级目录', disabled: dir === null || parent === null, onClick: function () { setState({ dir: parent }) } }, upIcon()))
-            headerBtns.push(React.createElement('button', { key: 'refresh', type: 'button', className: 'owsp-pbtn', title: '刷新', disabled: dir === null, onClick: function () { setRevision(revision + 1) } }, refreshIcon()))
-            headerBtns.push(React.createElement('button', { key: 'new', type: 'button', className: 'owsp-pbtn', title: '新建文件夹', disabled: dir === null, onClick: function () {
-              var name = window.prompt('新建文件夹名称', '新建文件夹')
-              if (name === null || name.trim() === '') return
-              ctx.workspaces.createDirectory(dir, name.trim())
-                .then(function () { setRevision(revision + 1) })
-                .catch(function (err) { setNote('创建失败：' + (err && err.message ? err.message : String(err))) })
-            } }, plusIcon()))
-            headerBtns.push(React.createElement('button', { key: 'close', type: 'button', className: 'owsp-pbtn', title: '关闭右侧文件面板', onClick: closePanel }, closeIcon()))
-
-            var listBody
-            if (dir === null) {
-              listBody = React.createElement('div', { className: 'owsp-note' }, '当前没有可用的工作区')
-            } else if (loading) {
-              listBody = React.createElement('div', { className: 'owsp-loading' }, '加载中…')
-            } else if (listing && listing.error) {
-              listBody = React.createElement('div', { className: 'owsp-error' }, String(listing.error))
-            } else if (listing && listing.entries && listing.entries.length === 0) {
-              listBody = React.createElement('div', { className: 'owsp-note' }, '（空目录）')
-            } else {
-              var rows = (listing && listing.entries ? listing.entries : []).map(function (entry) {
-                var isDir = entry.type === 'directory'
-                return React.createElement('button', {
-                  key: entry.path,
-                  type: 'button',
-                  className: entry.name.charAt(0) === '.' ? 'owsp-row owsp-hidden' : 'owsp-row',
-                  title: entry.path,
-                  onClick: function () { openEntry(entry) }
-                }, [
-                  React.createElement('span', { className: 'owsp-rowicon' }, isDir ? folderIcon() : fileIcon()),
-                  React.createElement('span', { className: 'owsp-rowname' }, entry.name),
-                  React.createElement('span', { className: 'owsp-rowsize' }, isDir ? '' : formatSize(entry.size))
-                ])
-              })
-              listBody = React.createElement('div', { className: 'owsp-lbody' }, rows)
-            }
-
-            var activeTab = null
-            for (var ti = 0; ti < tabs.length; ti++) { if (tabs[ti].path === active) { activeTab = tabs[ti]; break } }
-
-            var preview
-            if (activeTab === null) {
-              preview = React.createElement('div', { className: 'owsp-phint' }, '点击左侧文件在右侧预览\n支持 Markdown / HTML / 文本')
-            } else if (activeTab.status === 'loading') {
-              preview = React.createElement('div', { className: 'owsp-loading' }, '加载中…')
-            } else if (activeTab.status === 'error') {
-              preview = React.createElement('div', { className: 'owsp-error' }, String(activeTab.error))
-            } else if (activeTab.status === 'toolarge') {
-              preview = React.createElement('div', { className: 'owsp-note' }, [
-                '文件过大（' + formatSize(activeTab.size) + '），无法在面板内预览。',
-                React.createElement('br'),
-                React.createElement('button', { type: 'button', className: 'owsp-linkbtn', onClick: function () { openNative({ path: activeTab.path, name: activeTab.name }) } }, '用默认应用打开')
-              ])
-            } else if (activeTab.status === 'binary') {
-              preview = React.createElement('div', { className: 'owsp-note' }, [
-                '这是二进制文件，无法预览文本内容。',
-                React.createElement('br'),
-                React.createElement('button', { type: 'button', className: 'owsp-linkbtn', onClick: function () { openNative({ path: activeTab.path, name: activeTab.name }) } }, '用默认应用打开')
-              ])
-            } else if (activeTab.kind === 'html') {
-              preview = React.createElement('iframe', { sandbox: '', srcDoc: activeTab.content, style: { width: '100%', height: '100%', border: 'none', display: 'block', background: '#ffffff' } })
-            } else if (activeTab.kind === 'md') {
-              preview = React.createElement('div', { className: 'owsp-md', dangerouslySetInnerHTML: { __html: renderMarkdown(activeTab.content) } })
-            } else {
-              var codeLanguage = languageForName(activeTab.name)
-              preview = React.createElement('pre', { className: 'owsp-text owsp-code-preview', 'data-language': codeLanguage, dangerouslySetInnerHTML: { __html: '<code>' + highlightCode(activeTab.content, codeLanguage) + '</code>' } })
-            }
-
-            var tabBar = React.createElement('div', { className: 'owsp-tabs' },
-              tabs.map(function (t) {
-                return React.createElement('div', {
-                  key: t.path,
-                  className: 'owsp-tab',
-                  'data-active': t.path === active || undefined,
-                  title: t.path,
-                  onClick: function () { setActive(t.path) }
-                }, [
-                  React.createElement('span', { className: 'owsp-tabname' }, t.name),
-                  React.createElement('span', {
-                    className: 'owsp-tabclose',
-                    role: 'button',
-                    'aria-label': '关闭 ' + t.name,
-                    onClick: function (e) { e.stopPropagation(); closeTab(t.path) }
-                  }, xIcon())
-                ])
-              })
-            )
-
-            return React.createElement('div', { className: 'owsp-panel', role: 'region', 'aria-label': '文件浏览器' },
-              React.createElement('div', { className: 'owsp-phead' },
-                React.createElement('span', { className: 'owsp-ptitle', title: dir !== null ? dir : '文件浏览器' }, dir !== null ? baseName(dir) : '文件浏览器'),
-                headerBtns
-              ),
-              note !== null ? React.createElement('div', { className: note && note.indexOf('失败') >= 0 ? 'owsp-error' : 'owsp-note' }, note) : null,
-              React.createElement('div', { className: 'owsp-main' },
-                React.createElement('div', { className: 'owsp-left', style: { width: leftWidth + 'px' } }, listBody),
-                React.createElement('div', { className: 'owsp-divider', onMouseDown: onSplitStart, title: '拖拽调整左右比例' }),
-                React.createElement('div', { className: 'owsp-right' },
-                  tabBar,
-                  React.createElement('div', { className: 'owsp-preview' }, preview)
-                )
-              )
-            )
-          }
+          { name: 'shell.overlay', id: 'open-workspace-floating', order: 40, label: '工作区文件浏览器' },
+          function () { return React.createElement(FloatingWorkspacePanel, { ctx: ctx }) }
         )
       })
     }

@@ -16,8 +16,7 @@
         </button>
         <span class="titlebar-caption">DeepSeek Harness</span>
         <div class="titlebar-tools" aria-label="工作区工具">
-          <button id="titlebar-workspace" class="titlebar-tool" type="button" title="显示右侧工作区面板" aria-label="显示右侧工作区面板" disabled>文件夹</button>
-          <button id="titlebar-terminal" class="titlebar-tool" type="button" title="打开下方 PowerShell 面板" aria-label="打开下方 PowerShell 面板" disabled>Terminal</button>
+          <div id="titlebar-plugin-actions" class="titlebar-plugin-actions" aria-label="插件工作区操作"></div>
           <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
         </div>
       </div>
@@ -64,6 +63,7 @@
           </div>
           <div class="home-entry-actions">
             <button id="toggle-dsh" class="button primary" type="button">启动</button>
+            <button id="restart-dsh" class="button secondary" type="button" disabled>重启</button>
             <button id="enter-dsh" class="button secondary" type="button" disabled>进入页面</button>
           </div>
         </div>
@@ -137,9 +137,12 @@
             <h2 id="market-runtime-title">正在检查 DSH 运行时</h2>
             <p id="market-runtime-message" class="muted">市场不会自动切换运行来源，也不会修改系统 PATH。</p>
           </div>
-          <div class="market-runtime-pills">
+          <div class="market-runtime-controls">
+            <div class="market-runtime-pills">
             <span id="market-runtime-pill" class="pill neutral">未检查</span>
             <span id="market-pnpm-pill" class="pill neutral">pnpm 未检查</span>
+            </div>
+            <button id="market-restart-dsh" class="button secondary" type="button" disabled>重启 DSH</button>
           </div>
         </section>
 

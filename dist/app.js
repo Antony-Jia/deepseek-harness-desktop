@@ -11,6 +11,10 @@
   var loadedFrameUrl = ''
   var workspacePanelOpen = false
   var terminalPanelOpen = false
+  var desktopContributions = []
+  var desktopContributionsKey = ''
+  var desktopContributionRequest = null
+  var desktopActionsBusy = false
   var marketResult = null
   var marketQuery = ''
   var marketBusy = false
@@ -43,10 +47,12 @@
     setText('theme-message', message)
   }
   function setBusy(busy) {
-    ;['primary-action', 'toggle-dsh', 'enter-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-workspace', 'titlebar-terminal', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
+    desktopActionsBusy = !!busy
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'app-home', 'app-update', 'app-upgrade', 'app-stop'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
+    renderDesktopActions()
   }
   function updateView() {
     var url = state && state.webUrl ? String(state.webUrl) : ''
@@ -78,21 +84,7 @@
       marketButton.classList.toggle('active', showingMarket)
       marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
     }
-    var workspaceReady = !!(state && state.workspace)
-    var workspaceButton = el('titlebar-workspace')
-    var terminalButton = el('titlebar-terminal')
-    if (workspaceButton) {
-      workspaceButton.disabled = !(showingDsh && workspaceReady)
-      workspaceButton.title = showingDsh && workspaceReady ? (workspacePanelOpen ? '隐藏右侧工作区面板' : '显示右侧工作区面板') : '尚未进入 DSH 或选择工作区'
-      workspaceButton.setAttribute('aria-label', workspaceButton.title)
-      workspaceButton.setAttribute('aria-pressed', workspacePanelOpen ? 'true' : 'false')
-    }
-    if (terminalButton) {
-      terminalButton.disabled = !(showingDsh && workspaceReady)
-      terminalButton.title = showingDsh && workspaceReady ? (terminalPanelOpen ? '关闭下方 PowerShell 面板' : '打开下方 PowerShell 面板') : '尚未进入 DSH 或选择工作区'
-      terminalButton.setAttribute('aria-label', terminalButton.title)
-      terminalButton.setAttribute('aria-pressed', terminalPanelOpen ? 'true' : 'false')
-    }
+    renderDesktopActions()
     var frame = el('dsh-frame')
     if (frame && url && loadedFrameUrl !== url) {
       workspacePanelOpen = false
@@ -135,15 +127,101 @@
     }
     action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })
   }
+  function restartDsh() {
+    if (!state || !state.webUrl) return
+    action(function () { return invokeOrThrow('restart_dsh') })
+  }
   function postDshMessage(type, payload) {
     var frame = el('dsh-frame')
     if (!frame || !frame.contentWindow) return false
     frame.contentWindow.postMessage(Object.assign({ source: 'dsh-desktop', type: type }, payload || {}), '*')
     return true
   }
+  function desktopActionMethod(action) {
+    var descriptor = action && action.action ? action.action : {}
+    if (descriptor.type === 'native') return descriptor.command || ''
+    if (descriptor.type === 'pluginRpc') return descriptor.method || ''
+    return ''
+  }
+  function desktopActionSupported(action) {
+    var descriptor = action && action.action ? action.action : {}
+    if (descriptor.type === 'native') return descriptor.command === 'workspace.openFolder' || descriptor.command === 'workspace.openTerminal'
+    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal'
+    return false
+  }
+  function desktopActionPressed(action) {
+    var method = desktopActionMethod(action)
+    return method === 'workspace.openFolder' || method === 'workspace.togglePanel' ? workspacePanelOpen
+      : method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal' ? terminalPanelOpen
+        : false
+  }
+  function desktopActionVisible(contribution, action, showingDsh) {
+    var conditions = Array.isArray(action.when) ? action.when : (action.when ? [action.when] : [])
+    var packageName = contribution && (contribution.packageName || contribution.name)
+    return desktopActionSupported(action) && conditions.every(function (condition) {
+      if (condition === 'workspaceSelected') return !!(state && state.workspace)
+      if (condition === 'dshRunning') return showingDsh
+      if (condition === 'pluginActive') return true
+      if (condition === 'restartNotRequired') return !packageName || pendingRestartNames.indexOf(packageName) < 0
+      return false
+    })
+  }
+  function runDesktopAction(action) {
+    var method = desktopActionMethod(action)
+    if (method === 'workspace.openFolder' || method === 'workspace.togglePanel') {
+      openWorkspacePanel()
+      return
+    }
+    if (method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal') {
+      openTerminalPanel()
+      return
+    }
+    // pluginRpc 只接受当前外框已经登记的有限方法，不能把任意 Tauri invoke 暴露给插件。
+    return
+  }
+  function renderDesktopActions() {
+    var container = el('titlebar-plugin-actions')
+    if (!container) return
+    container.replaceChildren()
+    var showingDsh = !!(state && state.webUrl && viewMode === 'dsh')
+    var actions = []
+    desktopContributions.forEach(function (contribution) {
+      ;(contribution.actions || []).forEach(function (action) {
+        if (action.slot !== 'desktop.titlebar.workspaceActions') return
+        if (!desktopActionVisible(contribution, action, showingDsh)) return
+        actions.push({ contribution: contribution, action: action })
+      })
+    })
+    actions.sort(function (left, right) {
+      return Number(left.action.order || 0) - Number(right.action.order || 0)
+        || String(left.contribution.packageName || '').localeCompare(String(right.contribution.packageName || ''))
+        || String(left.action.id || '').localeCompare(String(right.action.id || ''))
+    })
+    actions.forEach(function (item) {
+      var action = item.action
+      var method = desktopActionMethod(action)
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'titlebar-tool'
+      button.textContent = action.label || (action.icon === 'terminal' ? 'Terminal' : '文件夹')
+      var enabled = showingDsh && !!(state && state.workspace) && !desktopActionsBusy && !marketBusy
+      var title = method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal'
+        ? (terminalPanelOpen ? '关闭下方 PowerShell 面板' : '打开下方 PowerShell 面板')
+        : (workspacePanelOpen ? '关闭悬浮工作区面板' : '打开悬浮工作区面板')
+      button.disabled = !enabled
+      button.title = title
+      button.setAttribute('aria-label', title)
+      button.setAttribute('aria-pressed', desktopActionPressed(action) ? 'true' : 'false')
+      button.dataset.plugin = item.contribution.packageName || ''
+      button.dataset.contribution = action.id || ''
+      button.addEventListener('mousedown', function (event) { event.stopPropagation() })
+      button.addEventListener('click', function () { runDesktopAction(action) })
+      container.appendChild(button)
+    })
+  }
   function openWorkspacePanel() {
     if (!state || !state.workspace || viewMode !== 'dsh') return
-    postDshMessage('workspace-panel-toggle')
+    postDshMessage('workspace-panel-toggle', { cwd: String(state.workspace) })
   }
   function openTerminalPanel() {
     if (!state || !state.workspace || viewMode !== 'dsh') return
@@ -197,6 +275,13 @@
       : (runtimeReady ? '市场固定使用 web profile，不会切换 DSH 运行来源。' : '请先返回首页准备 DSH 运行时。'))
     setPill('market-runtime-pill', runtimeReady ? 'DSH 可用' : 'DSH 缺失', runtimeReady ? 'good' : 'warn')
     setPill('market-pnpm-pill', packageManagerReady ? '私有 pnpm 可用' : 'pnpm 未准备', packageManagerReady ? 'good' : 'warn')
+    var marketRestartButton = el('market-restart-dsh')
+    if (marketRestartButton) {
+      var marketCanRestart = !!(state && state.webUrl) && runtimeReady
+      marketRestartButton.disabled = !marketCanRestart || marketBusy || desktopActionsBusy
+      marketRestartButton.title = marketCanRestart ? '停止并重新启动当前 DSH 工作区' : 'DSH 当前未运行，无法重启'
+      marketRestartButton.setAttribute('aria-label', marketRestartButton.title)
+    }
     var query = el('market-query')
     if (query && document.activeElement !== query) query.value = marketQuery
     var canSearch = !marketResult || (runtimeReady && packageManagerReady)
@@ -308,6 +393,8 @@
         marketQuery = next && next.query != null ? String(next.query) : marketQuery
       }).catch(function (error) {
         marketError = '操作已完成，但刷新插件列表失败：' + messageOf(error)
+      }).then(function () {
+        return refreshDesktopContributions(true)
       })
     }).catch(function (error) {
       marketOperation = { running: false, operation: operation, name: plugin.name, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
@@ -383,13 +470,58 @@
       toggleDsh.disabled = !running && ['starting', 'installing', 'updating'].includes(state.status)
       toggleDsh.title = running ? '停止 DSH 服务' : '启动 DSH 服务'
     }
+    var restartButton = el('restart-dsh')
+    if (restartButton) {
+      var restartBlocked = ['starting', 'installing', 'updating'].includes(state.status)
+      restartButton.disabled = !running || restartBlocked || desktopActionsBusy
+      restartButton.title = running ? '停止并重新启动当前 DSH 工作区' : 'DSH 当前未运行，无法重启'
+      restartButton.setAttribute('aria-label', restartButton.title)
+    }
     if (enterDshButton) {
       enterDshButton.disabled = !running
       enterDshButton.title = running ? '进入已启动的 DSH 页面' : 'DSH 未启动，暂时无法进入页面'
     }
   }
+  function desktopContributionStateKey(snapshot) {
+    return [
+      snapshot && snapshot.webUrl ? String(snapshot.webUrl) : '',
+      snapshot && snapshot.workspace ? String(snapshot.workspace) : '',
+      snapshot && snapshot.runtimeSource ? String(snapshot.runtimeSource) : '',
+      snapshot && snapshot.pinned ? String(snapshot.pinned) : '',
+      viewMode,
+      pendingRestartNames.join(',')
+    ].join('|')
+  }
+  function refreshDesktopContributions(force) {
+    var key = desktopContributionStateKey(state)
+    var canRead = !!(state && state.webUrl && state.workspace && viewMode === 'dsh')
+    if (!canRead) {
+      desktopContributions = []
+      desktopContributionsKey = key
+      renderDesktopActions()
+      return Promise.resolve()
+    }
+    if (!force && desktopContributionsKey === key) return Promise.resolve()
+    if (desktopContributionRequest) return desktopContributionRequest
+    desktopContributionRequest = invokeOrThrow('get_desktop_contributions').then(function (result) {
+      desktopContributions = result && Array.isArray(result.contributions) ? result.contributions : []
+      desktopContributionsKey = key
+      renderDesktopActions()
+      return result
+    }).catch(function (error) {
+      desktopContributions = []
+      desktopContributionsKey = key
+      renderDesktopActions()
+      if (window.console && console.warn) console.warn('[dsh-desktop] desktop contribution load failed:', messageOf(error))
+      return null
+    }).finally(function () { desktopContributionRequest = null })
+    return desktopContributionRequest
+  }
   function refresh() {
-    return invokeOrThrow('get_status').then(render).catch(function (error) {
+    return invokeOrThrow('get_status').then(function (next) {
+      render(next)
+      return refreshDesktopContributions(false)
+    }).catch(function (error) {
       setText('status-title', '无法连接客户端后端')
       setText('status-message', messageOf(error))
       if (el('status-pill')) el('status-pill').className = 'pill bad'
@@ -443,10 +575,6 @@
   })
   el('titlebar-market').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-market').addEventListener('click', openMarket)
-  el('titlebar-workspace').addEventListener('mousedown', function (event) { event.stopPropagation() })
-  el('titlebar-workspace').addEventListener('click', openWorkspacePanel)
-  el('titlebar-terminal').addEventListener('mousedown', function (event) { event.stopPropagation() })
-  el('titlebar-terminal').addEventListener('click', openTerminalPanel)
   window.addEventListener('message', function (event) {
     var frame = el('dsh-frame')
     if (!frame || event.source !== frame.contentWindow) return
@@ -490,6 +618,8 @@
     })
   })
   el('toggle-dsh').addEventListener('click', toggleDsh)
+  el('restart-dsh').addEventListener('click', restartDsh)
+  el('market-restart-dsh').addEventListener('click', restartDsh)
   el('enter-dsh').addEventListener('click', enterDsh)
   el('primary-action').addEventListener('click', function () {
     action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })

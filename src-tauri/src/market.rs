@@ -5,7 +5,7 @@ use crate::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -57,6 +57,65 @@ pub struct MarketOperationResult {
     pub message: String,
     pub log: String,
     pub restart_required: bool,
+}
+
+pub const DESKTOP_PROTOCOL_VERSION: u32 = 1;
+pub const DESKTOP_TITLEBAR_WORKSPACE_ACTIONS: &str = "desktop.titlebar.workspaceActions";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopContributionsResult {
+    pub protocol_version: u32,
+    pub contributions: Vec<DesktopContribution>,
+    pub runtime_ready: bool,
+    pub dsh_running: bool,
+    pub workspace_selected: bool,
+    pub message: String,
+}
+
+impl DesktopContributionsResult {
+    pub fn unavailable(
+        message: impl Into<String>,
+        dsh_running: bool,
+        workspace_selected: bool,
+    ) -> Self {
+        Self {
+            protocol_version: DESKTOP_PROTOCOL_VERSION,
+            contributions: Vec::new(),
+            runtime_ready: false,
+            dsh_running,
+            workspace_selected,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopContribution {
+    pub package_name: String,
+    pub version: String,
+    pub display_name: String,
+    pub actions: Vec<DesktopTitlebarAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopTitlebarAction {
+    pub id: String,
+    pub slot: String,
+    pub label: String,
+    pub icon: Option<String>,
+    pub order: i32,
+    pub when: Vec<String>,
+    pub action: DesktopAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DesktopAction {
+    Native { command: String },
+    PluginRpc { method: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +397,78 @@ impl MarketManager {
             package_manager_ready: true,
             message,
         })
+    }
+
+    pub async fn desktop_contributions(
+        &self,
+        runtime: &RuntimeManager,
+        state: &PersistedState,
+        dsh_home: &Path,
+    ) -> Result<Vec<DesktopContribution>, String> {
+        let selected = select_runtime(runtime, state).await?;
+        let pnpm = self.prepare_pnpm(runtime)?;
+        let list_result = self.run_dsh(
+            &selected,
+            &pnpm,
+            dsh_home,
+            &[
+                "list".to_string(),
+                "--depth".to_string(),
+                "0".to_string(),
+                "--json".to_string(),
+            ],
+        )?;
+        ensure_command_success("读取已安装插件贡献", &list_result)?;
+
+        let installed = parse_installed_json(&combined_output(&list_result));
+        let mut contributions = Vec::new();
+        for (name, version) in installed {
+            if validate_market_package_name(&name).is_err() {
+                continue;
+            }
+            let view_result = self.run_dsh(
+                &selected,
+                &pnpm,
+                dsh_home,
+                &[
+                    "view".to_string(),
+                    format!("{name}@{version}"),
+                    "--json".to_string(),
+                ],
+            )?;
+            if !view_result_success(&view_result) {
+                self.debug_log(format!(
+                    "desktop contribution view failed name={name} version={version} code={:?}",
+                    view_result.code
+                ));
+                continue;
+            }
+            let manifest = match parse_manifest(&combined_output(&view_result))
+                .and_then(|value| validate_market_manifest(&name, &value))
+            {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    self.debug_log(format!(
+                        "desktop contribution rejected name={name} version={version} reason={error}"
+                    ));
+                    continue;
+                }
+            };
+            let Some(desktop) = manifest.desktop else {
+                continue;
+            };
+            if desktop.actions.is_empty() {
+                continue;
+            }
+            contributions.push(DesktopContribution {
+                package_name: manifest.name,
+                version: manifest.version,
+                display_name: manifest.display_name,
+                actions: desktop.actions,
+            });
+        }
+        contributions.sort_by(|left, right| left.package_name.cmp(&right.package_name));
+        Ok(contributions)
     }
 
     pub async fn install(
@@ -907,6 +1038,14 @@ pub fn validate_market_manifest(
         .get("dsh")
         .and_then(Value::as_object)
         .ok_or_else(|| "清单缺少 dsh 字段。".to_string())?;
+    let protocol_version = dsh.get("protocolVersion").and_then(Value::as_u64);
+    if dsh.contains_key("protocolVersion")
+        && protocol_version != Some(u64::from(DESKTOP_PROTOCOL_VERSION))
+    {
+        return Err(format!(
+            "dsh.protocolVersion 必须为 {DESKTOP_PROTOCOL_VERSION}。"
+        ));
+    }
     let platform = dsh
         .get("client")
         .and_then(Value::as_object)
@@ -951,12 +1090,14 @@ pub fn validate_market_manifest(
             return Err(format!("dsh.market.capabilities 缺少 {required}。"));
         }
     }
+    let desktop = validate_desktop_manifest(dsh, &capabilities, expected_name)?;
     Ok(MarketManifestPublic {
         name: actual_name,
         version,
         display_name: display_name.to_string(),
         description: string_field(manifest, "description").unwrap_or_default(),
         capabilities,
+        desktop,
     })
 }
 
@@ -967,6 +1108,224 @@ pub struct MarketManifestPublic {
     pub display_name: String,
     pub description: String,
     pub capabilities: Vec<String>,
+    pub desktop: Option<DesktopManifestPublic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopManifestPublic {
+    pub permissions: Vec<String>,
+    pub actions: Vec<DesktopTitlebarAction>,
+}
+
+fn validate_desktop_manifest(
+    dsh: &serde_json::Map<String, Value>,
+    capabilities: &[String],
+    package_name: &str,
+) -> Result<Option<DesktopManifestPublic>, String> {
+    let Some(desktop_value) = dsh.get("desktop") else {
+        return Ok(None);
+    };
+    if !capabilities.iter().any(|item| item == "desktop-shell") {
+        return Err("声明 dsh.desktop 时必须包含 desktop-shell capability。".to_string());
+    }
+    if dsh.get("protocolVersion").and_then(Value::as_u64)
+        != Some(u64::from(DESKTOP_PROTOCOL_VERSION))
+    {
+        return Err(format!(
+            "{package_name} 的桌面贡献必须声明 dsh.protocolVersion: {DESKTOP_PROTOCOL_VERSION}。"
+        ));
+    }
+    let desktop = desktop_value
+        .as_object()
+        .ok_or_else(|| "dsh.desktop 必须是对象。".to_string())?;
+    let permissions = desktop
+        .get("permissions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "dsh.desktop.permissions 必须是字符串数组。".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "dsh.desktop.permissions 必须只包含字符串。".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    const KNOWN_PERMISSIONS: &[&str] = &[
+        "shell:titlebar",
+        "shell:page",
+        "workspace:read",
+        "workspace:write-plugin-data",
+        "native:open-folder",
+        "native:open-terminal",
+        "storage:user",
+        "storage:sqlite",
+    ];
+    for permission in &permissions {
+        if !KNOWN_PERMISSIONS.contains(&permission.as_str()) {
+            return Err(format!("未知的桌面权限: {permission}"));
+        }
+    }
+
+    let actions_value = desktop
+        .get("contributes")
+        .and_then(Value::as_object)
+        .and_then(|contributes| contributes.get("titlebarActions"))
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let actions = actions_value
+        .as_array()
+        .ok_or_else(|| "dsh.desktop.contributes.titlebarActions 必须是数组。".to_string())?;
+    if !actions.is_empty() && !permissions.iter().any(|item| item == "shell:titlebar") {
+        return Err("标题栏贡献缺少权限 shell:titlebar。".to_string());
+    }
+    let mut ids = BTreeSet::new();
+    let mut parsed = Vec::new();
+    for (index, value) in actions.iter().enumerate() {
+        let object = value.as_object().ok_or_else(|| {
+            format!("dsh.desktop.contributes.titlebarActions[{index}] 必须是对象。")
+        })?;
+        let field = |name: &str| object.get(name).and_then(Value::as_str).map(str::to_string);
+        let id = field("id")
+            .ok_or_else(|| format!("dsh.desktop.contributes.titlebarActions[{index}].id 缺失。"))?;
+        if !valid_contribution_id(&id) || !ids.insert(id.clone()) {
+            return Err(format!("桌面贡献 ID 非法或重复: {id}"));
+        }
+        let slot = field("slot").ok_or_else(|| {
+            format!("dsh.desktop.contributes.titlebarActions[{index}].slot 缺失。")
+        })?;
+        if slot != DESKTOP_TITLEBAR_WORKSPACE_ACTIONS {
+            return Err(format!("未知的桌面扩展点: {slot}"));
+        }
+        let label = field("label")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!("dsh.desktop.contributes.titlebarActions[{index}].label 必须是非空字符串。")
+            })?;
+        let icon = field("icon");
+        if let Some(icon) = &icon {
+            if !matches!(icon.as_str(), "folder" | "terminal") {
+                return Err(format!("不支持的标题栏图标: {icon}"));
+            }
+        }
+        let order = object
+            .get("order")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("titlebarActions[{index}].order 必须是整数。"))?;
+        let order = i32::try_from(order)
+            .map_err(|_| format!("titlebarActions[{index}].order 超出范围。"))?;
+        let when = parse_contribution_conditions(object.get("when"), index)?;
+        let action = parse_desktop_action(object.get("action"), &permissions, index)?;
+        parsed.push(DesktopTitlebarAction {
+            id,
+            slot,
+            label,
+            icon,
+            order,
+            when,
+            action,
+        });
+    }
+    parsed.sort_by(|left, right| left.order.cmp(&right.order).then(left.id.cmp(&right.id)));
+    Ok(Some(DesktopManifestPublic {
+        permissions,
+        actions: parsed,
+    }))
+}
+
+fn valid_contribution_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
+}
+
+fn parse_contribution_conditions(
+    value: Option<&Value>,
+    index: usize,
+) -> Result<Vec<String>, String> {
+    let values = match value {
+        None => Vec::new(),
+        Some(Value::String(item)) => vec![item.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("titlebarActions[{index}].when 必须只包含字符串。"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(format!(
+                "titlebarActions[{index}].when 必须是字符串或数组。"
+            ))
+        }
+    };
+    const KNOWN_CONDITIONS: &[&str] = &[
+        "workspaceSelected",
+        "dshRunning",
+        "pluginActive",
+        "restartNotRequired",
+    ];
+    for condition in &values {
+        if !KNOWN_CONDITIONS.contains(&condition.as_str()) {
+            return Err(format!("未知的桌面贡献条件: {condition}"));
+        }
+    }
+    Ok(values)
+}
+
+fn parse_desktop_action(
+    value: Option<&Value>,
+    permissions: &[String],
+    index: usize,
+) -> Result<DesktopAction, String> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("titlebarActions[{index}].action 必须是对象。"))?;
+    let action_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("titlebarActions[{index}].action.type 缺失。"))?;
+    match action_type {
+        "native" => {
+            let command = object
+                .get("command")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("titlebarActions[{index}].action.command 缺失。"))?;
+            let required_permission = match command {
+                "workspace.openFolder" => "native:open-folder",
+                "workspace.openTerminal" => "native:open-terminal",
+                _ => return Err(format!("不支持的受控原生命令: {command}")),
+            };
+            if !permissions.iter().any(|item| item == required_permission) {
+                return Err(format!(
+                    "原生命令 {command} 缺少权限 {required_permission}。"
+                ));
+            }
+            Ok(DesktopAction::Native {
+                command: command.to_string(),
+            })
+        }
+        "pluginRpc" => {
+            let method = object
+                .get("method")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("titlebarActions[{index}].action.method 缺失。"))?;
+            if method.is_empty()
+                || method.len() > 128
+                || !method
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+            {
+                return Err(format!("非法的插件 RPC 方法: {method}"));
+            }
+            Ok(DesktopAction::PluginRpc {
+                method: method.to_string(),
+            })
+        }
+        other => Err(format!("不支持的桌面动作类型: {other}")),
+    }
 }
 
 pub fn parse_installed_json(raw: &str) -> BTreeMap<String, String> {
@@ -1263,6 +1622,34 @@ mod tests {
         let mut broken = manifest;
         broken["dsh"]["market"]["capabilities"] = serde_json::json!(["host", "client"]);
         assert!(validate_market_manifest("@p-dsh-market/example", &broken).is_err());
+    }
+
+    #[test]
+    fn validates_desktop_titlebar_contributions_and_permissions() {
+        let mut manifest = valid_manifest("@p-dsh-market/workspace");
+        manifest["dsh"]["protocolVersion"] = serde_json::json!(1);
+        manifest["dsh"]["market"]["capabilities"] =
+            serde_json::json!(["skills", "host", "client", "desktop-shell"]);
+        manifest["dsh"]["desktop"] = serde_json::json!({
+            "permissions": ["shell:titlebar", "workspace:read", "native:open-folder"],
+            "contributes": { "titlebarActions": [{
+                "id": "open-folder",
+                "slot": "desktop.titlebar.workspaceActions",
+                "label": "文件夹",
+                "icon": "folder",
+                "order": 100,
+                "when": ["workspaceSelected", "dshRunning"],
+                "action": { "type": "native", "command": "workspace.openFolder" }
+            }] }
+        });
+        let result = validate_market_manifest("@p-dsh-market/workspace", &manifest)
+            .expect("desktop contribution should be accepted");
+        let desktop = result.desktop.expect("desktop manifest should be present");
+        assert_eq!(desktop.actions.len(), 1);
+        assert_eq!(desktop.actions[0].slot, DESKTOP_TITLEBAR_WORKSPACE_ACTIONS);
+
+        manifest["dsh"]["desktop"]["permissions"] = serde_json::json!(["shell:titlebar"]);
+        assert!(validate_market_manifest("@p-dsh-market/workspace", &manifest).is_err());
     }
 
     #[test]
