@@ -1357,7 +1357,10 @@ fn validate_desktop_manifest(
         "workspace:write-plugin-data",
         "native:open-folder",
         "native:open-terminal",
+        "process:execute-bundled",
+        "network:outbound",
         "storage:user",
+        "storage:cache",
         "storage:sqlite",
     ];
     for permission in &permissions {
@@ -1403,7 +1406,7 @@ fn validate_desktop_manifest(
             })?;
         let icon = field("icon");
         if let Some(icon) = &icon {
-            if !matches!(icon.as_str(), "folder" | "terminal") {
+            if !matches!(icon.as_str(), "folder" | "terminal" | "chart-candlestick") {
                 return Err(format!("不支持的标题栏图标: {icon}"));
             }
         }

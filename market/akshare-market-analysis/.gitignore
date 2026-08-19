@@ -1,0 +1,9 @@
+python-sidecar/.venv/
+python-sidecar/.pytest_cache/
+python-sidecar/build/
+python-sidecar/dist/
+python-sidecar/src/*.egg-info/
+python-sidecar/**/__pycache__/
+python-sidecar/**/*.py[cod]
+runtime/win32-x64/
+dist/

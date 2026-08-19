@@ -1,15 +1,15 @@
 # DSH Plugin Contract v1
 
-> 状态：第一阶段桌面标题栏贡献已落地；存储、生命周期授权和通用插件 RPC 注册仍是后续实施项。
+> 状态：第一阶段桌面标题栏贡献已落地；已补充受控插件 RPC、AKShare sidecar 所需权限和行情图标。
 >
-> 本文定义 DSH 市场插件在 npm 包清单、Tauri 桌面外框扩展、权限、存储和生命周期方面的统一协议。当前实现已覆盖 `protocolVersion: 1`、`desktop.titlebar.workspaceActions`、清单校验和受控工作区按钮；未覆盖部分仍视为后续实施项。
+> 本文定义 DSH 市场插件在 npm 包清单、Tauri 桌面外框扩展、权限、存储和生命周期方面的统一协议。当前实现已覆盖 `protocolVersion: 1`、`desktop.titlebar.workspaceActions`、清单校验、受控工作区按钮和已登记的插件 RPC；未覆盖部分仍视为后续实施项。
 
 ## 当前代码映射（第一阶段）
 
 - `src-tauri/src/market.rs` 校验 `protocolVersion`、`desktop-shell`、桌面权限、标题栏 slot、条件、ID 和受控动作，并只读取 web profile 中已安装的市场插件贡献。
 - `src-tauri/src/lib.rs` 的 `get_desktop_contributions` 向外框提供经过校验的贡献清单；外框只渲染 `desktop.titlebar.workspaceActions`，不执行任意 Tauri command。
 - `dist/app.js` 将 `workspace.openFolder` / `workspace.openTerminal` 映射为受控的 iframe `postMessage`；插件 Web UI 使用 `shell.overlay` 显示悬浮文件面板。
-- 当前尚未对通用 `pluginRpc` 建立跨插件注册中心，因此外框只接受已登记的两个内部工作区方法；其他 RPC 贡献不会显示。
+- 外框仍不开放通用动态 RPC 注册中心，但已登记 `akshare.toggleAnalysisPanel`，执行时携带贡献所属 `pluginId` 转发为 iframe `postMessage`；其他 RPC 贡献不会显示。
 
 ## 1. 目标
 
@@ -144,7 +144,10 @@ Web 插件不得通过 DOM 选择器修改 Tauri 外框；桌面插件也不得�
 | `workspace:write-plugin-data` | 写入本插件的工作区数据目录 |
 | `native:open-folder` | 调用宿主的打开文件夹能力 |
 | `native:open-terminal` | 调用宿主的工作区终端能力 |
+| `process:execute-bundled` | 执行包内固定路径的 sidecar，不接受 PATH 或用户输入命令 |
+| `network:outbound` | 允许包内 sidecar 访问其固定数据源 |
 | `storage:user` | 使用本插件的用户级数据目录 |
+| `storage:cache` | 使用宿主分配的可清理缓存目录 |
 | `storage:sqlite` | 创建和访问本插件声明的 SQLite 文件 |
 | `notifications:native` | 发送经过限流的系统通知 |
 
@@ -257,6 +260,8 @@ Web 插件不得通过 DOM 选择器修改 Tauri 外框；桌面插件也不得�
 ```
 
 RPC 只能调用当前已激活插件注册的方法，只能传递可无损 JSON 序列化的数据，并受超时、返回大小和错误脱敏限制。
+
+当前桌面外框登记的 `akshare.toggleAnalysisPanel` 仅转发到所属插件的浏览器半；浏览器半必须再次校验 `pluginId` 和方法名，并按当前会话维护面板状态。
 
 ### 5.6 可见性状态机
 
@@ -493,7 +498,7 @@ DSH Desktop 可以维护派生的插件注册表，用于快速渲染外框贡�
 
 1. `dsh.protocolVersion: 1`。
 2. `desktop.titlebar.workspaceActions` 扩展点。
-3. 内建 `folder`、`terminal` 图标。
+3. 内建 `folder`、`terminal`、`chart-candlestick` 图标。
 4. `workspace.openFolder`、`workspace.openTerminal` 两个受控原生命令。
 5. `workspace`、`user`、`cache` 三种存储范围。
 6. `directory` 和 `sqlite` 两种存储类型。

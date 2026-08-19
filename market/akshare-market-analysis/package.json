@@ -1,0 +1,97 @@
+{
+  "name": "@p-dsh-market/akshare-market-analysis",
+  "version": "0.1.0",
+  "description": "DSH AKShare A股/港股行情、历史K线与描述性技术分析插件",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "akshare",
+    "stock",
+    "kline",
+    "technical-analysis"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/protocol.js",
+    "lib/schemas.js",
+    "skills/akshare-market-analysis/SKILL.md",
+    "skills/akshare-market-analysis/references/data-contract.md",
+    "skills/akshare-market-analysis/references/analysis-rules.md",
+    "python-sidecar/.python-version",
+    "python-sidecar/pyproject.toml",
+    "python-sidecar/uv.lock",
+    "python-sidecar/README.md",
+    "python-sidecar/src/**/*.py",
+    "python-sidecar/akshare-service.spec",
+    "runtime/win32-x64/**",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "AKShare 行情分析",
+      "capabilities": [
+        "skills",
+        "host",
+        "client",
+        "desktop-shell",
+        "persistent-storage"
+      ]
+    },
+    "desktop": {
+      "permissions": [
+        "shell:titlebar",
+        "process:execute-bundled",
+        "network:outbound",
+        "storage:user",
+        "storage:cache"
+      ],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "toggle-market-analysis",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "行情",
+            "icon": "chart-candlestick",
+            "order": 120,
+            "when": [
+              "dshRunning",
+              "pluginActive",
+              "restartNotRequired"
+            ],
+            "action": {
+              "type": "pluginRpc",
+              "method": "akshare.toggleAnalysisPanel"
+            }
+          }
+        ]
+      },
+      "storage": []
+    }
+  }
+}

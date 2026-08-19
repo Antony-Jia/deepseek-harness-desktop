@@ -11,6 +11,7 @@
   var loadedFrameUrl = ''
   var workspacePanelOpen = false
   var terminalPanelOpen = false
+  var marketPanelOpen = false
   var desktopContributions = []
   var desktopContributionsKey = ''
   var desktopContributionRequest = null
@@ -349,14 +350,19 @@
   function desktopActionSupported(action) {
     var descriptor = action && action.action ? action.action : {}
     if (descriptor.type === 'native') return descriptor.command === 'workspace.openFolder' || descriptor.command === 'workspace.openTerminal'
-    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal'
+    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal' || descriptor.method === 'akshare.toggleAnalysisPanel'
     return false
   }
   function desktopActionPressed(action) {
     var method = desktopActionMethod(action)
     return method === 'workspace.openFolder' || method === 'workspace.togglePanel' ? workspacePanelOpen
       : method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal' ? terminalPanelOpen
+        : method === 'akshare.toggleAnalysisPanel' ? marketPanelOpen
         : false
+  }
+  function desktopActionRequiresWorkspace(action) {
+    var method = desktopActionMethod(action)
+    return method === 'workspace.openFolder' || method === 'workspace.openTerminal' || method === 'workspace.togglePanel' || method === 'workspace.toggleTerminal'
   }
   function desktopActionVisible(contribution, action, showingDsh) {
     var conditions = Array.isArray(action.when) ? action.when : (action.when ? [action.when] : [])
@@ -369,7 +375,7 @@
       return false
     })
   }
-  function runDesktopAction(action) {
+  function runDesktopAction(action, contribution) {
     var method = desktopActionMethod(action)
     if (method === 'workspace.openFolder' || method === 'workspace.togglePanel') {
       openWorkspacePanel()
@@ -377,6 +383,13 @@
     }
     if (method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal') {
       openTerminalPanel()
+      return
+    }
+    if (method === 'akshare.toggleAnalysisPanel') {
+      postDshMessage('plugin-rpc', {
+        pluginId: contribution && (contribution.packageName || contribution.name),
+        method: method
+      })
       return
     }
     // pluginRpc 只接受当前外框已经登记的有限方法，不能把任意 Tauri invoke 暴露给插件。
@@ -407,10 +420,12 @@
       button.type = 'button'
       button.className = 'titlebar-tool'
       button.textContent = action.label || (action.icon === 'terminal' ? 'Terminal' : '文件夹')
-      var enabled = showingDsh && !!(state && state.workspace) && !desktopActionsBusy && !marketBusy
+      var enabled = showingDsh && (!desktopActionRequiresWorkspace(action) || !!(state && state.workspace)) && !desktopActionsBusy && !marketBusy
       var title = method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal'
         ? (terminalPanelOpen ? '关闭下方 PowerShell 面板' : '打开下方 PowerShell 面板')
-        : (workspacePanelOpen ? '关闭悬浮工作区面板' : '打开悬浮工作区面板')
+        : method === 'akshare.toggleAnalysisPanel'
+          ? (marketPanelOpen ? '关闭行情分析面板' : '打开行情分析面板')
+          : (workspacePanelOpen ? '关闭悬浮工作区面板' : '打开悬浮工作区面板')
       button.disabled = !enabled
       button.title = title
       button.setAttribute('aria-label', title)
@@ -418,7 +433,7 @@
       button.dataset.plugin = item.contribution.packageName || ''
       button.dataset.contribution = action.id || ''
       button.addEventListener('mousedown', function (event) { event.stopPropagation() })
-      button.addEventListener('click', function () { runDesktopAction(action) })
+      button.addEventListener('click', function () { runDesktopAction(action, item.contribution) })
       container.appendChild(button)
     })
   }
@@ -806,7 +821,7 @@
   }
   function refreshDesktopContributions(force) {
     var key = desktopContributionStateKey(state)
-    var canRead = !!(state && state.webUrl && state.workspace && viewMode === 'dsh')
+    var canRead = !!(state && state.webUrl && viewMode === 'dsh')
     if (!canRead) {
       desktopContributions = []
       desktopContributionsKey = key
@@ -898,6 +913,11 @@
       renderSkinOptions(state || {}, activeSkinFor(state || {}))
       return
     }
+    if (data.source === '@p-dsh-market/akshare-market-analysis') {
+      if (data.type === 'analysis-panel-state') marketPanelOpen = data.open === true
+      updateView()
+      return
+    }
     if (data.source !== 'dsh-open-workspace') return
     if (data.type === 'workspace-panel-state') workspacePanelOpen = data.open === true
     if (data.type === 'terminal-panel-state') terminalPanelOpen = data.open === true
@@ -909,6 +929,7 @@
       themePostedSkin = ''
       postDshMessage('workspace-panel-state-request')
       postDshMessage('terminal-panel-state-request')
+      postDshMessage('analysis-panel-state-request')
       postActiveTheme(activeSkinFor(state || {}), state || {}, effectiveTheme((state && state.appearanceMode) || 'system'))
     })
   }

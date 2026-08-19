@@ -10,6 +10,7 @@ dist/bundle/
 *.dmg
 *.deb
 *.AppImage
+dist/packages/
 
 runtime-assets/node/*
 !runtime-assets/node/README.md
@@ -22,3 +23,13 @@ example_docs/
 # 本地敏感凭证（npm 发布恢复码等），切勿提交
 npm_recovery_codes.txt
 *_recovery_codes.txt
+
+# AKShare market plugin local Python and PyInstaller intermediates
+market/akshare-market-analysis/python-sidecar/.venv/
+market/akshare-market-analysis/python-sidecar/.pytest_cache/
+market/akshare-market-analysis/python-sidecar/build/
+market/akshare-market-analysis/python-sidecar/dist/
+market/akshare-market-analysis/python-sidecar/src/*.egg-info/
+market/akshare-market-analysis/python-sidecar/**/__pycache__/
+market/akshare-market-analysis/python-sidecar/**/*.py[cod]
+market/akshare-market-analysis/runtime/win32-x64/
