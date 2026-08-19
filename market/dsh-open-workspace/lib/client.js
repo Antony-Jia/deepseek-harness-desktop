@@ -14,7 +14,8 @@ window.__ModuleLoader__.load({
     var inject = ['slots', 'workspaces', 'timer', 'layout']
 
     // ── 共享面板状态 ────────────────────────────────────────────────
-    var store = { open: false, dir: null, width: 560, split: 0.42 }
+    // 右侧预览区默认占 details 面板的 64%；拖拽后也始终保留至少 61%。
+    var store = { open: false, dir: null, width: 560, split: 0.36 }
     var layoutController = null
     var listeners = []
     var terminalStore = { open: false, cwd: null }
@@ -104,6 +105,139 @@ window.__ModuleLoader__.load({
       return null
     }
 
+    var LANGUAGE_ALIASES = {
+      js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+      ts: 'typescript', tsx: 'typescript',
+      py: 'python', rb: 'ruby', ps1: 'powershell', psm1: 'powershell',
+      sh: 'shell', bash: 'shell', zsh: 'shell', bat: 'batch', cmd: 'batch',
+      yml: 'yaml', md: 'markdown', mdown: 'markdown', html: 'markup', htm: 'markup',
+      xml: 'markup', svg: 'markup', cs: 'csharp', 'c++': 'cpp', rs: 'rust',
+      kt: 'kotlin', golang: 'go'
+    }
+    var LANGUAGE_KEYWORDS = {
+      generic: 'as async await break case catch class const continue debugger default delete do else export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield true false null undefined'.split(' '),
+      javascript: 'as async await break case catch class const continue debugger default delete do else export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield true false null undefined'.split(' '),
+      typescript: 'as abstract any async await boolean break case catch class const constructor continue debugger declare default delete do else enum export extends finally for from function get if implements import in instanceof interface keyof let namespace never new null number object of private protected public readonly return set static string super switch this throw true try type typeof undefined unknown var void while with yield'.split(' '),
+      python: 'and as assert async await break case class continue def del elif else except finally for from global if import in is lambda match None not or pass raise return try while with yield True False'.split(' '),
+      powershell: 'begin break catch class continue data define do dynamicparam else elseif end exit filter finally for foreach from function if in trap param process return switch throw try until using while'.split(' '),
+      shell: 'case do done elif else esac fi for function if in select then time until while coproc return export local readonly set unset true false'.split(' '),
+      batch: 'call cd cls echo else endlocal exit for goto if in pause rem set shift start'.split(' '),
+      ruby: 'alias and begin break case class def defined do else elsif end ensure false for if in module next nil not or redo rescue retry return self super then true undef unless until when while yield'.split(' '),
+      java: 'abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while true false null'.split(' '),
+      csharp: 'abstract as async await base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public readonly ref return sbyte sealed short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using virtual void volatile while'.split(' '),
+      cpp: 'alignas alignof asm auto bool break case catch char class const constexpr continue default delete do double else enum explicit export extern false float for friend if inline int long namespace new nullptr operator private protected public register reinterpret_cast return short signed sizeof static struct switch template this throw true try typedef typename union unsigned using virtual void volatile wchar_t while'.split(' '),
+      go: 'break default func interface select case defer go map struct chan else goto package switch const fallthrough if range type continue for import return var'.split(' '),
+      rust: 'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'.split(' '),
+      sql: 'select from where and or not null is as between like in join inner left right full outer on group by having order asc desc insert into values update set delete create alter drop table index view distinct union all exists case when then else end primary key foreign references'.split(' '),
+      css: 'and as at charset container counter-style from import keyframes media namespace supports'.split(' '),
+      yaml: 'true false null yes no on off'.split(' '),
+      json: 'true false null'.split(' ')
+    }
+    function languageForName(name) {
+      var e = extOf(String(name || ''))
+      return LANGUAGE_ALIASES[e] || e || 'text'
+    }
+    function normalizeLanguage(language) {
+      var value = String(language || '').trim().toLowerCase().split(/\s+/)[0].replace(/^language-/, '')
+      return LANGUAGE_ALIASES[value] || value || 'text'
+    }
+    function tokenSpan(kind, value) {
+      return '<span class="owsp-token owsp-token-' + kind + '">' + escHtml(value) + '</span>'
+    }
+    function hashComments(language) {
+      return language === 'python' || language === 'powershell' || language === 'shell' || language === 'batch' || language === 'ruby' || language === 'yaml' || language === 'toml' || language === 'ini'
+    }
+    function slashComments(language) {
+      return language !== 'markup' && language !== 'markdown' && language !== 'yaml' && language !== 'toml' && language !== 'ini' && language !== 'sql'
+    }
+    function highlightCode(text, language) {
+      var source = String(text == null ? '' : text)
+      var lang = normalizeLanguage(language)
+      var keywords = LANGUAGE_KEYWORDS[lang] || LANGUAGE_KEYWORDS.generic
+      var keywordSet = Object.create(null)
+      for (var ki = 0; ki < keywords.length; ki++) keywordSet[keywords[ki]] = true
+      var out = []
+      var i = 0
+      while (i < source.length) {
+        var ch = source.charAt(i)
+        var next = source.charAt(i + 1)
+        if (lang === 'markup' && source.slice(i, i + 4) === '<!--') {
+          var commentEnd = source.indexOf('-->', i + 4)
+          if (commentEnd < 0) commentEnd = source.length - 3
+          var commentValue = source.slice(i, commentEnd + 3)
+          out.push(tokenSpan('comment', commentValue))
+          i = commentEnd + 3
+          continue
+        }
+        if (slashComments(lang) && ch === '/' && next === '/') {
+          var slashEnd = source.indexOf('\n', i)
+          if (slashEnd < 0) slashEnd = source.length
+          out.push(tokenSpan('comment', source.slice(i, slashEnd)))
+          i = slashEnd
+          continue
+        }
+        if (ch === '/' && next === '*') {
+          var blockEnd = source.indexOf('*/', i + 2)
+          if (blockEnd < 0) blockEnd = source.length - 2
+          out.push(tokenSpan('comment', source.slice(i, blockEnd + 2)))
+          i = blockEnd + 2
+          continue
+        }
+        if (hashComments(lang) && ch === '#') {
+          var hashEnd = source.indexOf('\n', i)
+          if (hashEnd < 0) hashEnd = source.length
+          out.push(tokenSpan('comment', source.slice(i, hashEnd)))
+          i = hashEnd
+          continue
+        }
+        if (ch === '"' || ch === "'" || (ch === '`' && (lang === 'javascript' || lang === 'typescript' || lang === 'shell' || lang === 'powershell'))) {
+          var quote = ch
+          var stringEnd = i + 1
+          while (stringEnd < source.length) {
+            if (source.charAt(stringEnd) === '\\') { stringEnd += 2; continue }
+            if (source.charAt(stringEnd) === quote) { stringEnd++; break }
+            stringEnd++
+          }
+          out.push(tokenSpan('string', source.slice(i, stringEnd)))
+          i = stringEnd
+          continue
+        }
+        if (/\d/.test(ch) && (i === 0 || !/[A-Za-z_$]/.test(source.charAt(i - 1)))) {
+          var numberMatch = /^(?:0x[\da-f]+|0b[01]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(source.slice(i))
+          if (numberMatch) {
+            out.push(tokenSpan('number', numberMatch[0]))
+            i += numberMatch[0].length
+            continue
+          }
+        }
+        if (/[A-Za-z_$]/.test(ch)) {
+          var wordMatch = /^[A-Za-z_$][\w$]*/.exec(source.slice(i))
+          var word = wordMatch ? wordMatch[0] : ch
+          var after = i + word.length
+          while (after < source.length && /\s/.test(source.charAt(after))) after++
+          var before = i > 0 ? source.charAt(i - 1) : ''
+          var kind = keywordSet[word] ? 'keyword' : (word === 'true' || word === 'false' || word === 'null' || word === 'undefined' || word === 'None' || word === 'True' || word === 'False' ? 'constant' : (source.charAt(after) === '(' ? 'function' : (source.charAt(after) === ':' || before === '.' ? 'property' : null)))
+          out.push(kind ? tokenSpan(kind, word) : escHtml(word))
+          i += word.length
+          continue
+        }
+        if (/^[{}[\]();,.:]/.test(ch)) {
+          out.push(tokenSpan('punctuation', ch))
+          i++
+          continue
+        }
+        if (/^[=+!*%&|?<>~^\-]/.test(ch)) {
+          var opMatch = /^[=+!*%&|?<>~^\-]+/.exec(source.slice(i))
+          out.push(tokenSpan('operator', opMatch ? opMatch[0] : ch))
+          i += opMatch ? opMatch[0].length : 1
+          continue
+        }
+        out.push(escHtml(ch))
+        i++
+      }
+      return out.join('')
+    }
+
     // ── Markdown 渲染（先转义再变换，安全；HTML 预览走 sandbox iframe）──
     function escHtml(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -149,7 +283,8 @@ window.__ModuleLoader__.load({
           i++
           while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++ }
           i++
-          out.push('<pre class="owsp-code"><code>' + escHtml(buf.join('\n')) + '</code></pre>')
+          var codeLanguage = normalizeLanguage(lang)
+          out.push('<pre class="owsp-code" data-language="' + escHtml(codeLanguage) + '"><code>' + highlightCode(buf.join('\n'), codeLanguage) + '</code></pre>')
           continue
         }
         var h = /^(#{1,6})\s+(.*)$/.exec(line)
@@ -257,21 +392,33 @@ window.__ModuleLoader__.load({
       '.owsp-md hr{border:none;border-top:1px solid var(--dsw-alias-border-l2);margin:10px 0}' +
       '.owsp-md ul,.owsp-md ol{margin:6px 0;padding-left:22px}' +
       '.owsp-text{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:12px;padding:12px 14px;line-height:1.5;margin:0}' +
+      '.owsp-code-preview{box-sizing:border-box;min-height:100%;background:var(--dsw-alias-markdown-code-block);border:0;border-radius:0;overflow:auto;tab-size:2}' +
+      '.owsp-code-preview code{font:inherit;color:var(--shiki-foreground,var(--dsw-alias-label-primary))}' +
+      '.owsp-code .owsp-token,.owsp-code-preview .owsp-token{font:inherit}' +
+      '.owsp-token-comment{color:var(--shiki-token-comment,var(--dsw-alias-label-tertiary));font-style:italic}' +
+      '.owsp-token-string{color:var(--shiki-token-string,var(--dsw-alias-state-success-primary))}' +
+      '.owsp-token-keyword{color:var(--shiki-token-keyword,var(--dsw-alias-brand-primary))}' +
+      '.owsp-token-constant{color:var(--shiki-token-constant,var(--dsw-alias-state-business-primary))}' +
+      '.owsp-token-number{color:var(--shiki-token-number,var(--dsw-alias-state-business-primary))}' +
+      '.owsp-token-function{color:var(--shiki-token-function,var(--dsw-alias-brand-primary-new-colorprimary-new-color))}' +
+      '.owsp-token-property{color:var(--shiki-token-property,var(--dsw-alias-state-warn-label))}' +
+      '.owsp-token-punctuation{color:var(--shiki-token-punctuation,var(--dsw-alias-label-secondary))}' +
+      '.owsp-token-operator{color:var(--shiki-token-operator,var(--dsw-alias-label-primary))}' +
       '.owsp-linkbtn{cursor:pointer;color:var(--dsw-alias-brand-primary);background:0 0;border:none;padding:0;font-size:12px;font-family:inherit;text-decoration:underline}' +
-      '.owsp-terminal{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:#10151d;color:#e7edf5;overflow:hidden;margin:8px 0 0}' +
-      '.owsp-terminal-head{min-height:34px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid #27313d;background:#171e28}' +
+      '.owsp-terminal{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);color-scheme:inherit;overflow:hidden;margin:8px 0 0}' +
+      '.owsp-terminal-head{min-height:34px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3)}' +
       '.owsp-terminal-title{font-size:12px;font-weight:600;flex:none}' +
-      '.owsp-terminal-cwd{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#9eacbd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}' +
-      '.owsp-terminal-action{cursor:pointer;border:0;border-radius:6px;background:transparent;color:#b9c5d3;min-width:26px;height:25px;padding:0 6px;font-family:inherit;font-size:12px}' +
-      '.owsp-terminal-action:hover{background:#27313d;color:#fff}' +
-      '.owsp-terminal-output{box-sizing:border-box;height:190px;max-height:30vh;overflow:auto;margin:0;padding:10px 12px;background:#0e131a;color:#dce6f2;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}' +
-      '.owsp-terminal-error{box-sizing:border-box;padding:7px 10px;color:#ff9d9d;background:#351d23;font-size:12px;white-space:pre-wrap;word-break:break-word}' +
-      '.owsp-terminal-form{display:flex;align-items:center;gap:6px;padding:6px 8px;border-top:1px solid #27313d;background:#171e28}' +
-      '.owsp-terminal-prompt{color:#75d59b;font:12px ui-monospace,Consolas,monospace;flex:none}' +
-      '.owsp-terminal-input{box-sizing:border-box;min-width:0;flex:1;height:27px;border:1px solid #394654;border-radius:6px;padding:4px 7px;background:#0e131a;color:#f0f4f8;font:12px ui-monospace,Consolas,monospace;outline:none}' +
-      '.owsp-terminal-input:focus{border-color:#6e9ee8}' +
-      '.owsp-terminal-send{cursor:pointer;flex:none;border:0;border-radius:6px;height:27px;padding:0 10px;background:#386bb1;color:#fff;font:12px inherit}' +
-      '.owsp-terminal-send:hover{background:#477fc9}'
+      '.owsp-terminal-cwd{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}' +
+      '.owsp-terminal-action{cursor:pointer;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);min-width:26px;height:25px;padding:0 6px;font-family:inherit;font-size:12px}' +
+      '.owsp-terminal-action:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}' +
+      '.owsp-terminal-output{box-sizing:border-box;height:190px;max-height:30vh;overflow:auto;margin:0;padding:10px 12px;background:var(--dsw-alias-markdown-code-block);color:var(--shiki-foreground,var(--dsw-alias-label-primary));font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}' +
+      '.owsp-terminal-error{box-sizing:border-box;padding:7px 10px;color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-2);font-size:12px;white-space:pre-wrap;word-break:break-word}' +
+      '.owsp-terminal-form{display:flex;align-items:center;gap:6px;padding:6px 8px;border-top:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3)}' +
+      '.owsp-terminal-prompt{color:var(--dsw-alias-state-success-primary);font:12px ui-monospace,Consolas,monospace;flex:none}' +
+      '.owsp-terminal-input{box-sizing:border-box;min-width:0;flex:1;height:27px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:12px ui-monospace,Consolas,monospace;outline:none}' +
+      '.owsp-terminal-input:focus{border-color:var(--dsw-alias-brand-primary)}' +
+      '.owsp-terminal-send{cursor:pointer;flex:none;border:0;border-radius:6px;height:27px;padding:0 10px;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font:12px inherit}' +
+      '.owsp-terminal-send:hover{filter:brightness(1.08)}'
 
     function stripAnsi(value) {
       return String(value == null ? '' : value)
@@ -627,7 +774,8 @@ window.__ModuleLoader__.load({
               var startSplit = store.split || 0.42
               var w = store.width || 560
               function move(ev) {
-                setState({ split: clamp(startSplit + (ev.clientX - startX) / w, 0.22, 0.55) })
+                // 预览区至少保留 61%，代码阅读不会被左侧目录挤窄。
+                setState({ split: clamp(startSplit + (ev.clientX - startX) / w, 0.22, 0.39) })
               }
               function up() {
                 window.removeEventListener('mousemove', move)
@@ -640,7 +788,7 @@ window.__ModuleLoader__.load({
             if (!snap.open) return null
 
             var panelWidth = store.width || 560
-            var leftWidth = Math.round(panelWidth * (store.split || 0.42))
+            var leftWidth = Math.round(panelWidth * (store.split || 0.36))
 
             var headerBtns = []
             var parent = parentDir(dir)
@@ -709,7 +857,8 @@ window.__ModuleLoader__.load({
             } else if (activeTab.kind === 'md') {
               preview = React.createElement('div', { className: 'owsp-md', dangerouslySetInnerHTML: { __html: renderMarkdown(activeTab.content) } })
             } else {
-              preview = React.createElement('pre', { className: 'owsp-text' }, activeTab.content)
+              var codeLanguage = languageForName(activeTab.name)
+              preview = React.createElement('pre', { className: 'owsp-text owsp-code-preview', 'data-language': codeLanguage, dangerouslySetInnerHTML: { __html: '<code>' + highlightCode(activeTab.content, codeLanguage) + '</code>' } })
             }
 
             var tabBar = React.createElement('div', { className: 'owsp-tabs' },
