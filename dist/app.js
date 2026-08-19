@@ -815,13 +815,14 @@
       snapshot && snapshot.workspace ? String(snapshot.workspace) : '',
       snapshot && snapshot.runtimeSource ? String(snapshot.runtimeSource) : '',
       snapshot && snapshot.pinned ? String(snapshot.pinned) : '',
-      viewMode,
       pendingRestartNames.join(',')
     ].join('|')
   }
   function refreshDesktopContributions(force) {
     var key = desktopContributionStateKey(state)
-    var canRead = !!(state && state.webUrl && viewMode === 'dsh')
+    // 贡献清单来自本地 web profile，可以在 DSH 页面出现前预加载。
+    // renderDesktopActions 仍会根据 dshRunning/viewMode 决定是否真正显示。
+    var canRead = !!state
     if (!canRead) {
       desktopContributions = []
       desktopContributionsKey = key

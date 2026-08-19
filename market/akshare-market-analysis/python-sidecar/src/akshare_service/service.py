@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
+from time import monotonic
 from typing import Any, Mapping
 
 from .adapters import normalize_history, normalize_snapshot
@@ -22,6 +24,7 @@ from .retry import retry_call
 
 SERVICE_VERSION = "0.1.0"
 MAX_RESPONSE_ROWS = 100
+LOGGER = logging.getLogger("akshare-sidecar")
 
 
 class MarketService:
@@ -60,21 +63,33 @@ class MarketService:
             ],
         }
 
-    def _call(self, operation: Any) -> Any:
+    def _call(self, operation: Any, label: str) -> Any:
         return retry_call(
             operation,
             attempts=3,
             retryable=lambda error: isinstance(error, DataSourceError) and error.retryable,
+            on_retry=lambda attempt, total, error, delay: LOGGER.warning(
+                "upstream retry operation=%s attempt=%d/%d delayMs=%d code=%s message=%s",
+                label,
+                attempt + 1,
+                total,
+                int(delay * 1000),
+                getattr(error, "code", ""),
+                str(error)[:512],
+            ),
         )
 
     def snapshot(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         args = normalize_snapshot_request(payload)
+        started_at = monotonic()
+        LOGGER.info("snapshot normalized market=%s queryPresent=%s limit=%d", args["market"], bool(args.get("query")), args["limit"])
         cache_key = self.cache.key({"schemaVersion": SCHEMA_VERSION, "akshareVersion": self.akshare_version, "endpoint": "snapshot", "args": args})
         ttl = 60 if args["market"] == "hk" else 20
         cached = self.cache.get(cache_key, ttl)
         if cached is not None:
+            LOGGER.info("snapshot cache hit market=%s ttlSeconds=%d elapsedMs=%d", args["market"], ttl, int((monotonic() - started_at) * 1000))
             return {**cached, "cache": {"hit": True, "ttlSeconds": ttl}}
-        frame = self._call(lambda: self.provider.snapshot(args["market"]))
+        frame = self._call(lambda: self.provider.snapshot(args["market"]), "snapshot")
         source_rows, quality = normalize_snapshot(frame, args["market"])
         filtered = [row for row in source_rows if self._matches(row, args)]
         if args["sort"] is not None:
@@ -101,6 +116,7 @@ class MarketService:
             "cache": {"hit": False, "ttlSeconds": ttl},
         }
         self.cache.set(cache_key, result)
+        LOGGER.info("snapshot success market=%s sourceRows=%d matched=%d returned=%d elapsedMs=%d", args["market"], len(source_rows), total, len(rows), int((monotonic() - started_at) * 1000))
         return json_safe(result)
 
     @staticmethod
@@ -121,14 +137,17 @@ class MarketService:
 
     def _history(self, payload: Mapping[str, Any], *, analysis: bool = False) -> dict[str, Any]:
         args = normalize_history_request(payload, analysis=analysis)
+        started_at = monotonic()
         endpoint = "analysis" if analysis else "history"
+        LOGGER.info("history normalized operation=%s market=%s symbolPresent=%s period=%s maxBars=%d", endpoint, args["market"], bool(args.get("symbol")), args["period"], args["maxBars"])
         cache_key = self.cache.key({"schemaVersion": SCHEMA_VERSION, "akshareVersion": self.akshare_version, "endpoint": endpoint, "args": args})
         today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).date().isoformat()
         ttl = 600 if args["endDate"] >= today else 43200
         cached = self.cache.get(cache_key, ttl)
         if cached is not None:
+            LOGGER.info("history cache hit operation=%s market=%s ttlSeconds=%d elapsedMs=%d", endpoint, args["market"], ttl, int((monotonic() - started_at) * 1000))
             return {**cached, "cache": {"hit": True, "ttlSeconds": ttl}}
-        frame = self._call(lambda: self.provider.history(args["market"], args["symbol"], args["period"], args["startDate"], args["endDate"], args["adjust"]))
+        frame = self._call(lambda: self.provider.history(args["market"], args["symbol"], args["period"], args["startDate"], args["endDate"], args["adjust"]), endpoint)
         bars, quality = normalize_history(frame, args["market"])
         truncated = len(bars) > args["maxBars"]
         if truncated:
@@ -160,6 +179,7 @@ class MarketService:
             result["analysisSummary"] = calculated["analysisSummary"]
             result["quality"]["warnings"] = list(dict.fromkeys(result["quality"].get("warnings", []) + calculated["analysisSummary"]["warnings"]))
         self.cache.set(cache_key, result)
+        LOGGER.info("history success operation=%s market=%s bars=%d truncated=%s elapsedMs=%d", endpoint, args["market"], len(bars), truncated, int((monotonic() - started_at) * 1000))
         return json_safe(result)
 
     def history(self, payload: Mapping[str, Any]) -> dict[str, Any]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from time import monotonic
 from typing import Any
 
 
@@ -10,6 +12,14 @@ class DataSourceError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+LOGGER = logging.getLogger("akshare-sidecar")
+MAX_DIAGNOSTIC_TEXT = 512
+
+
+def diagnostic(error: Exception) -> str:
+    return f"{type(error).__name__}: {str(error)[:MAX_DIAGNOSTIC_TEXT]}"
 
 
 class AkShareProvider:
@@ -31,11 +41,17 @@ class AkShareProvider:
             function = None
         if not callable(function):
             raise DataSourceError(f"AKShare 缺少 {market} 快照接口。", "AKSHARE_FIELD_DRIFT")
+        started_at = monotonic()
+        LOGGER.info("upstream start operation=snapshot market=%s function=%s", market, getattr(function, "__name__", "unknown"))
         try:
-            return function()
+            value = function()
+            LOGGER.info("upstream success operation=snapshot market=%s elapsedMs=%d", market, int((monotonic() - started_at) * 1000))
+            return value
         except (TimeoutError, ConnectionError) as error:
+            LOGGER.warning("upstream temporary failure operation=snapshot market=%s elapsedMs=%d error=%s", market, int((monotonic() - started_at) * 1000), diagnostic(error), exc_info=True)
             raise DataSourceError("行情数据源暂时不可用。", "UPSTREAM_TEMPORARY", True) from error
         except Exception as error:
+            LOGGER.warning("upstream failure operation=snapshot market=%s elapsedMs=%d error=%s", market, int((monotonic() - started_at) * 1000), diagnostic(error), exc_info=True)
             raise DataSourceError("行情数据源请求失败。", "UPSTREAM_ERROR", True) from error
 
     def history(self, market: str, symbol: str, period: str, start_date: str, end_date: str, adjust: str) -> Any:
@@ -50,9 +66,15 @@ class AkShareProvider:
             "end_date": end_date.replace("-", ""),
             "adjust": "" if adjust == "none" else adjust,
         }
+        started_at = monotonic()
+        LOGGER.info("upstream start operation=history market=%s function=%s", market, function_name)
         try:
-            return function(**arguments)
+            value = function(**arguments)
+            LOGGER.info("upstream success operation=history market=%s function=%s elapsedMs=%d", market, function_name, int((monotonic() - started_at) * 1000))
+            return value
         except (TimeoutError, ConnectionError) as error:
+            LOGGER.warning("upstream temporary failure operation=history market=%s function=%s elapsedMs=%d error=%s", market, function_name, int((monotonic() - started_at) * 1000), diagnostic(error), exc_info=True)
             raise DataSourceError("历史行情数据源暂时不可用。", "UPSTREAM_TEMPORARY", True) from error
         except Exception as error:
+            LOGGER.warning("upstream failure operation=history market=%s function=%s elapsedMs=%d error=%s", market, function_name, int((monotonic() - started_at) * 1000), diagnostic(error), exc_info=True)
             raise DataSourceError("历史行情数据源请求失败。", "UPSTREAM_ERROR", True) from error

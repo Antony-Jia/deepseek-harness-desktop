@@ -229,29 +229,22 @@ async fn get_desktop_contributions(
         .and_then(|slot| slot.as_ref().map(|process| !process.url.is_empty()))
         .unwrap_or(false);
     let workspace_selected = persisted.last_workspace.is_some();
-    if !dsh_running {
-        return Ok(DesktopContributionsResult::unavailable(
-            "DSH 尚未运行，暂不显示桌面插件贡献。",
-            false,
-            workspace_selected,
-        ));
-    }
-    match context
-        .market
-        .desktop_contributions(&context.manager, &persisted, &context.dsh_home)
-        .await
-    {
+    match context.market.desktop_contributions(&context.dsh_home) {
         Ok(contributions) => Ok(DesktopContributionsResult {
             protocol_version: market::DESKTOP_PROTOCOL_VERSION,
             contributions,
             runtime_ready: true,
-            dsh_running: true,
+            dsh_running,
             workspace_selected,
-            message: String::new(),
+            message: if dsh_running {
+                String::new()
+            } else {
+                "桌面插件贡献已预加载，将在 DSH 启动后显示。".to_string()
+            },
         }),
         Err(error) => Ok(DesktopContributionsResult::unavailable(
             format!("读取桌面插件贡献失败：{error}"),
-            true,
+            dsh_running,
             workspace_selected,
         )),
     }

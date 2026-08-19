@@ -454,61 +454,78 @@ impl MarketManager {
         })
     }
 
-    pub async fn desktop_contributions(
+    pub fn desktop_contributions(
         &self,
-        runtime: &RuntimeManager,
-        state: &PersistedState,
         dsh_home: &Path,
     ) -> Result<Vec<DesktopContribution>, String> {
-        let selected = select_runtime(runtime, state).await?;
-        let pnpm = self.prepare_pnpm(runtime)?;
-        let list_result = self.run_dsh(
-            &selected,
-            &pnpm,
-            dsh_home,
-            &[
-                "list".to_string(),
-                "--depth".to_string(),
-                "0".to_string(),
-                "--json".to_string(),
-            ],
-        )?;
-        ensure_command_success("读取已安装插件贡献", &list_result)?;
+        let profile = dsh_home.join("profiles").join("web");
+        let profile_manifest_path = profile.join("package.json");
+        if !profile_manifest_path.is_file() {
+            return Ok(Vec::new());
+        }
+        let profile_manifest = fs::read_to_string(&profile_manifest_path)
+            .map_err(|error| format!("读取 web profile 清单失败: {error}"))?;
+        let profile_manifest: Value = serde_json::from_str(&profile_manifest)
+            .map_err(|error| format!("web profile 清单 JSON 无效: {error}"))?;
+        let dependencies = profile_manifest
+            .get("dependencies")
+            .and_then(Value::as_object);
+        let active_bundles = profile_manifest
+            .pointer("/dsh/profile/bundles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
 
-        let installed = parse_installed_json(&combined_output(&list_result));
         let mut contributions = Vec::new();
-        for (name, version) in installed {
+        for name in active_bundles {
             if validate_market_package_name(&name).is_err() {
                 continue;
             }
-            let view_result = self.run_dsh(
-                &selected,
-                &pnpm,
-                dsh_home,
-                &[
-                    "view".to_string(),
-                    format!("{name}@{version}"),
-                    "--json".to_string(),
-                ],
-            )?;
-            if !view_result_success(&view_result) {
-                self.debug_log(format!(
-                    "desktop contribution view failed name={name} version={version} code={:?}",
-                    view_result.code
-                ));
+            if !dependencies.is_some_and(|items| items.contains_key(name)) {
                 continue;
             }
-            let manifest = match parse_manifest(&combined_output(&view_result))
-                .and_then(|value| validate_market_manifest(&name, &value))
-            {
-                Ok(manifest) => manifest,
+            let package_manifest_path = profile
+                .join("node_modules")
+                .join(MARKET_SCOPE.trim_end_matches('/'))
+                .join(name.trim_start_matches(MARKET_SCOPE))
+                .join("package.json");
+            let package_manifest = match fs::read_to_string(&package_manifest_path) {
+                Ok(value) => value,
                 Err(error) => {
                     self.debug_log(format!(
-                        "desktop contribution rejected name={name} version={version} reason={error}"
+                        "desktop contribution local manifest missing name={name} path={} reason={error}",
+                        package_manifest_path.display()
                     ));
                     continue;
                 }
             };
+            let package_manifest: Value = match serde_json::from_str(&package_manifest) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.debug_log(format!(
+                        "desktop contribution local manifest invalid name={name} reason={error}"
+                    ));
+                    continue;
+                }
+            };
+            let manifest = match validate_market_manifest(name, &package_manifest) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    self.debug_log(format!(
+                        "desktop contribution rejected name={name} reason={error}"
+                    ));
+                    continue;
+                }
+            };
+            if manifest.name != name {
+                self.debug_log(format!(
+                    "desktop contribution package mismatch expected={name} actual={}",
+                    manifest.name
+                ));
+                continue;
+            }
             let Some(desktop) = manifest.desktop else {
                 continue;
             };
@@ -1739,6 +1756,7 @@ mod tests {
         assert_eq!(
             packages,
             vec![
+                "@p-dsh-market/akshare-market-analysis".to_string(),
                 "@p-dsh-market/dsh-open-workspace".to_string(),
                 "@p-dsh-market/neon-agent-theme".to_string(),
             ]
@@ -1848,6 +1866,66 @@ mod tests {
 
         manifest["dsh"]["desktop"]["permissions"] = serde_json::json!(["shell:titlebar"]);
         assert!(validate_market_manifest("@p-dsh-market/workspace", &manifest).is_err());
+    }
+
+    #[test]
+    fn loads_desktop_contributions_from_active_local_profile_bundles() {
+        let root = env::temp_dir().join(format!(
+            "dsh-desktop-contributions-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        let profile = root.join("profiles").join("web");
+        let package_dir = profile
+            .join("node_modules")
+            .join("@p-dsh-market")
+            .join("workspace");
+        fs::create_dir_all(&package_dir).expect("test profile should be created");
+        fs::write(
+            profile.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "dependencies": {
+                    "@p-dsh-market/workspace": "1.2.3",
+                    "@p-dsh-market/installed-but-disabled": "1.0.0"
+                },
+                "dsh": { "profile": { "bundles": ["@p-dsh-market/workspace"] } }
+            }))
+            .expect("profile manifest should serialize"),
+        )
+        .expect("profile manifest should be written");
+        let mut manifest = valid_manifest("@p-dsh-market/workspace");
+        manifest["dsh"]["protocolVersion"] = serde_json::json!(1);
+        manifest["dsh"]["market"]["capabilities"] =
+            serde_json::json!(["skills", "host", "client", "desktop-shell"]);
+        manifest["dsh"]["desktop"] = serde_json::json!({
+            "permissions": ["shell:titlebar", "native:open-folder"],
+            "contributes": { "titlebarActions": [{
+                "id": "open-folder",
+                "slot": "desktop.titlebar.workspaceActions",
+                "label": "文件夹",
+                "order": 100,
+                "when": ["dshRunning", "pluginActive"],
+                "action": { "type": "native", "command": "workspace.openFolder" }
+            }] }
+        });
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec(&manifest).expect("plugin manifest should serialize"),
+        )
+        .expect("plugin manifest should be written");
+
+        let manager = MarketManager::new(root.join("desktop-data"));
+        let contributions = manager
+            .desktop_contributions(&root)
+            .expect("local contributions should load");
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].package_name, "@p-dsh-market/workspace");
+        assert_eq!(contributions[0].actions[0].label, "文件夹");
+
+        fs::remove_dir_all(root).expect("test profile should be removed");
     }
 
     #[test]

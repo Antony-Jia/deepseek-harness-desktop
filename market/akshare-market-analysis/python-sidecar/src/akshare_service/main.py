@@ -5,10 +5,12 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
 import sys
+from time import monotonic
 from typing import Any
 
 if __package__ in (None, ""):
@@ -25,6 +27,31 @@ else:
 
 MAX_BODY_BYTES = 256 * 1024
 MAX_ERROR_TEXT = 512
+LOGGER = logging.getLogger("akshare-sidecar")
+
+
+def configure_logging() -> None:
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] [akshare-sidecar] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+        force=True,
+    )
+
+
+def body_summary(body: dict[str, Any]) -> str:
+    keys = ",".join(sorted(str(key) for key in body))
+    market = body.get("market", "")
+    return (
+        f"keys=[{keys}] market={market!s} "
+        f"symbolPresent={bool(body.get('symbol'))} "
+        f"queryPresent={bool(body.get('query'))}"
+    )
 
 
 class _Server(ThreadingHTTPServer):
@@ -49,6 +76,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         raw = self.headers.get("Authorization", "")
         prefix = "Bearer "
         return raw.startswith(prefix) and hmac.compare_digest(raw[len(prefix) :], self.server.token)
+
+    def _log_path(self) -> str:
+        return self.path.split("?", 1)[0]
 
     def _write(self, status: int, body: Any) -> None:
         encoded = json.dumps(json_safe(body), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -77,39 +107,62 @@ class RequestHandler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self) -> None:  # noqa: N802
+        started_at = monotonic()
         if not self._authorized():
             self._write(401, {"ok": False, "error": {"code": "UNAUTHORIZED", "message": "需要 sidecar bearer token。"}})
+            LOGGER.warning("GET unauthorized path=%s elapsedMs=%d", self._log_path(), int((monotonic() - started_at) * 1000))
             return
         if self.path != "/health":
             self._write(404, {"ok": False, "error": {"code": "NOT_FOUND", "message": "未知 sidecar 路由。"}})
+            LOGGER.warning("GET rejected path=%s status=404 elapsedMs=%d", self._log_path(), int((monotonic() - started_at) * 1000))
             return
         try:
             self._write(200, self.server.service.health())
+            LOGGER.info("GET health status=200 elapsedMs=%d", int((monotonic() - started_at) * 1000))
         except Exception as error:
             self._write(503, {"ok": False, "error": {"code": "HEALTH_FAILED", "message": str(error)[:MAX_ERROR_TEXT]}})
+            LOGGER.exception("GET health failed status=503 elapsedMs=%d", int((monotonic() - started_at) * 1000))
 
     def do_POST(self) -> None:  # noqa: N802
+        started_at = monotonic()
         if not self._authorized():
             self._write(401, {"ok": False, "error": {"code": "UNAUTHORIZED", "message": "需要 sidecar bearer token。"}})
+            LOGGER.warning("POST unauthorized path=%s elapsedMs=%d", self.path, int((monotonic() - started_at) * 1000))
             return
         try:
             body = self._body()
+            LOGGER.info("POST start path=%s %s", self._log_path(), body_summary(body))
             self._write(200, self.server.service.dispatch(self.path, body))
+            LOGGER.info("POST success path=%s status=200 elapsedMs=%d", self._log_path(), int((monotonic() - started_at) * 1000))
         except ProtocolError as error:
             status = 413 if error.code == "PAYLOAD_TOO_LARGE" else 404 if error.code == "NOT_FOUND" else 400
             self._write(status, {"ok": False, "error": {"code": error.code, "message": str(error)[:MAX_ERROR_TEXT]}})
+            LOGGER.warning("POST rejected path=%s status=%d code=%s elapsedMs=%d", self._log_path(), status, error.code, int((monotonic() - started_at) * 1000))
         except DataSourceError as error:
             self._write(503, {"ok": False, "error": {"code": error.code, "message": str(error)[:MAX_ERROR_TEXT], "retryable": error.retryable}})
+            LOGGER.warning(
+                "POST upstream failed path=%s status=503 code=%s retryable=%s elapsedMs=%d message=%s",
+                self._log_path(),
+                error.code,
+                error.retryable,
+                int((monotonic() - started_at) * 1000),
+                str(error)[:MAX_ERROR_TEXT],
+                exc_info=True,
+            )
         except Exception:
             self._write(500, {"ok": False, "error": {"code": "SIDECAR_INTERNAL", "message": "sidecar 内部错误。"}})
+            LOGGER.exception("POST internal failed path=%s status=500 elapsedMs=%d", self._log_path(), int((monotonic() - started_at) * 1000))
 
 
 def main() -> int:
+    configure_logging()
     token = os.environ.get("DSH_AKSHARE_TOKEN", "")
     if not token:
+        LOGGER.error("sidecar startup rejected: DSH_AKSHARE_TOKEN missing")
         print(json.dumps({"ready": False, "error": "DSH_AKSHARE_TOKEN missing"}), flush=True)
         return 2
     cache_dir = os.environ.get("DSH_AKSHARE_CACHE_DIR") or str(Path(os.environ.get("TEMP", ".")) / "dsh-akshare-cache")
+    LOGGER.info("sidecar starting cacheDir=%s", cache_dir)
     server = _Server(("127.0.0.1", 0), token, MarketService(cache_dir=cache_dir))
     print(json.dumps({
         "ready": True,
@@ -117,12 +170,14 @@ def main() -> int:
         "port": server.server_address[1],
         "nonce": server.nonce,
     }, separators=(",", ":")), flush=True)
+    LOGGER.info("sidecar ready port=%d", server.server_address[1])
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        LOGGER.info("sidecar stopped")
     return 0
 
 
