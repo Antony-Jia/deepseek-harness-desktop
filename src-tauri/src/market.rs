@@ -212,27 +212,29 @@ impl MarketManager {
 
     fn load_catalog(&self) -> Result<LoadedMarketCatalog, String> {
         match fetch_market_catalog() {
-            Ok(raw) => match parse_market_catalog(&raw) {
-                Ok(packages) => {
-                    if let Some(parent) = self.catalog_cache.parent() {
-                        if let Err(error) = fs::create_dir_all(parent) {
-                            self.debug_log(format!("catalog cache directory failed: {error}"));
-                        } else if let Err(error) = fs::write(&self.catalog_cache, raw) {
-                            self.debug_log(format!("catalog cache write failed: {error}"));
+            Ok(raw) => {
+                match parse_market_catalog(&raw).and_then(merge_market_catalog_with_embedded) {
+                    Ok(packages) => {
+                        if let Some(parent) = self.catalog_cache.parent() {
+                            if let Err(error) = fs::create_dir_all(parent) {
+                                self.debug_log(format!("catalog cache directory failed: {error}"));
+                            } else if let Err(error) = fs::write(&self.catalog_cache, raw) {
+                                self.debug_log(format!("catalog cache write failed: {error}"));
+                            }
                         }
+                        return Ok(LoadedMarketCatalog {
+                            packages,
+                            source: "remote",
+                        });
                     }
-                    return Ok(LoadedMarketCatalog {
-                        packages,
-                        source: "remote",
-                    });
+                    Err(error) => self.debug_log(format!("remote catalog rejected: {error}")),
                 }
-                Err(error) => self.debug_log(format!("remote catalog rejected: {error}")),
-            },
+            }
             Err(error) => self.debug_log(format!("remote catalog unavailable: {error}")),
         }
 
         if let Ok(raw) = fs::read_to_string(&self.catalog_cache) {
-            match parse_market_catalog(&raw) {
+            match parse_market_catalog(&raw).and_then(merge_market_catalog_with_embedded) {
                 Ok(packages) => {
                     return Ok(LoadedMarketCatalog {
                         packages,
@@ -1054,6 +1056,24 @@ fn parse_market_catalog(raw: &str) -> Result<Vec<String>, String> {
     Ok(packages.into_iter().collect())
 }
 
+fn merge_market_catalog_with_embedded(packages: Vec<String>) -> Result<Vec<String>, String> {
+    merge_market_catalog_packages(packages, parse_market_catalog(EMBEDDED_MARKET_CATALOG)?)
+}
+
+fn merge_market_catalog_packages(
+    primary: Vec<String>,
+    additional: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let mut packages = primary.into_iter().collect::<BTreeSet<_>>();
+    packages.extend(additional);
+    if packages.len() > MAX_CATALOG_PACKAGES {
+        return Err(format!(
+            "合并后的市场目录不能超过 {MAX_CATALOG_PACKAGES} 个插件。"
+        ));
+    }
+    Ok(packages.into_iter().collect())
+}
+
 fn market_plugin_matches_query(plugin: &MarketPlugin, query: &str) -> bool {
     let query = query.trim().to_ascii_lowercase();
     if query.is_empty()
@@ -1773,6 +1793,7 @@ mod tests {
             vec![
                 "@p-dsh-market/akshare-market-analysis".to_string(),
                 "@p-dsh-market/dsh-open-workspace".to_string(),
+                "@p-dsh-market/multi-agent-roundtable".to_string(),
                 "@p-dsh-market/neon-agent-theme".to_string(),
             ]
         );
@@ -1786,6 +1807,22 @@ mod tests {
         .is_err());
         assert!(
             parse_market_catalog(r#"{"schemaVersion":1,"packages":["@other/example"]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn embedded_catalog_entries_are_visible_when_remote_catalog_is_stale() {
+        let merged = merge_market_catalog_packages(
+            vec!["@p-dsh-market/dsh-open-workspace".to_string()],
+            vec!["@p-dsh-market/multi-agent-roundtable".to_string()],
+        )
+        .expect("catalog union should stay within the limit");
+        assert_eq!(
+            merged,
+            vec![
+                "@p-dsh-market/dsh-open-workspace".to_string(),
+                "@p-dsh-market/multi-agent-roundtable".to_string(),
+            ]
         );
     }
 

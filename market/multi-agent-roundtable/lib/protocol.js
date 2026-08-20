@@ -6,18 +6,22 @@ export function messageOf(error) {
   return error && typeof error.message === 'string' ? error.message : String(error)
 }
 
-export function contentText(content) {
+export function contentText(content, kind = 'text') {
   if (!Array.isArray(content)) return ''
   return content.map((block) => {
     if (!block || typeof block !== 'object') return ''
-    if (block.type === 'text' || block.type === 'reasoning') return typeof block.text === 'string' ? block.text : ''
-    if (block.type === 'tool-call') return block.name ? `调用工具：${block.name}` : ''
+    if (block.type === kind) return typeof block.text === 'string' ? block.text : ''
+    if (kind === 'text' && block.type === 'tool-call') return block.name ? `调用工具：${block.name}` : ''
     return ''
   }).filter(Boolean).join('\n\n').trim()
 }
 
 export function messageMarkdown(message) {
   return contentText(message?.content) || (typeof message?.text === 'string' ? message.text.trim() : '')
+}
+
+export function messageReasoning(message) {
+  return contentText(message?.content, 'reasoning')
 }
 
 export function shortText(value, max = 8000) {

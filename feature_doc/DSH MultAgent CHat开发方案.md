@@ -1,3 +1,20 @@
+# 2026-08-20 修订：中央微信式群聊 + 右侧角色设置栏
+
+本节取代下文早期“侧栏承载讨论内容”和“顶部工具栏作为主要入口”的交互描述；下文的 Agent、Session、Prompt 和编排契约仍然有效。
+
+修订后的产品边界：
+
+- 普通聊天和 Multi-Agent 群聊都在当前中央会话区域显示；群聊不再放入右侧 Overlay。
+- 右侧侧栏只负责“Multi-Agent 对话模式”开关、角色 Prompt、Provider、Model、最大 Token 和启停设置。
+- 打开模式开关后，中央会话切换到 `conversation.view: multi-agent-roundtable`；关闭后返回 `conversation.view: chat`。
+- 中央群聊采用微信式布局：其他角色头像和气泡靠左，用户头像和气泡靠右，底部固定输入框，顶部仅保留群名、人数、状态和角色设置入口。
+- 每个角色必须使用独立 Agent/子 Session/Persona；Provider 和 Model 可分别配置。独立模式不共享其他角色输出，只有交叉评审和主持人模式允许受控传递。
+- 默认模板保存在 npm 插件包 `presets/default-roles.json`；用户配置保存在 `%LOCALAPPDATA%/dsh-desktop/plugin-data/multi-agent-roundtable/roles.json`，不得写回 `node_modules`。
+
+当前 `rc.7` 没有向第三方插件公开右侧 `details` 栏的追加槽位；占用整个 `details` 会破坏原生工具详情。因此实现继续使用插件受控的右侧 `shell.overlay` 作为设置栏，但将宽度限制为设置栏尺寸，且其中不再渲染聊天消息。
+
+---
+
 我会按三条线调查：前端顶部设定栏能挂在哪个官方槽位、角色配置如何存储在插件自身范围、宿主端如何调度指定角色参与讨论。最后给出可直接实施的分阶段方案，并标明哪些能力已确认、哪些必须运行时探测。
 
 UI 和存储边界已经基本确认。一个重要结论是：**默认角色模板可以随 npm 插件包发布，但用户修改后的 Prompt 不能写回 `node_modules` 插件目录**；插件包应视为只读，动态内容必须进入插件专属数据区。接下来我确认本机 DSH 运行时是否能提供更精确的 `agents` 调用契约。
@@ -433,22 +450,24 @@ DSH Session 是事件溯源的历史真源：
 
 因此不建议把整段 Agent 消息再复制进 `settings.yaml`。
 
-推荐：
+当前实现：
 
 ```text
-主 DSH 会话
-└── Roundtable discussion
-    ├── 产品经理子 Session
-    ├── 架构师子 Session
-    └── 市场分析师子 Session
+插件独立 Roundtable Conversation
+├── 可选绑定普通 DSH 会话
+├── Discussion 元数据
+├── 产品经理子 Session
+├── 架构师子 Session
+└── 市场分析师子 Session
 ```
 
 插件只需要额外保存：
 
 ```json
 {
+  "conversationId": "roundtable-conversation-uuid",
   "discussionId": "discussion-uuid",
-  "parentSessionId": "当前DSH会话ID",
+  "boundSessionId": "可选的普通DSH会话ID",
   "participants": [
     {
       "roleId": "architect",
@@ -458,24 +477,23 @@ DSH Session 是事件溯源的历史真源：
 }
 ```
 
-这份映射可采用插件自定义 Session Event 保存到父会话中。DSH 明确允许插件扩展自己的 Session 事件，并由插件负责关系约束：
+这份映射保存在插件专属 `conversations.json` 中，并兼容迁移旧 Settings 元数据。当前运行时没有向静态市场插件开放足够稳定的父会话自定义 Event 注册面，因此不能把“是否存在普通父会话”作为群聊历史能否恢复的前提。
 
 <ref_snippet file="C:\Users\Admin\AppData\Local\dsh-desktop\runtimes\0.1.0-rc.7\node_modules\@deepseek-ai\dsh-session\README.zh.md" lines="69-75" />
 
-建议事件：
+插件索引负责：
 
 ```text
-roundtable/discussion-created
-roundtable/participants-selected
-roundtable/message-linked
-roundtable/discussion-completed
+conversationId -> discussionId
+conversationId -> boundSessionId（可选）
+discussionId -> participant childSessionIds
 ```
 
 这样：
 
-- 角色 Prompt 存在插件 Settings
+- 角色 Prompt 存在插件 `roles.json`
 - Agent 回复存在 DSH Session
-- 父子关系存在插件自定义 Session Event
+- 群聊与子 Session 映射存在插件 `conversations.json`
 - 不需要重复维护完整聊天数据库
 
 ---
@@ -572,6 +590,11 @@ DSH 浏览器插件不能直接使用 JSX、TypeScript 或原生 ESM import：
 ```text
 GET    /multi-agent-roundtable/config
 PUT    /multi-agent-roundtable/config
+GET    /multi-agent-roundtable/conversations
+POST   /multi-agent-roundtable/conversations
+GET    /multi-agent-roundtable/conversations/:id
+PATCH  /multi-agent-roundtable/conversations/:id
+DELETE /multi-agent-roundtable/conversations/:id
 POST   /multi-agent-roundtable/discussions
 POST   /multi-agent-roundtable/discussions/:id/messages
 POST   /multi-agent-roundtable/discussions/:id/cancel
@@ -692,16 +715,24 @@ await Promise.all(selectedRoles.map(runRole))
 | 要求 | 可行性 | 推荐实现 |
 |---|---|---|
 | 独立多 Agent 对话页 | 已确认可行 | `conversation.view` |
-| 顶部设置栏 | 已确认可行 | 自定义 View 内 sticky toolbar |
-| 角色增删改 | 已确认可行 | `settings.section` |
+| 空白会话直接进入讨论 | 已实现 | 原生标签尚未渲染时由 `shell.overlay` 中央直达层承载同一群聊组件，无需先发送普通对话 |
+| 右侧模式开关与角色栏 | 已确认可行 | 受控 `shell.overlay`，只放开关与角色配置 |
+| 角色增删改 | 已确认可行 | 右侧角色栏；完整管理仍可复用 `settings.section` |
 | 每角色独立 Prompt | 已确认可行 | Agent `setup` + `systemPrompt.section` |
 | 选择参与角色 | 已确认可行 | Settings + 本轮 participantIds |
 | 多 Agent 并行运行 | 已确认可行 | `ctx.agents.create()` |
+| 角色继承默认模型 | 已实现 | 注入 `agentDefaultModel`，创建/恢复子 Agent 时显式传入当前 Provider/Model |
+| 子 Agent 错误可见 | 已实现 | 读取 `turn/end.reason`，角色与整场讨论显示失败，禁止零输出误报完成 |
+| Thinking 展示 | 已实现 | reasoning 与正式回答分离，使用默认关闭的折叠区展示 |
+| 单条消息折叠 | 已实现 | 每个气泡独立展开/收起，超长角色回答默认折叠 |
+| 群聊独立持久化 | 已实现 | `conversations.json` 保存群聊 ID、普通会话绑定和可恢复讨论元数据，子 Session 保存正文 |
+| 新建与恢复群聊 | 已实现 | 中央标题栏提供历史选择和“新建群聊”，不再依赖临时 `active` 或 localStorage 发现历史 |
 | 中止讨论 | 已确认可行 | `agent.cancel()` |
 | Markdown 表格/代码 | 可行 | 插件内打包安全 Markdown 渲染器 |
 | 讨论历史持久化 | 已确认底层可行 | 子 Agent Session + 自定义父会话事件 |
-| 写回 npm 插件目录 | 不应实施 | 包目录只保存默认模板 |
+| 用户角色持久化 | 已实现 | `%LOCALAPPDATA%/dsh-desktop/plugin-data/multi-agent-roundtable/roles.json` |
+| 写回 npm 插件目录 | 不应实施 | 包目录只保存只读默认模板 |
 
-**推荐最终路径：`conversation.view` 独立标签页 + 顶部角色设定栏 + `ctx.settings` 保存角色 Prompt + `ctx.agents.create()` 创建独立角色 + DSH Session 保存讨论历史。**
+**最终路径：右侧设置栏开关切换中央 `conversation.view`（空白会话走中央直达层）+ 中央微信式群聊 + 插件专属 `roles.json` 保存角色 Prompt/Provider/Model + `agentDefaultModel` 提供默认模型 + `ctx.agents.create()` 创建独立角色 + DSH Session 保存讨论历史。**
 
 这条路径全部建立在 DSH 当前公开扩展点上，不需要修改宿主 DOM，也不需要覆盖原生对话页面。

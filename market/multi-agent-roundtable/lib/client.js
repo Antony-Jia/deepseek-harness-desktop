@@ -12,9 +12,85 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
     var React = require('react')
 
+    var PLUGIN_ID = '@p-dsh-market/multi-agent-roundtable'
+    var DESKTOP_RPC_METHOD = 'multiAgentRoundtable.open'
     var BASE = '/multi-agent-roundtable'
     var stores = Object.create(null)
     var configStore = { value: null, version: 0, loading: false, error: '', listeners: [] }
+    var overlayState = { open: false, directSessionId: '', version: 0, listeners: [] }
+
+    function conversationModeStorageKey(sessionId) {
+      return 'dsh:multi-agent-roundtable:mode:' + sessionKey(sessionId)
+    }
+
+    function readConversationMode(sessionId) {
+      try { return window.localStorage.getItem(conversationModeStorageKey(sessionId)) === 'on' } catch (_) { return false }
+    }
+
+    function writeConversationMode(sessionId, enabled) {
+      try { window.localStorage.setItem(conversationModeStorageKey(sessionId), enabled ? 'on' : 'off') } catch (_) {}
+    }
+
+    // rc.7 keeps the active view in ui-conversation's private per-session store.
+    // Third-party views do not receive that store's actions, so the supported
+    // tab affordance is used as the narrowest bridge: role=tab is the runtime's
+    // public accessibility contract and avoids relying on generated CSS names.
+    function activateConversationView(enabled) {
+      var labels = enabled ? ['多 Agent 讨论', 'Multi-Agent'] : ['聊天', 'Chat']
+      var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'))
+      var target = tabs.filter(function (tab) {
+        var label = String(tab.textContent || '').trim()
+        return labels.some(function (expected) { return label === expected || label.indexOf(expected) >= 0 })
+      })[0]
+      if (!target || typeof target.click !== 'function') return false
+      target.click()
+      return true
+    }
+
+    function currentConversationMode(sessionId) {
+      var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'))
+      var selected = tabs.filter(function (tab) {
+        return typeof tab.getAttribute === 'function' && tab.getAttribute('aria-selected') === 'true'
+      })[0]
+      if (selected) {
+        var label = String(selected.textContent || '').trim()
+        return label.indexOf('多 Agent') >= 0 || label.indexOf('Multi-Agent') >= 0
+      }
+      return readConversationMode(sessionId)
+    }
+
+    function announceDesktop(type, payload) {
+      if (window.parent === window) return
+      window.parent.postMessage(Object.assign({ source: PLUGIN_ID, type: type }, payload || {}), '*')
+    }
+
+    function setOverlayOpen(open) {
+      var next = open === true
+      if (overlayState.open === next) return
+      overlayState.open = next
+      overlayState.version += 1
+      overlayState.listeners.slice().forEach(function (listener) { try { listener() } catch (_) {} })
+      announceDesktop('roundtable-panel-state', { open: next })
+    }
+
+    function setDirectConversationMode(sessionId, enabled) {
+      var next = enabled ? sessionKey(sessionId) : ''
+      if (overlayState.directSessionId === next) return
+      overlayState.directSessionId = next
+      overlayState.version += 1
+      overlayState.listeners.slice().forEach(function (listener) { try { listener() } catch (_) {} })
+    }
+
+    function useOverlayState() {
+      var pair = React.useState(overlayState.version)
+      var setVersion = pair[1]
+      React.useEffect(function () {
+        var listener = function () { setVersion(overlayState.version) }
+        overlayState.listeners.push(listener)
+        return function () { overlayState.listeners = overlayState.listeners.filter(function (item) { return item !== listener }) }
+      }, [])
+      return overlayState
+    }
 
     function publishConfig(value) {
       configStore.value = value
@@ -52,6 +128,21 @@ window.__ModuleLoader__.load({
       return 'dsh:multi-agent-roundtable:discussion:' + sessionKey(sessionId)
     }
 
+    function conversationStorageKey(sessionId) {
+      return 'dsh:multi-agent-roundtable:conversation:' + sessionKey(sessionId)
+    }
+
+    function readConversationId(sessionId) {
+      try { return window.localStorage.getItem(conversationStorageKey(sessionId)) || '' } catch (_) { return '' }
+    }
+
+    function writeConversationId(sessionId, id) {
+      try {
+        if (id) window.localStorage.setItem(conversationStorageKey(sessionId), id)
+        else window.localStorage.removeItem(conversationStorageKey(sessionId))
+      } catch (_) {}
+    }
+
     function readDiscussionId(sessionId) {
       try { return window.localStorage.getItem(discussionStorageKey(sessionId)) || '' } catch (_) { return '' }
     }
@@ -71,6 +162,8 @@ window.__ModuleLoader__.load({
           sessionId: key,
           version: 0,
           config: null,
+          conversation: null,
+          conversations: [],
           discussion: null,
           loading: false,
           loaded: false,
@@ -104,9 +197,65 @@ window.__ModuleLoader__.load({
 
     function applyDiscussion(store, discussion) {
       store.discussion = discussion || null
+      if (discussion && store.conversation) store.conversation.discussionId = discussion.id
       if (discussion && discussion.id) writeDiscussionId(store.sessionId, discussion.id)
       if (!discussion) writeDiscussionId(store.sessionId, '')
       notify(store)
+    }
+
+    async function loadSelectedConversation(store, conversation) {
+      closeStream(store)
+      store.conversation = conversation || null
+      store.discussion = null
+      writeConversationId(store.sessionId, conversation ? conversation.id : '')
+      if (conversation && conversation.discussionId) {
+        var discussionBody = await request('/discussions/' + encodeURIComponent(conversation.discussionId))
+        store.discussion = discussionBody.discussion
+        connectStream(store)
+      }
+      notify(store)
+      return conversation
+    }
+
+    async function refreshConversations(store, createWhenMissing) {
+      var boundSessionId = store.sessionId === 'active' ? '' : store.sessionId
+      var body = await request('/conversations?boundSessionId=' + encodeURIComponent(boundSessionId))
+      store.conversations = body.conversations || []
+      var preferredId = readConversationId(store.sessionId)
+      var selected = store.conversations.filter(function (item) { return item.id === preferredId })[0]
+      if (!selected && body.suggestedId) selected = store.conversations.filter(function (item) { return item.id === body.suggestedId })[0]
+      if (!selected && createWhenMissing) {
+        var created = await request('/conversations', { method: 'POST', body: { boundSessionId: boundSessionId } })
+        selected = created.conversation
+        store.conversations.unshift(selected)
+      }
+      await loadSelectedConversation(store, selected || null)
+      return selected
+    }
+
+    async function selectConversation(store, id) {
+      if (!id || store.busy) return
+      var conversation = store.conversations.filter(function (item) { return item.id === id })[0]
+      if (!conversation) return
+      store.busy = true
+      store.error = ''
+      notify(store)
+      try { await loadSelectedConversation(store, conversation) } catch (error) { setError(store, error) }
+      finally { store.busy = false; notify(store) }
+    }
+
+    async function newConversation(store) {
+      if (store.busy) return
+      store.busy = true
+      store.error = ''
+      notify(store)
+      try {
+        var boundSessionId = store.sessionId === 'active' ? '' : store.sessionId
+        var body = await request('/conversations', { method: 'POST', body: { boundSessionId: boundSessionId } })
+        store.conversations.unshift(body.conversation)
+        await loadSelectedConversation(store, body.conversation)
+      } catch (error) { setError(store, error) }
+      finally { store.busy = false; notify(store) }
     }
 
     function stopPolling(store) {
@@ -179,17 +328,7 @@ window.__ModuleLoader__.load({
         var configBody = await request('/config')
         store.config = configBody.config
         publishConfig(configBody.config)
-        var id = readDiscussionId(store.sessionId)
-        if (id) {
-          try {
-            var discussionBody = await request('/discussions/' + encodeURIComponent(id))
-            store.discussion = discussionBody.discussion
-            connectStream(store)
-          } catch (_) {
-            writeDiscussionId(store.sessionId, '')
-            store.discussion = null
-          }
-        }
+        await refreshConversations(store, true)
         store.loaded = true
       } catch (error) {
         store.error = error && error.message ? error.message : String(error)
@@ -205,6 +344,12 @@ window.__ModuleLoader__.load({
       notify(store)
       try {
         var body = await request('/discussions', { method: 'POST', body: input })
+        if (body.conversation) {
+          store.conversation = body.conversation
+          var index = store.conversations.findIndex(function (item) { return item.id === body.conversation.id })
+          if (index >= 0) store.conversations[index] = body.conversation
+          else store.conversations.unshift(body.conversation)
+        }
         applyDiscussion(store, body.discussion)
         connectStream(store)
         return body.discussion
@@ -268,6 +413,33 @@ window.__ModuleLoader__.load({
         return off
       }, [store])
       return store
+    }
+
+    function sessionIdFromSnapshot(snapshot) {
+      if (!snapshot) return 'active'
+      var current = snapshot.current || snapshot.currentId || snapshot.sessionId
+      if (typeof current === 'string' && current) return current
+      if (current && typeof current === 'object' && current.id) return String(current.id)
+      return 'active'
+    }
+
+    function useCurrentSessionId(sessions) {
+      var source = sessions && sessions.list
+      var pair = React.useState(function () {
+        return source && typeof source.getSnapshot === 'function' ? source.getSnapshot() : null
+      })
+      var snapshot = pair[0]
+      var setSnapshot = pair[1]
+      React.useEffect(function () {
+        if (!source || typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') {
+          setSnapshot(null)
+          return undefined
+        }
+        function update() { setSnapshot(source.getSnapshot()) }
+        update()
+        return source.subscribe(update)
+      }, [source])
+      return sessionIdFromSnapshot(snapshot)
     }
 
     function useConfigStore() {
@@ -457,10 +629,10 @@ window.__ModuleLoader__.load({
     function ParticipantStrip(props) {
       var participants = props.participants || []
       return React.createElement('div', { className: 'mar-participants' }, participants.map(function (participant) {
-        return React.createElement('div', { key: participant.roleId, className: 'mar-participant' }, [
+        return React.createElement('div', { key: participant.roleId, className: 'mar-participant', 'data-status': participant.status, title: participant.error || '' }, [
           React.createElement('span', { key: 'dot', className: 'mar-role-dot', style: { backgroundColor: participant.color } }),
           React.createElement('span', { key: 'name' }, participant.roleName),
-          React.createElement('span', { key: 'state', className: 'mar-participant-state' }, participant.status === 'running' ? '思考中' : participant.status === 'completed' ? '完成' : participant.status === 'cancelled' ? '已停止' : '等待'),
+          React.createElement('span', { key: 'state', className: 'mar-participant-state' }, participant.status === 'running' ? '思考中' : participant.status === 'completed' ? '完成' : participant.status === 'failed' ? '失败' : participant.status === 'cancelled' ? '已停止' : '等待'),
           participant.status === 'running' && props.onCancel ? React.createElement('button', { key: 'cancel', type: 'button', className: 'mar-participant-cancel', onClick: function () { props.onCancel(participant.roleId) }, title: '停止此角色' }, '停止') : null
         ])
       }))
@@ -468,14 +640,30 @@ window.__ModuleLoader__.load({
 
     function MessageCard(props) {
       var message = props.message
-      return React.createElement('article', { className: 'mar-message', 'data-status': message.status, 'data-role': message.roleId }, [
-        React.createElement('header', { key: 'header', className: 'mar-message-head' }, [
-          React.createElement('span', { key: 'dot', className: 'mar-role-dot', style: { backgroundColor: message.color } }),
-          React.createElement('strong', { key: 'role' }, message.roleName || message.roleId),
-          React.createElement('span', { key: 'round', className: 'mar-message-round' }, message.round ? '第 ' + message.round + ' 轮' : ''),
-          message.status === 'streaming' ? React.createElement('span', { key: 'streaming', className: 'mar-streaming' }, '实时输出') : null
+      var own = message.roleId === 'user'
+      var name = message.roleName || message.roleId
+      var content = message.content || (message.status === 'streaming' ? '正在生成正式回答…' : '（暂时没有文字输出）')
+      var collapsedPair = React.useState(function () { return !own && content.length > 2400 })
+      var collapsed = collapsedPair[0]
+      var setCollapsed = collapsedPair[1]
+      return React.createElement('article', { className: 'mar-message', 'data-status': message.status, 'data-role': message.roleId, 'data-own': own ? 'true' : 'false' }, [
+        !own ? React.createElement('span', { key: 'avatar', className: 'mar-avatar', style: { backgroundColor: message.color } }, String(name || '?').slice(0, 1)) : null,
+        React.createElement('div', { key: 'column', className: 'mar-message-column' }, [
+          React.createElement('header', { key: 'header', className: 'mar-message-head' }, [
+            React.createElement('strong', { key: 'role' }, name),
+            React.createElement('span', { key: 'round', className: 'mar-message-round' }, message.round ? '第 ' + message.round + ' 轮' : ''),
+            message.status === 'streaming' ? React.createElement('span', { key: 'streaming', className: 'mar-streaming' }, '正在输入…') : null,
+            React.createElement('button', { key: 'collapse', type: 'button', className: 'mar-message-toggle', onClick: function () { setCollapsed(!collapsed) }, 'aria-expanded': collapsed ? 'false' : 'true' }, collapsed ? '展开消息' : '收起消息')
+          ]),
+          !collapsed ? React.createElement('div', { key: 'bubble', className: 'mar-message-bubble' }, [
+            message.reasoning ? React.createElement('details', { key: 'reasoning', className: 'mar-reasoning' }, [
+              React.createElement('summary', { key: 'summary' }, '思考过程'),
+              React.createElement('div', { key: 'content', className: 'mar-reasoning-content' }, React.createElement(MarkdownView, { text: message.reasoning }))
+            ]) : null,
+            React.createElement(MarkdownView, { key: 'answer', text: content })
+          ]) : null
         ]),
-        React.createElement(MarkdownView, { key: 'body', text: message.content || '（暂时没有文字输出）' })
+        own ? React.createElement('span', { key: 'avatar', className: 'mar-avatar mar-avatar-user' }, '我') : null
       ])
     }
 
@@ -543,22 +731,30 @@ window.__ModuleLoader__.load({
       function submit() {
         var content = form.prompt.trim()
         if (!content || store.busy) return
+        if (!store.conversation) { setError(store, new Error('群聊会话尚未创建完成，请稍后重试。')); return }
         if (store.discussion && store.discussion.status === 'running') return
-        var input = { prompt: content, mode: form.mode, rounds: Math.max(1, Math.min(5, Number(form.rounds) || 1)), maxParallel: Math.max(1, Math.min(8, Number(form.maxParallel) || 3)), participantIds: form.participantIds, hostRoleId: form.hostRoleId, parentSessionId: sessionId }
+        var input = { prompt: content, mode: form.mode, rounds: Math.max(1, Math.min(5, Number(form.rounds) || 1)), maxParallel: Math.max(1, Math.min(8, Number(form.maxParallel) || 3)), participantIds: form.participantIds, hostRoleId: form.hostRoleId, parentSessionId: sessionId === 'active' ? '' : sessionId, conversationId: store.conversation.id }
         var action = store.discussion ? continueDiscussion(store, content) : createDiscussion(store, input)
         action.then(function (discussion) { if (discussion) setForm(Object.assign({}, form, { prompt: '' })) })
       }
       var discussion = store.discussion
       var messages = discussion && discussion.messages ? discussion.messages : []
       return React.createElement('div', { className: 'mar-shell' }, [
-        React.createElement('div', { key: 'heading', className: 'mar-heading' }, [
-          React.createElement('div', { key: 'title' }, [React.createElement('h2', { key: 'h' }, '多 Agent 讨论桌'), React.createElement('p', { key: 'p' }, '让不同角色并行分析，再把分歧和可执行结论集中到当前会话。')]),
-          discussion ? React.createElement(StatusPill, { key: 'status', status: discussion.status }) : null
+        React.createElement('div', { key: 'heading', className: 'mar-chat-header' }, [
+          React.createElement('div', { key: 'title' }, [React.createElement('h2', { key: 'h' }, store.conversation ? store.conversation.title : 'Multi-Agent 群聊'), React.createElement('p', { key: 'p' }, ((form.participantIds || []).length || 0) + ' 个角色 · 插件独立历史')]),
+          React.createElement('div', { key: 'actions', className: 'mar-chat-header-actions' }, [
+            React.createElement('select', { key: 'history', className: 'mar-history-select', value: store.conversation ? store.conversation.id : '', disabled: store.busy, onChange: function (event) { selectConversation(store, event.target.value) }, 'aria-label': '群聊历史记录' }, [
+              !store.conversations.length ? React.createElement('option', { key: 'empty', value: '' }, '暂无历史记录') : null
+            ].concat(store.conversations.map(function (item) { return React.createElement('option', { key: item.id, value: item.id }, item.title) }))),
+            React.createElement('button', { key: 'new', type: 'button', className: 'mar-secondary', disabled: store.busy, onClick: function () { newConversation(store) } }, '新建群聊'),
+            discussion ? React.createElement(StatusPill, { key: 'status', status: discussion.status }) : null,
+            React.createElement('button', { key: 'settings', type: 'button', className: 'mar-secondary', onClick: function () { setOverlayOpen(true) } }, '角色设置')
+          ])
         ]),
-        store.error ? React.createElement('div', { key: 'error', className: 'mar-error' }, store.error) : null,
-        !config && store.loading ? React.createElement('div', { key: 'loading', className: 'mar-empty' }, '正在加载讨论配置…') : null,
-        config ? React.createElement(DiscussionToolbar, { key: 'toolbar', config: config, form: form, setForm: setForm, discussion: discussion, onSubmit: submit, onCancel: function () { cancelDiscussion(store) }, disabled: store.busy || store.loading }) : null,
-        discussion ? React.createElement('div', { key: 'discussion', className: 'mar-discussion' }, [
+        React.createElement('div', { key: 'scroll', className: 'mar-chat-scroll' }, [
+          store.error ? React.createElement('div', { key: 'error', className: 'mar-error' }, store.error) : null,
+          !config && store.loading ? React.createElement('div', { key: 'loading', className: 'mar-empty' }, '正在加载讨论配置…') : null,
+          discussion ? React.createElement('div', { key: 'discussion', className: 'mar-discussion' }, [
           React.createElement('div', { key: 'meta', className: 'mar-discussion-meta' }, [
             React.createElement('span', { key: 'topic', className: 'mar-topic-label' }, discussion.prompt),
             React.createElement('span', { key: 'stream', className: 'mar-stream-state' }, store.streamStatus === 'live' ? '实时同步' : store.streamStatus === 'polling' ? '轮询同步' : '')
@@ -566,11 +762,147 @@ window.__ModuleLoader__.load({
           React.createElement(ParticipantStrip, { key: 'participants', participants: discussion.participants, onCancel: store.busy ? null : function (roleId) { cancelDiscussion(store, roleId) } }),
           messages.length ? React.createElement('div', { key: 'messages', className: 'mar-messages' }, messages.map(function (message) { return React.createElement(MessageCard, { key: message.id, message: message }) })) : React.createElement('div', { key: 'empty', className: 'mar-empty' }, discussion.status === 'running' ? 'Agent 正在准备输出…' : '还没有收到 Agent 输出。'),
           discussion.error ? React.createElement('div', { key: 'discussion-error', className: 'mar-error' }, discussion.error) : null
-        ]) : React.createElement('div', { key: 'welcome', className: 'mar-welcome' }, [
+          ]) : React.createElement('div', { key: 'welcome', className: 'mar-welcome' }, [
           React.createElement('div', { key: 'icon', className: 'mar-welcome-icon' }, '✦'),
-          React.createElement('h3', { key: 'title' }, '从一个具体问题开始'),
-          React.createElement('p', { key: 'copy' }, '例如：评审一个新功能方案，要求产品、架构、市场和风险角色分别给出依据，最后形成行动清单。')
+          React.createElement('h3', { key: 'title' }, '群聊已经就绪'),
+          React.createElement('p', { key: 'copy' }, '在右侧角色栏设置 Prompt 和模型，然后从下方发送一个讨论主题。')
+          ])
+        ]),
+        config ? React.createElement(DiscussionToolbar, { key: 'toolbar', config: config, form: form, setForm: setForm, discussion: discussion, onSubmit: submit, onCancel: function () { cancelDiscussion(store) }, disabled: store.busy || store.loading }) : null
+      ])
+    }
+
+    function RoundtableHeaderAction() {
+      return React.createElement('button', {
+        type: 'button',
+        className: 'mar-header-action',
+        title: '打开 Multi-Agent 模式与角色设置',
+        'aria-label': '打开 Multi-Agent 模式与角色设置',
+        onClick: function () { setOverlayOpen(true) }
+      }, 'Multi-Agent')
+    }
+
+    function ModeSwitch(props) {
+      var pair = React.useState(function () { return currentConversationMode(props.sessionId) })
+      var enabled = pair[0]
+      var setEnabled = pair[1]
+      React.useEffect(function () {
+        if (enabled && !activateConversationView(true)) setDirectConversationMode(props.sessionId, true)
+      }, [props.sessionId])
+      function change(event) {
+        var next = event.target.checked === true
+        var activated = activateConversationView(next)
+        setDirectConversationMode(props.sessionId, next && !activated)
+        writeConversationMode(props.sessionId, next)
+        setEnabled(next)
+        props.onMessage(next ? (activated ? '已切换到中央 Multi-Agent 群聊。' : '已直接打开中央 Multi-Agent 群聊。') : '已返回普通聊天。')
+        setOverlayOpen(false)
+      }
+      return React.createElement('section', { className: 'mar-mode-switch-card' }, [
+        React.createElement('div', { key: 'copy', className: 'mar-mode-switch-copy' }, [
+          React.createElement('strong', { key: 'title' }, 'Multi-Agent 对话模式'),
+          React.createElement('span', { key: 'hint' }, enabled ? '中央区域正在显示群聊' : '中央区域保持普通聊天')
+        ]),
+        React.createElement('label', { key: 'switch', className: 'mar-switch' }, [
+          React.createElement('input', { key: 'input', type: 'checkbox', checked: enabled, onChange: change }),
+          React.createElement('span', { key: 'track', className: 'mar-switch-track' })
         ])
+      ])
+    }
+
+    function RoleSidebar(props) {
+      var source = useConfigStore()
+      var draftPair = React.useState(null)
+      var draft = draftPair[0]
+      var setDraft = draftPair[1]
+      var selectedPair = React.useState('')
+      var selectedId = selectedPair[0]
+      var setSelectedId = selectedPair[1]
+      var messagePair = React.useState('')
+      var message = messagePair[0]
+      var setMessage = messagePair[1]
+      React.useEffect(function () {
+        if (!source.value) return
+        setDraft(clone(source.value))
+        if (!selectedId && source.value.roles && source.value.roles[0]) setSelectedId(source.value.roles[0].id)
+      }, [source.value])
+      if (!draft) return React.createElement('div', { className: 'mar-sidebar-loading' }, source.error || '正在加载角色设置…')
+      var roleIndex = draft.roles.findIndex(function (role) { return role.id === selectedId })
+      if (roleIndex < 0) roleIndex = 0
+      var role = draft.roles[roleIndex]
+      function update(patch) { setDraft(updateRole(draft, roleIndex, patch)) }
+      function save() {
+        setMessage('正在保存…')
+        request('/config', { method: 'PUT', body: { config: draft } }).then(function (body) {
+          publishConfig(body.config)
+          setDraft(clone(body.config))
+          setMessage('角色配置已保存。')
+        }).catch(function (error) { setMessage(error && error.message ? error.message : String(error)) })
+      }
+      return React.createElement('div', { className: 'mar-role-sidebar' }, [
+        React.createElement(ModeSwitch, { key: 'mode', sessionId: props.sessionId, onMessage: setMessage }),
+        message ? React.createElement('div', { key: 'message', className: message.indexOf('没有') >= 0 ? 'mar-error' : 'mar-note' }, message) : null,
+        React.createElement('div', { key: 'roles', className: 'mar-sidebar-role-list' }, draft.roles.map(function (item) {
+          return React.createElement('button', { key: item.id, type: 'button', className: 'mar-sidebar-role', 'data-active': item.id === role.id ? 'true' : 'false', onClick: function () { setSelectedId(item.id) } }, [
+            React.createElement('span', { key: 'avatar', className: 'mar-mini-avatar', style: { backgroundColor: item.color } }, String(item.name || '?').slice(0, 1)),
+            React.createElement('span', { key: 'name' }, item.name),
+            React.createElement('span', { key: 'state', className: 'mar-sidebar-role-state' }, item.enabled === false ? '停用' : '启用')
+          ])
+        })),
+        React.createElement('div', { key: 'editor', className: 'mar-sidebar-editor' }, [
+          React.createElement('label', { key: 'enabled', className: 'mar-sidebar-check' }, [React.createElement('input', { key: 'input', type: 'checkbox', checked: role.enabled !== false, onChange: function (event) { update({ enabled: event.target.checked }) } }), '参与讨论']),
+          React.createElement('label', { key: 'prompt' }, [
+            '角色 Prompt',
+            React.createElement('textarea', { key: 'input', rows: 8, value: role.prompt, onChange: function (event) { update({ prompt: event.target.value }) } })
+          ]),
+          React.createElement('label', { key: 'provider' }, [
+            'LLM Provider',
+            React.createElement('input', { key: 'input', value: role.provider || '', placeholder: '留空继承默认 Provider', onChange: function (event) { update({ provider: event.target.value }) } })
+          ]),
+          React.createElement('label', { key: 'model' }, [
+            'Model',
+            React.createElement('input', { key: 'input', value: role.model || '', placeholder: '留空继承默认 Model', onChange: function (event) { update({ model: event.target.value }) } })
+          ]),
+          React.createElement('label', { key: 'tokens' }, [
+            '最大输出 Token',
+            React.createElement('input', { key: 'input', type: 'number', min: 256, max: 32768, value: role.maxTokens, onChange: function (event) { update({ maxTokens: Number(event.target.value) || 4096 }) } })
+          ]),
+          React.createElement('p', { key: 'isolation', className: 'mar-isolation-note' }, '每个角色使用独立 Session 与 Persona。只有“交叉评审”或“主持人总结”会显式传递其他角色输出。'),
+          React.createElement('button', { key: 'save', type: 'button', className: 'mar-primary mar-sidebar-save', onClick: save }, '保存角色配置')
+        ])
+      ])
+    }
+
+    function RoundtableOverlay(props) {
+      var state = useOverlayState()
+      var sessionId = useCurrentSessionId(props && props.sessions)
+      var directSessionId = state.directSessionId
+      React.useEffect(function () {
+        if (!directSessionId || sessionId === 'active' || sessionId === directSessionId) return
+        writeConversationMode(sessionId, true)
+        setDirectConversationMode(sessionId, true)
+      }, [sessionId, directSessionId])
+      if (!state.open && !directSessionId) return null
+      return React.createElement('div', {
+        className: 'mar-overlay',
+        'data-direct': directSessionId ? 'true' : 'false',
+        role: 'presentation',
+        onMouseDown: function (event) { if (event.target === event.currentTarget) setOverlayOpen(false) }
+      }, [
+        directSessionId ? React.createElement('main', { key: 'direct', className: 'mar-direct-stage', 'aria-label': 'Multi-Agent 群聊' }, React.createElement(RoundtableView, { sessionId: directSessionId })) : null,
+        state.open ? React.createElement('section', {
+        key: 'panel',
+        className: 'mar-overlay-panel',
+        role: 'dialog',
+        'aria-label': 'Multi-Agent 模式与角色设置',
+        onMouseDown: function (event) { event.stopPropagation() }
+      }, [
+        React.createElement('header', { key: 'header', className: 'mar-overlay-header' }, [
+          React.createElement('strong', { key: 'title' }, 'Multi-Agent 设置'),
+          React.createElement('button', { key: 'close', type: 'button', className: 'mar-secondary', onClick: function () { setOverlayOpen(false) } }, '关闭')
+        ]),
+        React.createElement('div', { key: 'body', className: 'mar-overlay-body' }, React.createElement(RoleSidebar, { sessionId: directSessionId || sessionId }))
+      ]) : null
       ])
     }
 
@@ -659,7 +991,7 @@ window.__ModuleLoader__.load({
           React.createElement('div', { key: 'cards', className: 'mar-role-editor-list' }, draft.roles.map(function (role, index) {
             return React.createElement('article', { key: role.id, className: 'mar-role-editor' }, [
               React.createElement('div', { key: 'top', className: 'mar-role-editor-top' }, [React.createElement('span', { key: 'dot', className: 'mar-role-dot', style: { backgroundColor: role.color } }), React.createElement('input', { key: 'name', value: role.name, onChange: function (event) { setDraft(updateRole(draft, index, { name: event.target.value })) }, 'aria-label': '角色名称' }), React.createElement('label', { key: 'enabled', className: 'mar-inline-check' }, [React.createElement('input', { key: 'input', type: 'checkbox', checked: role.enabled !== false, onChange: function (event) { setDraft(updateRole(draft, index, { enabled: event.target.checked })) } }), '启用']), React.createElement('button', { key: 'remove', type: 'button', className: 'mar-icon-button', onClick: function () { removeRole(index) }, title: '删除角色' }, '×')]),
-              React.createElement('div', { key: 'fields', className: 'mar-role-editor-fields' }, [React.createElement('label', { key: 'id' }, [React.createElement('span', { key: 'label' }, 'ID'), React.createElement('input', { key: 'input', value: role.id, readOnly: true })]), React.createElement('label', { key: 'color' }, [React.createElement('span', { key: 'label' }, '颜色'), React.createElement('input', { key: 'input', type: 'color', value: role.color, onChange: function (event) { setDraft(updateRole(draft, index, { color: event.target.value })) } })]), React.createElement('label', { key: 'tokens' }, [React.createElement('span', { key: 'label' }, '最大 Token'), React.createElement('input', { key: 'input', type: 'number', min: 256, max: 32768, value: role.maxTokens, onChange: function (event) { setDraft(updateRole(draft, index, { maxTokens: Number(event.target.value) || 4096 })) } })])]),
+              React.createElement('div', { key: 'fields', className: 'mar-role-editor-fields' }, [React.createElement('label', { key: 'id' }, [React.createElement('span', { key: 'label' }, 'ID'), React.createElement('input', { key: 'input', value: role.id, readOnly: true })]), React.createElement('label', { key: 'color' }, [React.createElement('span', { key: 'label' }, '颜色'), React.createElement('input', { key: 'input', type: 'color', value: role.color, onChange: function (event) { setDraft(updateRole(draft, index, { color: event.target.value })) } })]), React.createElement('label', { key: 'tokens' }, [React.createElement('span', { key: 'label' }, '最大 Token'), React.createElement('input', { key: 'input', type: 'number', min: 256, max: 32768, value: role.maxTokens, onChange: function (event) { setDraft(updateRole(draft, index, { maxTokens: Number(event.target.value) || 4096 })) } })]), React.createElement('label', { key: 'provider' }, [React.createElement('span', { key: 'label' }, 'Provider'), React.createElement('input', { key: 'input', value: role.provider || '', placeholder: '默认', onChange: function (event) { setDraft(updateRole(draft, index, { provider: event.target.value })) } })]), React.createElement('label', { key: 'model' }, [React.createElement('span', { key: 'label' }, 'Model'), React.createElement('input', { key: 'input', value: role.model || '', placeholder: '默认', onChange: function (event) { setDraft(updateRole(draft, index, { model: event.target.value })) } })])]),
               React.createElement('textarea', { key: 'prompt', value: role.prompt, rows: 3, onChange: function (event) { setDraft(updateRole(draft, index, { prompt: event.target.value })) }, 'aria-label': role.name + ' Prompt' })
             ])
           }))
@@ -685,16 +1017,36 @@ window.__ModuleLoader__.load({
 .mar-error,.mar-note{margin:12px 0;padding:9px 11px;border-radius:8px;border:1px solid #a44646;background:#a4464618;color:#ffb2b2}.mar-note{border-color:#356fe5;background:#356fe518;color:#a9c6ff}.mar-discussion{max-width:1040px}.mar-discussion-meta{display:flex;justify-content:space-between;gap:12px;margin:8px 0 12px;color:var(--dsh-muted,#a0a6b2)}.mar-topic-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mar-stream-state{font-size:11px;color:#7ce0c3}.mar-participants{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}.mar-participant{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:8px;background:#ffffff08;color:#c9cdd6}.mar-participant-state{font-size:11px;color:var(--dsh-muted,#858c99)}.mar-participant-cancel{border:0;border-radius:5px;padding:2px 5px;color:#ffb2b2;background:#a4464624;cursor:pointer;font-size:11px}.mar-messages{display:flex;flex-direction:column;gap:12px}.mar-message{border:1px solid var(--dsh-border,#2b2f38);border-radius:12px;padding:13px 15px;background:#ffffff05}.mar-message[data-role=user]{border-color:#356fe588;background:#356fe50c}.mar-message[data-status=streaming]{border-color:#4f8cff88}.mar-message-head{display:flex;align-items:center;gap:7px;margin-bottom:9px}.mar-message-round{font-size:11px;color:var(--dsh-muted,#858c99)}.mar-streaming{margin-left:auto;color:#8db3ff;font-size:11px}.mar-markdown{color:#d9dce3}.mar-markdown p{margin:7px 0;white-space:pre-wrap}.mar-markdown p:first-child{margin-top:0}.mar-markdown p:last-child{margin-bottom:0}.mar-markdown h1{font-size:19px}.mar-markdown h2{font-size:17px}.mar-markdown h3{font-size:15px}.mar-markdown h1,.mar-markdown h2,.mar-markdown h3,.mar-markdown h4,.mar-markdown h5,.mar-markdown h6{margin:15px 0 7px;line-height:1.3;color:#f1f3f6}.mar-markdown ul,.mar-markdown ol{margin:7px 0;padding-left:23px}.mar-markdown li{margin:4px 0}.mar-markdown blockquote{margin:8px 0;padding:5px 12px;border-left:3px solid #4f8cff;background:#4f8cff0e;color:#b8c7e4;white-space:pre-wrap}.mar-markdown code{padding:1px 4px;border-radius:4px;background:#0004;color:#b7d1ff;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em}.mar-code{overflow:auto;margin:9px 0;padding:11px;border-radius:8px;background:#0b0d11;color:#cbd5e1;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.mar-markdown a{color:#8db3ff}.mar-markdown hr{border:0;border-top:1px solid var(--dsh-border,#30343e);margin:14px 0}.mar-table-wrap{overflow:auto;margin:9px 0}.mar-table{border-collapse:collapse;min-width:100%;font-size:12px}.mar-table th,.mar-table td{border:1px solid var(--dsh-border,#30343e);padding:6px 8px;text-align:left;vertical-align:top}.mar-table th{background:#4f8cff14;color:#eef3ff;font-weight:600}.mar-table td{background:#0002}.mar-empty,.mar-welcome{padding:36px 18px;text-align:center;color:var(--dsh-muted,#8f96a3)}.mar-welcome{max-width:530px;margin:30px auto}.mar-welcome-icon{margin:auto;width:48px;height:48px;display:grid;place-items:center;border-radius:16px;background:#4f8cff22;color:#9ec0ff;font-size:24px}.mar-welcome h3{color:#e7e9ee;font-size:17px;margin:15px 0 5px}.mar-welcome p{margin:0}
 .mar-settings{padding:24px 28px 50px;box-sizing:border-box}.mar-settings-header{max-width:980px}.mar-settings-section{max-width:980px;margin-top:22px;padding:16px;border:1px solid var(--dsh-border,#2b2f38);border-radius:13px;background:#ffffff04}.mar-settings-section h3{margin:0 0 4px;font-size:15px}.mar-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.mar-section-head p{margin:4px 0 12px;color:var(--dsh-muted,#8f96a3)}.mar-role-editor-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:11px}.mar-role-editor{padding:12px;border:1px solid var(--dsh-border,#30343e);border-radius:10px;background:#0002}.mar-role-editor-top{display:flex;align-items:center;gap:7px}.mar-role-editor-top>input{flex:1;min-width:0;font-weight:600}.mar-inline-check{display:flex;align-items:center;gap:4px;color:var(--dsh-muted,#a0a6b2);white-space:nowrap}.mar-inline-check input{accent-color:#4f8cff}.mar-icon-button{border:0;background:transparent;color:#aab1bd;font-size:20px;cursor:pointer}.mar-role-editor-fields{display:grid;grid-template-columns:1fr 75px 110px;gap:7px;margin:9px 0}.mar-role-editor label,.mar-default-fields label{display:flex;flex-direction:column;gap:4px;color:var(--dsh-muted,#9ea5b1);font-size:11px}.mar-role-editor textarea{width:100%;resize:vertical}.mar-role-editor input,.mar-role-editor textarea{font-size:12px}.mar-role-editor input[type=color]{height:34px;padding:3px}.mar-default-fields{display:flex;gap:10px;flex-wrap:wrap}.mar-default-fields label{min-width:120px}.mar-default-fields select,.mar-default-fields input{margin-top:3px}.mar-settings-header .mar-primary{margin-top:2px}
 .mar-team-editor-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:11px}.mar-team-editor{padding:12px;border:1px solid var(--dsh-border,#30343e);border-radius:10px;background:#0002}.mar-team-id{margin:5px 0 8px;color:var(--dsh-muted,#858c99);font:11px ui-monospace,SFMono-Regular,Consolas,monospace}.mar-team-members{display:flex;gap:6px;flex-wrap:wrap}.mar-team-member{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--dsh-border,#30343e);border-radius:999px;padding:5px 8px;color:var(--dsh-muted,#adb2be);background:transparent;cursor:pointer;font:inherit}.mar-team-member[data-active=true]{border-color:#4f8cff;background:#356fe522;color:var(--dsh-text,#fff)}.mar-team-member:disabled{cursor:not-allowed;opacity:.4}.mar-icon-button:disabled{cursor:not-allowed;opacity:.4}
-@media(max-width:680px){.mar-shell{padding:16px 12px}.mar-topic-row{flex-direction:column}.mar-primary{align-self:flex-start}.mar-settings{padding:16px 12px}.mar-settings-header{flex-direction:column}.mar-role-editor-list{grid-template-columns:1fr}.mar-role-editor-fields{grid-template-columns:1fr 65px}.mar-role-editor-fields label:last-child{grid-column:1/-1}}
+.mar-header-action{border:1px solid var(--dsh-border,#30343e);border-radius:7px;padding:5px 9px;background:transparent;color:var(--dsh-muted,#adb2be);cursor:pointer;font:inherit;font-size:12px}.mar-header-action:hover{border-color:#4f8cff;background:#356fe522;color:var(--dsh-text,#fff)}
+.mar-shell{display:flex;flex-direction:column;padding:0;height:100%;min-height:0;overflow:hidden;background:var(--dsh-surface,#17191f)}.mar-chat-header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;padding:13px 20px;border-bottom:1px solid var(--dsh-border,#2b2f38);background:color-mix(in srgb,var(--dsh-surface,#17191f) 97%,#fff)}.mar-chat-header h2{margin:0;font-size:16px}.mar-chat-header p{margin:2px 0 0;color:var(--dsh-muted,#8f96a3);font-size:11px}.mar-chat-header-actions{display:flex;align-items:center;gap:8px}.mar-chat-scroll{min-height:0;flex:1;overflow:auto;padding:18px 22px 28px;background:color-mix(in srgb,var(--dsh-surface,#17191f) 96%,#8aa8ff)}.mar-discussion{max-width:920px;margin:0 auto}.mar-toolbar{position:relative;z-index:2;flex:none;margin:0;padding:12px 20px 14px;border:0;border-top:1px solid var(--dsh-border,#2b2f38);border-radius:0;background:var(--dsh-surface,#17191f);box-shadow:0 -10px 28px #0002}.mar-topic-input{min-height:44px;max-height:120px;border-radius:16px}.mar-topic-row .mar-primary{align-self:flex-end;height:40px;border-radius:14px}.mar-control-row,.mar-role-row{margin-top:8px}.mar-cancel{position:absolute;right:20px;bottom:62px;margin:0}.mar-participants{justify-content:center;margin:0 0 18px}.mar-discussion-meta{padding:0 4px}.mar-messages{gap:16px}.mar-message{display:flex;align-items:flex-start;gap:9px;width:100%;padding:0;border:0;border-radius:0;background:transparent}.mar-message[data-own=true]{justify-content:flex-end}.mar-avatar,.mar-mini-avatar{display:grid;place-items:center;flex:0 0 auto;width:34px;height:34px;border-radius:8px;color:#fff;font-size:13px;font-weight:700;box-shadow:0 3px 9px #0003}.mar-avatar-user{background:#356fe5}.mar-message-column{display:flex;flex-direction:column;align-items:flex-start;max-width:min(76%,720px)}.mar-message[data-own=true] .mar-message-column{align-items:flex-end}.mar-message-head{gap:6px;margin:0 2px 4px;color:var(--dsh-muted,#9ea5b1);font-size:11px}.mar-message-head strong{font-weight:500}.mar-message[data-own=true] .mar-message-head{flex-direction:row-reverse}.mar-message-bubble{position:relative;padding:10px 13px;border:1px solid var(--dsh-border,#30343e);border-radius:4px 13px 13px;background:color-mix(in srgb,var(--dsh-surface,#17191f) 88%,#fff);box-shadow:0 3px 12px #0001}.mar-message[data-own=true] .mar-message-bubble{border-color:#4b8b62;background:#63bd7b;color:#07180c;border-radius:13px 4px 13px 13px}.mar-message[data-own=true] .mar-markdown,.mar-message[data-own=true] .mar-markdown h1,.mar-message[data-own=true] .mar-markdown h2,.mar-message[data-own=true] .mar-markdown h3{color:#07180c}.mar-message[data-status=streaming] .mar-message-bubble{border-color:#4f8cff;box-shadow:0 0 0 2px #4f8cff22}.mar-streaming{margin-left:0}.mar-welcome{margin:auto;min-height:55%;display:flex;flex-direction:column;justify-content:center}.mar-overlay{position:fixed;inset:0;z-index:90;display:flex;justify-content:flex-end;background:rgba(3,8,20,.30)}.mar-overlay-panel{display:flex;flex-direction:column;width:min(420px,calc(100vw - 18px));height:100%;background:var(--dsh-surface,#17191f);color:var(--dsh-text,#e7e9ee);box-shadow:-16px 0 42px #0007}.mar-overlay-header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;border-bottom:1px solid var(--dsh-border,#2b2f38);background:#ffffff05}.mar-overlay-body{min-height:0;flex:1;overflow:hidden}.mar-role-sidebar{height:100%;overflow:auto;padding:14px;box-sizing:border-box}.mar-mode-switch-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px;border:1px solid #4f8cff66;border-radius:13px;background:#356fe514}.mar-mode-switch-copy{display:flex;flex-direction:column;gap:3px}.mar-mode-switch-copy span{color:var(--dsh-muted,#9da4b0);font-size:11px}.mar-switch{position:relative;display:inline-flex;width:44px;height:24px;flex:none}.mar-switch input{position:absolute;opacity:0;pointer-events:none}.mar-switch-track{width:100%;border-radius:999px;background:#5a606c;cursor:pointer;transition:.18s}.mar-switch-track:after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 2px 5px #0005;transition:.18s}.mar-switch input:checked+.mar-switch-track{background:#356fe5}.mar-switch input:checked+.mar-switch-track:after{transform:translateX(20px)}.mar-sidebar-role-list{display:flex;flex-direction:column;gap:5px;margin:14px 0}.mar-sidebar-role{display:flex;align-items:center;gap:9px;width:100%;padding:8px;border:1px solid transparent;border-radius:10px;background:transparent;color:inherit;text-align:left;cursor:pointer}.mar-sidebar-role:hover{background:#ffffff08}.mar-sidebar-role[data-active=true]{border-color:#4f8cff66;background:#356fe518}.mar-mini-avatar{width:28px;height:28px;border-radius:7px;font-size:11px}.mar-sidebar-role-state{margin-left:auto;color:var(--dsh-muted,#858c99);font-size:11px}.mar-sidebar-editor{display:flex;flex-direction:column;gap:10px;padding-top:12px;border-top:1px solid var(--dsh-border,#30343e)}.mar-sidebar-editor label{display:flex;flex-direction:column;gap:5px;color:var(--dsh-muted,#a0a6b2);font-size:11px}.mar-sidebar-editor input,.mar-sidebar-editor textarea{box-sizing:border-box;width:100%;border:1px solid var(--dsh-border,#30343e);border-radius:8px;background:var(--dsh-input,#101217);color:var(--dsh-text,#e7e9ee);padding:8px 9px;font:12px/1.5 inherit}.mar-sidebar-editor textarea{resize:vertical}.mar-sidebar-check{flex-direction:row!important;align-items:center}.mar-isolation-note{margin:0;padding:9px;border-radius:8px;background:#13b88714;color:#8fd9c4;font-size:11px;line-height:1.55}.mar-sidebar-save{width:100%}.mar-sidebar-loading{padding:20px;color:var(--dsh-muted,#9da4b0)}
+.mar-overlay[data-direct=true]{pointer-events:none;background:transparent}.mar-direct-stage{position:fixed;z-index:1;left:280px;top:119px;right:0;bottom:0;display:flex;min-width:0;min-height:0;pointer-events:auto;background:var(--dsh-surface,#17191f);color:var(--dsh-text,#e7e9ee)}.mar-direct-stage>.mar-shell{width:100%}.mar-overlay-panel{position:relative;z-index:2;pointer-events:auto}.mar-participant[data-status=failed]{background:#d94a4a18;color:#ffb2b2}.mar-participant[data-status=failed] .mar-participant-state{color:#ff9e9e}
+.mar-message-toggle{margin-left:auto;border:0;border-radius:6px;padding:2px 7px;background:#ffffff0b;color:var(--dsh-muted,#9ea5b1);cursor:pointer;font:11px/1.6 inherit}.mar-message-toggle:hover{background:#ffffff16;color:var(--dsh-text,#e7e9ee)}.mar-reasoning{margin:0 0 10px;border:1px solid var(--dsh-border,#30343e);border-radius:8px;background:#0002;color:var(--dsh-muted,#a0a6b2)}.mar-reasoning summary{padding:7px 9px;cursor:pointer;user-select:none;font-size:11px}.mar-reasoning-content{padding:2px 10px 9px;border-top:1px solid var(--dsh-border,#30343e);opacity:.86}.mar-reasoning-content .mar-markdown{color:var(--dsh-muted,#aab0bc);font-size:12px}
+.mar-history-select{max-width:240px;min-width:150px;border:1px solid var(--dsh-border,#30343e);border-radius:7px;padding:6px 9px;background:var(--dsh-input,#101217);color:var(--dsh-text,#e7e9ee);font:12px/1.4 inherit}.mar-history-select:disabled{opacity:.55}
+@media(max-width:900px){.mar-direct-stage{left:0;top:44px}}@media(max-width:680px){.mar-chat-header{padding:10px 12px}.mar-chat-scroll{padding:14px 10px}.mar-toolbar{padding:10px 12px}.mar-topic-row{flex-direction:column}.mar-primary{align-self:flex-start}.mar-message-column{max-width:82%}.mar-settings{padding:16px 12px}.mar-settings-header{flex-direction:column}.mar-role-editor-list{grid-template-columns:1fr}.mar-role-editor-fields{grid-template-columns:1fr 65px}.mar-role-editor-fields label:last-child{grid-column:1/-1}}
 `
 
     function apply(ctx) {
+      var sessions = ctx.sessions
+      if (ctx.get) sessions = ctx.get('sessions') || sessions
       ctx.effect(function () {
         var style = document.createElement('style')
         style.dataset.plugin = '@p-dsh-market/multi-agent-roundtable'
         style.textContent = CSS
         document.head.appendChild(style)
         return function () { style.remove() }
+      })
+      ctx.effect(function () {
+        function onDesktopMessage(event) {
+          if (event.source !== window.parent) return
+          var data = event.data
+          if (!data || data.source !== 'dsh-desktop') return
+          if (data.type === 'plugin-rpc' && data.pluginId === PLUGIN_ID && data.method === DESKTOP_RPC_METHOD) {
+            setOverlayOpen(data.open === false ? false : true)
+          }
+          else if (data.type === 'roundtable-panel-state-request') announceDesktop('roundtable-panel-state', { open: overlayState.open })
+        }
+        window.addEventListener('message', onDesktopMessage)
+        return function () { window.removeEventListener('message', onDesktopMessage) }
       })
       ctx.slots.inject('conversation.view', function () {
         return ctx.slots.register(
@@ -708,12 +1060,25 @@ window.__ModuleLoader__.load({
           function () { return React.createElement(SettingsView) }
         )
       })
+      ctx.slots.inject('conversation.session.header.actions', function () {
+        return ctx.slots.register(
+          { name: 'conversation.session.header.actions', id: 'multi-agent-roundtable', order: 30, label: '圆桌' },
+          RoundtableHeaderAction
+        )
+      })
+      ctx.slots.inject('shell.overlay', function () {
+        return ctx.slots.register(
+          { name: 'shell.overlay', id: 'multi-agent-roundtable', order: 120, label: '多 Agent 圆桌讨论' },
+          function () { return React.createElement(RoundtableOverlay, { sessions: sessions }) }
+        )
+      })
     }
 
-    exports.inject = ['slots']
+    exports.inject = ['slots', 'sessions']
     exports.apply = apply
     exports.markdownBlocks = markdownBlocks
     exports.safeHref = safeHref
+    exports.activateConversationView = activateConversationView
     return module.exports
   }
 })

@@ -9,6 +9,7 @@ import {
   makeUserMessage,
   messageOf,
   messageMarkdown,
+  messageReasoning,
   safePathSegment,
   shortText
 } from './protocol.js'
@@ -66,6 +67,8 @@ export async function runWithConcurrency(items, limit, worker) {
 export class RoundtableOrchestrator {
   constructor(options = {}) {
     this.agents = options.agents
+    this.agentDefaultModel = options.agentDefaultModel
+    this.agentPresets = options.agentPresets
     this.sessions = options.sessions
     this.settingsScope = options.settingsScope
     this.now = options.now || (() => Date.now())
@@ -102,6 +105,7 @@ export class RoundtableOrchestrator {
           hostRoleId: item.hostRoleId,
           participantIds: (item.participants || []).map((participant) => participant.roleId)
         }, this.config)
+        normalized.conversationId = String(item.conversationId || `conversation-${item.id}`)
         const state = this.createState(item.id, normalized, {
           createdAt: item.createdAt,
           updatedAt: item.updatedAt,
@@ -135,6 +139,7 @@ export class RoundtableOrchestrator {
         childSessionId: saved?.childSessionId || childSessionId(id, roleId),
         status: 'idle',
         error: '',
+        turnError: '',
         activeRound: 0,
         cancelled: false,
         handle: null,
@@ -145,6 +150,7 @@ export class RoundtableOrchestrator {
     return {
       id,
       parentSessionId: request.parentSessionId || '',
+      conversationId: request.conversationId || '',
       prompt: request.prompt,
       mode: request.mode,
       rounds: request.rounds,
@@ -243,6 +249,7 @@ export class RoundtableOrchestrator {
     return [...this.discussions.values()].slice(-this.maxStoredDiscussions).map((state) => ({
       id: state.id,
       parentSessionId: state.parentSessionId,
+      conversationId: state.conversationId,
       prompt: state.prompt,
       mode: state.mode,
       rounds: state.rounds,
@@ -261,6 +268,7 @@ export class RoundtableOrchestrator {
   async create(input) {
     if (this.disposed) throw new Error('多 Agent 讨论插件已停止。')
     const request = normalizeDiscussionInput(input, this.config)
+    request.conversationId = String(input?.conversationId || '').trim()
     const id = this.idFactory()
     if (this.discussions.has(id)) throw new Error(`讨论 ID 重复：${id}`)
     const state = this.createState(id, request)
@@ -269,6 +277,7 @@ export class RoundtableOrchestrator {
     this.indexStateSessions(state)
     this.appendEvent(state, 'discussion/created', {
       parentSessionId: state.parentSessionId,
+      conversationId: state.conversationId,
       participantIds: state.participants.map((participant) => participant.roleId)
     })
     this.schedulePersist()
@@ -318,6 +327,22 @@ export class RoundtableOrchestrator {
     return state ? this.toPublic(state) : null
   }
 
+  async waitForCompletion(id, signal) {
+    const state = this.requireState(id)
+    const cancelFromSignal = () => {
+      if (state.status === 'running') this.cancel(id)
+    }
+    if (signal?.aborted) cancelFromSignal()
+    else signal?.addEventListener?.('abort', cancelFromSignal, { once: true })
+    try {
+      await state.runPromise
+    } finally {
+      signal?.removeEventListener?.('abort', cancelFromSignal)
+    }
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('多智能体讨论已取消。')
+    return this.toPublic(state)
+  }
+
   requireState(id) {
     const state = this.discussions.get(id)
     if (!state) throw new Error(`讨论不存在：${id}`)
@@ -332,6 +357,7 @@ export class RoundtableOrchestrator {
       color: '#4f8cff',
       round,
       content: shortText(content, 20000),
+      reasoning: '',
       status: 'complete',
       createdAt: nowValue(this.now),
       updatedAt: nowValue(this.now)
@@ -381,14 +407,23 @@ export class RoundtableOrchestrator {
   async runRound(state, participants, roles, prompt, round, review) {
     if (participants.length === 0) return
     state.currentRound = round
-    const baseContext = review ? buildReviewContext(state.messages.filter((message) => message.round < round), '') : ''
+    const priorMessages = review ? state.messages.filter((message) => message.round < round) : []
     await runWithConcurrency(participants, state.maxParallel, async (participant) => {
       if (state.cancelled || participant.cancelled) return
       const role = roles.get(participant.roleId)
-      const rolePrompt = this.rolePrompt(state, role, prompt, round, baseContext)
+      // A reviewer sees other roles only. Its own durable child-session history
+      // already contains its prior answer, so echoing that answer into the relay
+      // would duplicate and amplify its own wording.
+      const reviewContext = review ? buildReviewContext(priorMessages, participant.roleId) : ''
+      const rolePrompt = this.rolePrompt(state, role, prompt, round, reviewContext)
       await this.runRole(state, participant, role, rolePrompt, round)
     })
-    if (state.participants.length > 0 && state.participants.every((participant) => participant.cancelled || participant.status === 'failed')) {
+    const activeParticipants = state.participants.filter((participant) => !participant.cancelled)
+    if (activeParticipants.length > 0 && activeParticipants.every((participant) => participant.status === 'failed')) {
+      const details = activeParticipants.map((participant) => `${participant.roleName}：${participant.error || '未知错误'}`).join('\n')
+      throw new Error(`所有参与角色均执行失败，请检查模型配置。\n${details}`)
+    }
+    if (activeParticipants.length === 0) {
       state.cancelled = true
       state.status = 'cancelled'
       return
@@ -413,12 +448,14 @@ export class RoundtableOrchestrator {
   async runRole(state, participant, role, prompt, round) {
     participant.status = 'running'
     participant.error = ''
+    participant.turnError = ''
     participant.activeRound = round
     this.appendEvent(state, 'participant/started', { roleId: participant.roleId, round })
     try {
       const handle = await this.ensureAgent(state, participant, role)
       handle.agent.followup(makeUserMessage(prompt, `roundtable-${state.id}-${participant.roleId}-${round}-${randomUUID()}`))
       await handle.agent.whenIdle()
+      if (participant.turnError) throw new Error(participant.turnError)
       if (!state.cancelled && !participant.cancelled) {
         participant.status = 'completed'
         this.appendEvent(state, 'participant/completed', { roleId: participant.roleId, round })
@@ -434,17 +471,32 @@ export class RoundtableOrchestrator {
 
   async ensureAgent(state, participant, role) {
     if (participant.handle) return participant.handle
-    const existing = this.agents?.get?.(participant.childSessionId)
-    if (existing) {
-      participant.handle = { agent: existing, dispose: async () => existing.cancel?.({ kind: 'disposed' }) }
-      return participant.handle
-    }
     if (!this.agents?.create && !this.agents?.resume) throw new Error('当前 DSH 运行时未提供 agents.create。')
-    const agentOptions = {}
-    if (role?.provider) agentOptions.provider = role.provider
-    if (role?.model) agentOptions.model = role.model
+    let inherited = {}
+    try { inherited = this.agentDefaultModel?.currentSelection?.() || {} } catch { inherited = {} }
+    const roleProvider = String(role?.provider || '').trim()
+    const roleModel = String(role?.model || '').trim()
+    if (roleProvider && !roleModel && roleProvider !== inherited.provider) {
+      throw new Error(`角色“${role?.name || participant.roleName}”指定了 Provider，但没有指定对应 Model。`)
+    }
+    const provider = roleProvider || String(inherited.provider || '').trim()
+    const model = roleModel || String(inherited.model || '').trim()
+    if (!provider || !model) {
+      throw new Error(`角色“${role?.name || participant.roleName}”没有可用的 Provider/Model；请配置角色模型或设置 DSH 默认模型。`)
+    }
+    const agentOptions = { provider, model }
     if (role?.maxTokens) agentOptions.maxTokens = role.maxTokens
-    const setup = (agentCtx) => {
+    const parentAgent = state.parentSessionId ? this.agents?.get?.(state.parentSessionId) : null
+    const parentHeader = parentAgent?.session?.header
+    const composedPreset = parentAgent?.ctx
+      ? this.agentPresets?.composedPreset?.(parentAgent.ctx)
+      : undefined
+    const setup = async (agentCtx) => {
+      if (parentAgent?.ctx) {
+        this.agentPresets?.composeFrom?.(agentCtx, parentAgent.ctx)
+      } else if (this.agentPresets?.mount) {
+        await this.agentPresets.mount(agentCtx)
+      }
       if (agentCtx?.systemPrompt?.section) {
         agentCtx.systemPrompt.section({
           name: 'deployment:persona',
@@ -457,18 +509,30 @@ export class RoundtableOrchestrator {
           text: '你是圆桌讨论中的独立角色。只代表自己的专业视角，不要冒充用户或其他角色。'
         })
       }
+      // Child roles may use the parent's tools, MCP and Skills, but must not
+      // recursively create another roundtable from inside this roundtable.
+      try { agentCtx?.tools?.restrict?.({ deny: ['multi_agent_discuss'] }) } catch { /* older runtimes keep the execute-time guard */ }
     }
     const meta = { origin: 'subagent' }
     if (state.parentSessionId) meta.parentSession = state.parentSessionId
+    if (parentHeader?.cwd) meta.cwd = parentHeader.cwd
+    if (composedPreset !== undefined) meta.agentPreset = composedPreset
+    if (Number.isInteger(parentHeader?.delegationDepth)) meta.delegationDepth = parentHeader.delegationDepth + 1
     const options = {
       sessionId: participant.childSessionId,
       meta,
       agentOptions,
       setup
     }
-    const handle = state.restored && this.agents.resume
-      ? await this.agents.resume({ resumeSessionId: participant.childSessionId, agentOptions, setup })
-      : await this.agents.create(options)
+    let handle
+    if (state.restored && this.agents.resume) {
+      handle = await this.agents.resume({ resumeSessionId: participant.childSessionId, agentOptions, setup })
+    } else {
+      const existing = this.agents?.get?.(participant.childSessionId)
+      handle = existing
+        ? { agent: existing, dispose: async () => existing.cancel?.({ kind: 'disposed' }) }
+        : await this.agents.create(options)
+    }
     participant.handle = handle
     participant.restored = false
     this.sessionIndex.set(participant.childSessionId, { state, participant })
@@ -495,6 +559,18 @@ export class RoundtableOrchestrator {
     return this.toPublic(state)
   }
 
+  remove(id) {
+    const state = this.requireState(id)
+    if (state.status === 'running') throw new Error('讨论运行中，不能删除。')
+    for (const participant of state.participants) {
+      this.sessionIndex.delete(participant.childSessionId)
+      try { participant.handle?.dispose?.() } catch { /* removal keeps child logs but releases live handles */ }
+    }
+    this.listeners.delete(id)
+    this.discussions.delete(id)
+    this.schedulePersist()
+  }
+
   onSessionEvent(session, event) {
     const sessionId = String(session?.id || session?.header?.id || '')
     const link = this.sessionIndex.get(sessionId)
@@ -517,13 +593,15 @@ export class RoundtableOrchestrator {
             color: participant.color,
             round: participant.activeRound || state.currentRound,
             content: '',
+            reasoning: '',
             status: 'streaming',
             createdAt: nowValue(this.now),
             updatedAt: nowValue(this.now)
           }
           state.messages.push(message)
         }
-        message.content += delta
+        if (chunk?.type === 'reasoning-delta') message.reasoning += delta
+        else message.content += delta
         message.updatedAt = nowValue(this.now)
         participant.status = 'running'
         this.appendEvent(state, 'message/stream', { roleId: participant.roleId, messageId: message.id, event: summary })
@@ -533,6 +611,7 @@ export class RoundtableOrchestrator {
     if (event.type === 'assistant/message') {
       const message = data.message
       const content = messageMarkdown(message)
+      const reasoning = messageReasoning(message)
       const key = messageKey(data.turn, data.step)
       const existing = state.messages.find((item) => item.streamKey === key && item.roleId === participant.roleId)
       const projected = {
@@ -542,6 +621,7 @@ export class RoundtableOrchestrator {
         color: participant.color,
         round: participant.activeRound || state.currentRound,
         content: shortText(content, 20000),
+        reasoning: shortText(reasoning, 20000),
         status: 'complete',
         createdAt: existing?.createdAt || nowValue(this.now),
         updatedAt: nowValue(this.now),
@@ -564,6 +644,10 @@ export class RoundtableOrchestrator {
       participant.status = 'running'
       this.appendEvent(state, 'session/turn-start', { roleId: participant.roleId, event: summary })
     } else if (event.type === 'turn/end') {
+      if (data.reason?.kind === 'error') {
+        participant.turnError = errorMessage(data.reason.message || data.reason.error || data.reason)
+        participant.error = participant.turnError
+      }
       this.appendEvent(state, 'session/turn-end', { roleId: participant.roleId, event: summary })
     }
   }
@@ -572,6 +656,7 @@ export class RoundtableOrchestrator {
     return {
       id: state.id,
       parentSessionId: state.parentSessionId,
+      conversationId: state.conversationId,
       prompt: state.prompt,
       mode: state.mode,
       rounds: state.rounds,
@@ -597,6 +682,7 @@ export class RoundtableOrchestrator {
         color: message.color,
         round: message.round,
         content: message.content,
+        reasoning: message.reasoning || '',
         status: message.status,
         createdAt: message.createdAt,
         updatedAt: message.updatedAt

@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/multi-agent-roundtable",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "DSH 多 Agent 圆桌讨论：独立会话、角色 Prompt、交叉评审与 Markdown 消息流",
   "keywords": [
     "dsh",
@@ -15,16 +15,22 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./config-storage": "./lib/config-storage.js",
+    "./conversation-storage": "./lib/conversation-storage.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "lib/config-storage.js",
+    "lib/conversation-storage.js",
     "lib/orchestration.js",
     "lib/protocol.js",
     "lib/role-schema.js",
+    "lib/tool.js",
     "presets/default-roles.json",
+    "skills/multi-agent-roundtable/SKILL.md",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -45,7 +51,25 @@
     },
     "market": {
       "displayName": "多 Agent 圆桌讨论",
-      "capabilities": ["skills", "host", "client"]
+      "capabilities": ["skills", "host", "client", "desktop-shell"]
+    },
+    "desktop": {
+      "permissions": ["shell:titlebar"],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "open-roundtable",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "圆桌",
+            "order": 130,
+            "when": ["dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "pluginRpc",
+              "method": "multiAgentRoundtable.open"
+            }
+          }
+        ]
+      }
     }
   }
 }

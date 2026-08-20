@@ -131,6 +131,7 @@ function normalizeDiscussionMetadata(value) {
   const participants = Array.isArray(value.participants) ? value.participants : []
   return {
     id,
+    conversationId: optionalText(value.conversationId, 180) || '',
     parentSessionId: optionalText(value.parentSessionId, 160) || '',
     prompt: text(value.prompt, '', 12000),
     mode: MODES.includes(value.mode) ? value.mode : 'review',

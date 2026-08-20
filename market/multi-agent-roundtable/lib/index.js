@@ -1,12 +1,19 @@
+import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 
 import { RoundtableOrchestrator } from './orchestration.js'
+import { createConversation, normalizeConversationIndex, readConversationIndex, resolveConversationIndexPath, writeConversationIndex } from './conversation-storage.js'
+import { readPluginConfig, resolvePluginConfigPath, writePluginConfig } from './config-storage.js'
 import { clientConfig, defaultConfig, normalizeConfig, normalizeDiscussionInput, SETTINGS_NAMESPACE } from './role-schema.js'
 import { eventSummary, jsonResponse, messageOf, parseUrl, readJson } from './protocol.js'
+import { createRoundtableToolDefinition, roundtableToolValue } from './tool.js'
 
 const BASE_PATH = '/multi-agent-roundtable'
 const MAX_SSE_CLIENTS = 32
+const SKILL_PATH = fileURLToPath(new URL('../skills/multi-agent-roundtable/SKILL.md', import.meta.url))
 
 const RoleSchema = z.object({
   id: z.string(),
@@ -27,6 +34,7 @@ const TeamSchema = z.object({
 
 const DiscussionMetadataSchema = z.object({
   id: z.string(),
+  conversationId: z.string().default(''),
   parentSessionId: z.string().default(''),
   prompt: z.string().default(''),
   mode: z.string().default('review'),
@@ -81,6 +89,23 @@ function parseDiscussionPath(req) {
   return { pathname, segments }
 }
 
+function parseConversationPath(req) {
+  const pathname = parseUrl(req).pathname
+  if (!pathname.startsWith(`${BASE_PATH}/conversations`)) return null
+  const suffix = pathname.slice(`${BASE_PATH}/conversations`.length).replace(/^\/+|\/+$/g, '')
+  const segments = suffix ? suffix.split('/').map((segment) => decodeURIComponent(segment)) : []
+  return { pathname, segments }
+}
+
+function conversationTitle(prompt) {
+  const title = String(prompt || '').replace(/\s+/g, ' ').trim()
+  return title ? title.slice(0, 48) : '新建 Multi-Agent 群聊'
+}
+
+function readRoundtableSkill() {
+  return readFileSync(SKILL_PATH, 'utf8').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n?/, '')
+}
+
 function sseWrite(res, eventName, body, id) {
   if (id !== undefined) res.write(`id: ${id}\n`)
   res.write(`event: ${eventName}\n`)
@@ -103,17 +128,33 @@ function createMemorySettings(initial) {
 
 export function createHost(options = {}) {
   const host = {
-    inject: ['agents', 'settings', 'sessions', 'webServer'],
+    inject: ['agentDefaultModel', 'agentPresets', 'agents', 'settings', 'sessions', 'skills', 'tools', 'webServer'],
 
     apply(ctx) {
       const agents = options.agents || getService(ctx, 'agents')
+      const agentDefaultModel = options.agentDefaultModel || getService(ctx, 'agentDefaultModel')
+      const agentPresets = options.agentPresets || getService(ctx, 'agentPresets')
       const sessions = options.sessions || getService(ctx, 'sessions')
+      const skills = options.skills || getService(ctx, 'skills')
+      const tools = options.tools || getService(ctx, 'tools')
       const webServer = options.webServer || getService(ctx, 'webServer')
       const settings = options.settings || getService(ctx, 'settings')
       let settingsScope
       let orchestrator
       let initialized = false
       const sseClients = new Map()
+      const pluginConfigPath = options.pluginConfigPath || resolvePluginConfigPath(options.env || process.env)
+      const conversationIndexPath = options.conversationIndexPath || resolveConversationIndexPath(options.env || process.env)
+      let conversationIndex = { schemaVersion: 1, conversations: [] }
+      let conversationWrite = Promise.resolve()
+
+      const persistConversationIndex = () => {
+        const snapshot = JSON.parse(JSON.stringify(conversationIndex))
+        conversationWrite = conversationWrite.catch(() => {}).then(() => writeConversationIndex(conversationIndexPath, snapshot))
+        return conversationWrite
+      }
+
+      const findConversation = (id) => conversationIndex.conversations.find((item) => item.id === id)
 
       const initialize = (settingsService) => {
         if (initialized) return
@@ -126,20 +167,117 @@ export function createHost(options = {}) {
         } else {
           settingsScope = createMemorySettings(initial)
         }
+        let legacyConfig
+        try { legacyConfig = normalizeConfig(settingsScope.get(), initial) } catch { legacyConfig = initial }
         let config
-        try { config = normalizeConfig(settingsScope.get(), initial) } catch { config = initial }
+        let canMigratePluginConfig = true
+        try {
+          config = normalizeConfig(readPluginConfig(pluginConfigPath, legacyConfig), legacyConfig)
+        } catch {
+          config = legacyConfig
+          canMigratePluginConfig = false
+        }
+        try {
+          conversationIndex = readConversationIndex(conversationIndexPath, config.discussions)
+        } catch {
+          conversationIndex = normalizeConversationIndex(null, config.discussions)
+        }
+        const indexedDiscussions = conversationIndex.conversations.map((item) => item.discussion).filter(Boolean)
+        if (indexedDiscussions.length) {
+          const byId = new Map(config.discussions.map((item) => [item.id, item]))
+          for (const discussion of indexedDiscussions) byId.set(discussion.id, discussion)
+          config = normalizeConfig({ ...config, discussions: [...byId.values()] }, config)
+        }
+        for (const discussion of config.discussions) {
+          const conversation = conversationIndex.conversations.find((item) => item.discussionId === discussion.id)
+          if (conversation) discussion.conversationId = conversation.id
+        }
+        // First start migrates role configuration and discussion metadata into
+        // plugin-owned files. Settings remains a compatibility projection;
+        // child Sessions remain the transcript source of truth.
+        if (canMigratePluginConfig) void writePluginConfig(pluginConfigPath, config).catch(() => {})
         orchestrator = new RoundtableOrchestrator({
           agents,
+          agentDefaultModel,
+          agentPresets,
           sessions,
           settingsScope,
           config,
-          onPersist: async (discussions) => settingsScope.update({ discussions })
+          onPersist: async (discussions) => {
+            for (const discussion of discussions) {
+              let conversation = findConversation(discussion.conversationId)
+              if (!conversation) {
+                conversation = createConversation({
+                  id: discussion.conversationId || `conversation-${discussion.id}`,
+                  title: discussion.prompt,
+                  boundSessionId: discussion.parentSessionId,
+                  discussionId: discussion.id
+                }, discussion.createdAt)
+                conversationIndex.conversations.unshift(conversation)
+              }
+              conversation.discussionId = discussion.id
+              conversation.discussion = { ...discussion, conversationId: conversation.id }
+              conversation.boundSessionId = discussion.parentSessionId || conversation.boundSessionId
+              conversation.title = conversationTitle(discussion.prompt)
+              conversation.updatedAt = discussion.updatedAt
+            }
+            await Promise.all([settingsScope.update({ discussions }), persistConversationIndex()])
+          }
         })
         orchestrator.hydrate(config.discussions)
+        void persistConversationIndex().catch(() => {})
+
+        registerEffect(ctx, skills, {
+          name: 'multi-agent-roundtable',
+          description: '在当前对话中调用多个独立角色进行讨论、评审、会诊或头脑风暴。',
+          whenToUse: '用户明确要求多个角色、专家或智能体共同讨论、评审、会诊或头脑风暴时。',
+          source: 'runtime',
+          content: readRoundtableSkill(),
+          resourceBase: { kind: 'directory', path: dirname(SKILL_PATH) }
+        })
+
+        registerEffect(ctx, tools, createRoundtableToolDefinition(async (args, exec) => {
+          const parentAgent = exec?.agent
+          const parentHeader = parentAgent?.session?.header
+          if (!parentAgent || !parentHeader?.id) throw new Error('multi_agent_discuss 只能从一个正在运行的 DSH 主对话调用。')
+          if (parentHeader.origin === 'subagent') throw new Error('圆桌角色不能递归开启新的多智能体讨论。')
+          const conversation = createConversation({
+            title: args?.topic,
+            boundSessionId: parentHeader.id
+          })
+          conversationIndex.conversations.unshift(conversation)
+          await persistConversationIndex()
+          let discussion
+          try {
+            discussion = await orchestrator.create({
+              conversationId: conversation.id,
+              parentSessionId: parentHeader.id,
+              prompt: args?.topic,
+              participantIds: args?.participantIds,
+              mode: args?.mode,
+              rounds: args?.rounds
+            })
+          } catch (error) {
+            conversationIndex.conversations = conversationIndex.conversations.filter((item) => item.id !== conversation.id)
+            await persistConversationIndex()
+            throw error
+          }
+          conversation.discussionId = discussion.id
+          conversation.updatedAt = discussion.updatedAt
+          await persistConversationIndex()
+          const completed = await orchestrator.waitForCompletion(discussion.id, exec.signal)
+          if (completed.status !== 'completed') {
+            throw new Error(`多智能体讨论未完成（${completed.status}）：${completed.error || '请打开 Multi-Agent 对话页面查看角色状态。'}`)
+          }
+          return roundtableToolValue(completed)
+        }))
 
         if (typeof settingsScope.watch === 'function') {
           ctx.effect(() => settingsScope.watch((next) => {
-            try { orchestrator.setConfig(next) } catch { /* invalid external settings keep the last valid config */ }
+            try {
+              const current = orchestrator.getConfig()
+              orchestrator.setConfig({ ...current, discussions: next.discussions })
+            } catch { /* invalid external settings keep the last valid config */ }
           }))
         }
 
@@ -163,9 +301,66 @@ export function createHost(options = {}) {
               const input = body.config && typeof body.config === 'object' ? body.config : body
               const current = orchestrator.getConfig()
               const next = normalizeConfig({ ...current, ...input }, current)
+              await writePluginConfig(pluginConfigPath, next)
+              // Keep the namespace projection synchronized for old clients,
+              // while roles.json remains the durable authority after migration.
               await settingsScope.update({ roles: next.roles, teams: next.teams, defaults: next.defaults })
               orchestrator.setConfig(next)
               return jsonResponse(res, 200, { ok: true, config: clientConfig(next) })
+            } catch (error) {
+              return writeError(res, 400, error)
+            }
+          }
+        })
+
+        registerEffect(ctx, webServer, {
+          kind: 'prefix',
+          path: `${BASE_PATH}/conversations`,
+          handler: async (req, res) => {
+            const parsed = parseConversationPath(req)
+            if (!parsed) return jsonResponse(res, 404, { ok: false, error: 'Not found' })
+            const method = methodOf(req)
+            const [id] = parsed.segments
+            try {
+              if (parsed.segments.length === 0) {
+                if (method === 'GET') {
+                  const boundSessionId = String(parseUrl(req).searchParams.get('boundSessionId') || '').trim()
+                  const conversations = [...conversationIndex.conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+                  const suggested = boundSessionId ? conversations.find((item) => item.boundSessionId === boundSessionId) : conversations.find((item) => !item.boundSessionId)
+                  return jsonResponse(res, 200, { ok: true, conversations, suggestedId: suggested?.id || '' })
+                }
+                if (method === 'POST') {
+                  const body = await readJson(req)
+                  const conversation = createConversation({
+                    title: body.title,
+                    boundSessionId: body.boundSessionId
+                  })
+                  conversationIndex.conversations.unshift(conversation)
+                  await persistConversationIndex()
+                  return jsonResponse(res, 201, { ok: true, conversation })
+                }
+                return jsonResponse(res, 405, { ok: false, error: '仅支持 GET/POST。' })
+              }
+              const conversation = findConversation(id)
+              if (!conversation) return jsonResponse(res, 404, { ok: false, error: '群聊会话不存在。' })
+              if (method === 'GET') return jsonResponse(res, 200, { ok: true, conversation })
+              if (method === 'PATCH') {
+                const body = await readJson(req)
+                if (body.title !== undefined) conversation.title = conversationTitle(body.title)
+                if (body.boundSessionId !== undefined) conversation.boundSessionId = String(body.boundSessionId || '').trim()
+                conversation.updatedAt = Date.now()
+                await persistConversationIndex()
+                return jsonResponse(res, 200, { ok: true, conversation })
+              }
+              if (method === 'DELETE') {
+                const discussion = conversation.discussionId ? orchestrator.get(conversation.discussionId) : null
+                if (discussion?.status === 'running') return jsonResponse(res, 409, { ok: false, error: '讨论运行中，不能删除该群聊记录。' })
+                if (discussion) orchestrator.remove(discussion.id)
+                conversationIndex.conversations = conversationIndex.conversations.filter((item) => item.id !== id)
+                await persistConversationIndex()
+                return jsonResponse(res, 200, { ok: true })
+              }
+              return jsonResponse(res, 405, { ok: false, error: '仅支持 GET/PATCH/DELETE。' })
             } catch (error) {
               return writeError(res, 400, error)
             }
@@ -195,8 +390,22 @@ export function createHost(options = {}) {
               if (parsed.segments.length === 0) {
                 if (method !== 'POST') return jsonResponse(res, 405, { ok: false, error: '仅支持 POST。' })
                 const body = await readJson(req)
+                let conversation = findConversation(String(body.conversationId || '').trim())
+                if (!conversation) {
+                  conversation = createConversation({ title: body.prompt, boundSessionId: body.parentSessionId })
+                  conversationIndex.conversations.unshift(conversation)
+                  body.conversationId = conversation.id
+                }
+                if (conversation.discussionId) return jsonResponse(res, 409, { ok: false, error: '该群聊已经存在讨论记录，请继续讨论或新建群聊。' })
+                body.parentSessionId = body.parentSessionId || conversation.boundSessionId
                 const discussion = await orchestrator.create(body)
-                return jsonResponse(res, 202, { ok: true, discussion })
+                conversation.discussionId = discussion.id
+                conversation.discussion = { ...orchestrator.persistedMetadata().find((item) => item.id === discussion.id), conversationId: conversation.id }
+                conversation.boundSessionId = discussion.parentSessionId || conversation.boundSessionId
+                conversation.title = conversationTitle(discussion.prompt)
+                conversation.updatedAt = discussion.updatedAt
+                await persistConversationIndex()
+                return jsonResponse(res, 202, { ok: true, discussion, conversation })
               }
               if (!id) return jsonResponse(res, 404, { ok: false, error: '缺少 discussionId。' })
               if (action === 'events') return handleEvents(req, res, orchestrator, id, sseClients)

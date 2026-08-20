@@ -12,6 +12,7 @@
   var workspacePanelOpen = false
   var terminalPanelOpen = false
   var marketPanelOpen = false
+  var roundtablePanelOpen = false
   var desktopContributions = []
   var desktopContributionsKey = ''
   var desktopContributionRequest = null
@@ -311,6 +312,7 @@
     if (frame && url && loadedFrameUrl !== url) {
       workspacePanelOpen = false
       terminalPanelOpen = false
+      roundtablePanelOpen = false
       loadedFrameUrl = url
       frame.src = url
     }
@@ -379,7 +381,7 @@
   function desktopActionSupported(action) {
     var descriptor = action && action.action ? action.action : {}
     if (descriptor.type === 'native') return descriptor.command === 'workspace.openFolder' || descriptor.command === 'workspace.openTerminal'
-    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal' || descriptor.method === 'akshare.toggleAnalysisPanel'
+    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal' || descriptor.method === 'akshare.toggleAnalysisPanel' || descriptor.method === 'multiAgentRoundtable.open'
     return false
   }
   function desktopActionPressed(action) {
@@ -387,6 +389,7 @@
     return method === 'workspace.openFolder' || method === 'workspace.togglePanel' ? workspacePanelOpen
       : method === 'workspace.openTerminal' || method === 'workspace.toggleTerminal' ? terminalPanelOpen
         : method === 'akshare.toggleAnalysisPanel' ? marketPanelOpen
+          : method === 'multiAgentRoundtable.open' ? roundtablePanelOpen
         : false
   }
   function desktopActionRequiresWorkspace(action) {
@@ -418,6 +421,14 @@
       postDshMessage('plugin-rpc', {
         pluginId: contribution && (contribution.packageName || contribution.name),
         method: method
+      })
+      return
+    }
+    if (method === 'multiAgentRoundtable.open') {
+      postDshMessage('plugin-rpc', {
+        pluginId: contribution && (contribution.packageName || contribution.name),
+        method: method,
+        open: !roundtablePanelOpen
       })
       return
     }
@@ -454,7 +465,9 @@
         ? (terminalPanelOpen ? '关闭下方 PowerShell 面板' : '打开下方 PowerShell 面板')
         : method === 'akshare.toggleAnalysisPanel'
           ? (marketPanelOpen ? '关闭行情分析面板' : '打开行情分析面板')
-          : (workspacePanelOpen ? '关闭悬浮工作区面板' : '打开悬浮工作区面板')
+          : method === 'multiAgentRoundtable.open'
+            ? (roundtablePanelOpen ? '关闭多 Agent 圆桌' : '打开多 Agent 圆桌')
+            : (workspacePanelOpen ? '关闭悬浮工作区面板' : '打开悬浮工作区面板')
       button.disabled = !enabled
       button.title = title
       button.setAttribute('aria-label', title)
@@ -1008,6 +1021,11 @@
       updateView()
       return
     }
+    if (data.source === '@p-dsh-market/multi-agent-roundtable') {
+      if (data.type === 'roundtable-panel-state') roundtablePanelOpen = data.open === true
+      updateView()
+      return
+    }
     if (data.source !== 'dsh-open-workspace') return
     if (data.type === 'workspace-panel-state') workspacePanelOpen = data.open === true
     if (data.type === 'terminal-panel-state') terminalPanelOpen = data.open === true
@@ -1020,6 +1038,7 @@
       postDshMessage('workspace-panel-state-request')
       postDshMessage('terminal-panel-state-request')
       postDshMessage('analysis-panel-state-request')
+      postDshMessage('roundtable-panel-state-request')
       postActiveTheme(activeSkinFor(state || {}), state || {}, effectiveTheme((state && state.appearanceMode) || 'system'))
     })
   }
