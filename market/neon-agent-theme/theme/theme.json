@@ -49,7 +49,7 @@
     "fit": "cover",
     "position": "68% center",
     "opacity": 0.58,
-    "overlay": "rgba(1, 4, 15, 0.52)",
+    "overlay": "rgba(1, 4, 15, 0.32)",
     "blur": "0px",
     "fixed": true
   }

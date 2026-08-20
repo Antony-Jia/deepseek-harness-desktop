@@ -82,6 +82,7 @@ window.__ModuleLoader__.load({
         if (!service) throw new Error('DSH Web theme 服务未就绪')
 
         var skinId = typeof data.skinId === 'string' && data.skinId ? data.skinId : 'builtin.default'
+        var appearance = preferenceFor(data)
         if (skinId === 'builtin.default') {
           resetWebBackground()
           if (typeof service.setTheme === 'function') {

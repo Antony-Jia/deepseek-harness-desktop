@@ -115,6 +115,7 @@
   "dsh": {
     "protocolVersion": 1,
     "client": {
+      "inject": ["@deepseek-ai/dsh-client-ui-theme"],
       "platform": "web"
     },
     "bundle": {
@@ -242,9 +243,9 @@
 
 ### 6.1 当前示例素材
 
-- 文件：[`assets/neon-agent-background.png`](./assets/neon-agent-background.png)
+- 文件：[`assets/neon-agent-background-with-operator.png`](./assets/neon-agent-background-with-operator.png)
 - 用途：Desktop 首页、插件市场和 DSH Web 外层背景候选图。
-- 视觉：近黑深蓝底，电蓝和克制紫色电路纹理集中在边缘，中央保留低对比留白。
+- 视觉：近黑深蓝底，电蓝和克制紫色电路纹理集中在边缘，右侧保留 operator，中央保留低对比留白。
 - 来源：使用 GPT Image 生成的原创背景；附件仅作为氛围和配色参考，未复制人物、标识、文字和界面布局。
 
 ### 6.2 运行时渲染层级
@@ -349,7 +350,7 @@ ctx.theme.register({
 ctx.theme.setTheme('neon-agent')
 ```
 
-主题插件通过 Cordis 生命周期注册和注销主题；上游 `ThemePresenter` 负责将主题快照投影到 `body[data-ds-dark-theme]`、`html { color-scheme }` 和 Web 的语义 CSS 变量。插件不得直接查询或修改产品 DOM。若服务不可用，bridge 会向 Desktop 回传错误，设置页显示 Web 未应用，而不是静默显示半套主题。
+`dsh.client.inject` 必须声明 `@deepseek-ai/dsh-client-ui-theme`。这是 DSH plugin 模式的浏览器依赖边，负责先提供 `theme` 服务，再激活主题包；只写 `dsh.theme` 或只写 `cordis.patch.yml` 并不会让主题进入 Harness。主题插件通过 Cordis 生命周期注册和注销主题；上游 `ThemePresenter` 负责将主题快照投影到 `body[data-ds-dark-theme]`、`html { color-scheme }` 和 Web 的语义 CSS 变量。插件不得直接查询或修改产品 DOM。若服务不可用，bridge 会向 Desktop 回传错误，设置页显示 Web 未应用，而不是静默显示半套主题。
 
 ### 7.4 Desktop 与 iframe 同步
 

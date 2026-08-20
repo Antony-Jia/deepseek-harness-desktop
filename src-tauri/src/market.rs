@@ -17,6 +17,7 @@ use std::{
 
 pub const MARKET_SCOPE: &str = "@p-dsh-market/";
 pub const PINNED_PNPM_VERSION: &str = "10.12.4";
+pub const THEME_CLIENT_PACKAGE: &str = "@deepseek-ai/dsh-client-ui-theme";
 
 const MARKET_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/Antony-Jia/deepseek-harness-desktop/main/market/catalog-v1.json";
@@ -1247,6 +1248,20 @@ fn validate_theme_market_manifest(
             "主题包必须声明 dsh.protocolVersion: {DESKTOP_PROTOCOL_VERSION}。"
         ));
     }
+    let client_inject = dsh
+        .get("client")
+        .and_then(Value::as_object)
+        .and_then(|client| client.get("inject"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("主题包 dsh.client.inject 必须包含 {THEME_CLIENT_PACKAGE}。"))?;
+    if !client_inject
+        .iter()
+        .any(|value| value.as_str() == Some(THEME_CLIENT_PACKAGE))
+    {
+        return Err(format!(
+            "主题包 dsh.client.inject 必须包含 {THEME_CLIENT_PACKAGE}。"
+        ));
+    }
     let theme = theme_value
         .as_object()
         .ok_or_else(|| "dsh.theme 必须是对象。".to_string())?;
@@ -1932,6 +1947,10 @@ mod tests {
     fn validates_theme_pack_market_metadata() {
         let mut manifest = valid_manifest("@p-dsh-market/theme");
         manifest["dsh"]["protocolVersion"] = serde_json::json!(1);
+        manifest["dsh"]["client"] = serde_json::json!({
+            "platform": "web",
+            "inject": [THEME_CLIENT_PACKAGE]
+        });
         manifest["dsh"]["market"]["capabilities"] =
             serde_json::json!(["skills", "host", "client", "theme-pack"]);
         manifest["dsh"]["theme"] = serde_json::json!({
@@ -1947,6 +1966,9 @@ mod tests {
         let theme = result.theme.expect("theme metadata should be present");
         assert_eq!(theme.id, "neon-agent");
         assert_eq!(theme.supported_appearances, vec!["dark"]);
+
+        manifest["dsh"]["client"] = serde_json::json!({"platform": "web"});
+        assert!(validate_market_manifest("@p-dsh-market/theme", &manifest).is_err());
 
         manifest["dsh"]["market"]["capabilities"] = serde_json::json!(["skills", "host", "client"]);
         assert!(validate_market_manifest("@p-dsh-market/theme", &manifest).is_err());

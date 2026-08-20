@@ -306,7 +306,7 @@ test('theme pack contract keeps the skin declarative and local', () => {
   assert.match(javascript, /set_background_preferences/)
   assert.match(styles, /data-skin="neon-agent"/)
   assert.equal(manifest.name, '@p-dsh-market/neon-agent-theme')
-  assert.equal(manifest.version, '0.1.2')
+  assert.equal(manifest.version, '0.1.4')
   assert.deepEqual(manifest.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-theme'])
   assert.equal(manifest.dsh.theme.schemaVersion, 1)
   assert.deepEqual(manifest.dsh.theme.supportedAppearances, ['dark'])
@@ -315,6 +315,7 @@ test('theme pack contract keeps the skin declarative and local', () => {
   assert.match(client, /id: 'neon-agent'/)
   assert.equal(theme.background.image, '../assets/background.png')
   assert.equal(theme.background.position, '68% center')
+  assert.equal(theme.background.overlay, 'rgba(1, 4, 15, 0.32)')
   assert.deepEqual(
     readFileSync(file('market/neon-agent-theme/assets/background.png')),
     readFileSync(file('feature_doc/assets/neon-agent-background-with-operator.png')),
@@ -328,6 +329,40 @@ test('theme pack contract keeps the skin declarative and local', () => {
   assert.doesNotMatch(fallbackSection, /neon-agent/)
   assert.match(javascript, /pack\.source === 'profile'/)
   assert.match(javascript, /pack\.installed === true/)
+})
+
+test('theme client registers through the official DSH theme service', () => {
+  const source = text('market/neon-agent-theme/lib/client.js')
+  let moduleExports
+  vm.runInNewContext(source, {
+    Symbol,
+    window: {
+      __ModuleLoader__: {
+        load: (entry) => {
+          moduleExports = entry.factory(() => ({}))
+        },
+      },
+    },
+  })
+
+  let definition
+  const service = {
+    getTheme: () => ({ themes: [
+      { id: 'light', colorScheme: 'light', tokens: {} },
+      { id: 'dark', colorScheme: 'dark', tokens: {} },
+    ] }),
+    register: (value) => {
+      definition = value
+      return () => {}
+    },
+  }
+  const cleanup = moduleExports.apply({ get: (name) => name === 'theme' ? service : undefined })
+  assert.deepEqual(Array.from(moduleExports.inject), ['theme'])
+  assert.equal(definition.id, 'neon-agent')
+  assert.equal(definition.colorScheme, 'dark')
+  assert.equal(definition.tokens['--dsw-alias-brand-primary'], '#1976FF')
+  assert.equal(definition.tokens['--dsw-alias-button-elevated-fill'], 'rgba(22, 61, 155, 0.32)')
+  cleanup()
 })
 
 test('desktop bridge projects theme packs through the DSH Web ThemeService', () => {

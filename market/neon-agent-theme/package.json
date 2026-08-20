@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/neon-agent-theme",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "DSH 声明式 Neon Agent 主题包，提供受控语义 token 与本地背景资源。",
   "type": "module",
   "main": "lib/index.js",

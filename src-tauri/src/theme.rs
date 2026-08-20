@@ -7,7 +7,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use crate::state::{PersistedState, DEFAULT_BACKGROUND_INTENSITY, DEFAULT_SKIN_ID};
+use crate::{
+    market::THEME_CLIENT_PACKAGE,
+    state::{PersistedState, DEFAULT_BACKGROUND_INTENSITY, DEFAULT_SKIN_ID},
+};
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;
 const MAX_THEME_BYTES: u64 = 128 * 1024;
@@ -151,6 +154,8 @@ struct DshManifest {
 #[derive(Debug, Deserialize)]
 struct ClientManifest {
     platform: String,
+    #[serde(default)]
+    inject: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,8 +394,21 @@ fn load_installed_theme(
     if dsh.protocol_version != Some(1) {
         return Err("主题包 protocolVersion 必须为 1。".to_string());
     }
-    if dsh.client.as_ref().map(|client| client.platform.as_str()) != Some("web") {
+    let client = dsh
+        .client
+        .as_ref()
+        .ok_or_else(|| "主题包缺少 dsh.client。".to_string())?;
+    if client.platform != "web" {
         return Err("主题包 client.platform 必须为 web。".to_string());
+    }
+    if !client
+        .inject
+        .iter()
+        .any(|item| item == THEME_CLIENT_PACKAGE)
+    {
+        return Err(format!(
+            "主题包 dsh.client.inject 必须包含 {THEME_CLIENT_PACKAGE}。"
+        ));
     }
     let theme = dsh
         .theme
@@ -772,7 +790,7 @@ mod tests {
         .expect("write profile manifest");
         fs::write(
             package.join("package.json"),
-            r#"{"name":"@p-dsh-market/test-theme","version":"1.0.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web"},"market":{"displayName":"Test Theme","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"test-theme","displayName":"Test Theme","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
+            r#"{"name":"@p-dsh-market/test-theme","version":"1.0.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web","inject":["@deepseek-ai/dsh-client-ui-theme"]},"market":{"displayName":"Test Theme","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"test-theme","displayName":"Test Theme","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
         )
         .expect("write package manifest");
         fs::write(
@@ -818,7 +836,7 @@ mod tests {
         .expect("write disabled profile manifest");
         fs::write(
             package.join("package.json"),
-            r#"{"name":"@p-dsh-market/disabled-theme","version":"1.0.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web"},"market":{"displayName":"Disabled Theme","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"disabled-theme","displayName":"Disabled Theme","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
+            r#"{"name":"@p-dsh-market/disabled-theme","version":"1.0.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web","inject":["@deepseek-ai/dsh-client-ui-theme"]},"market":{"displayName":"Disabled Theme","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"disabled-theme","displayName":"Disabled Theme","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
         )
         .expect("write disabled package manifest");
         fs::write(
@@ -857,7 +875,7 @@ mod tests {
         .expect("write profile manifest");
         fs::write(
             package.join("package.json"),
-            r#"{"name":"@p-dsh-market/neon-agent-theme","version":"0.2.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web"},"market":{"displayName":"Neon Agent","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"neon-agent","displayName":"Neon Agent","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
+            r#"{"name":"@p-dsh-market/neon-agent-theme","version":"0.2.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web","inject":["@deepseek-ai/dsh-client-ui-theme"]},"market":{"displayName":"Neon Agent","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"neon-agent","displayName":"Neon Agent","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
         )
         .expect("write package manifest");
         fs::write(
