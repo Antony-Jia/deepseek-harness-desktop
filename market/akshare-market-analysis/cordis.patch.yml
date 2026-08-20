@@ -1,4 +1,4 @@
 - insert:
     - id: p-dsh-market-akshare-analysis
       name: '@p-dsh-market/akshare-market-analysis'
-      inject: [skills, tools, subprocess, webServer, logger]
+      inject: [skills, tools, subprocess, webServer]

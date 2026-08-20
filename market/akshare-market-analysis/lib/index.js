@@ -373,7 +373,10 @@ function endpointFor(name) {
 
 export function createHost(options = {}) {
   return {
-    inject: ['skills', 'tools', 'subprocess', 'webServer', 'logger'],
+    // DSH 0.1.0-rc.7 does not expose a `logger` service. Keep logging as an
+    // optional capability discovered from the context instead of making it a
+    // hard Cordis dependency that leaves the whole plugin pending.
+    inject: ['skills', 'tools', 'subprocess', 'webServer'],
     apply(ctx) {
       const skills = ctx.get?.('skills') || ctx.skills
       const tools = ctx.get?.('tools') || ctx.tools

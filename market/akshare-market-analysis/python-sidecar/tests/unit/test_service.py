@@ -10,8 +10,10 @@ class FixtureProvider:
         self.snapshot_calls = 0
         self.history_calls = 0
 
-    def snapshot(self, market):
+    def snapshot(self, market, query=""):
         self.snapshot_calls += 1
+        if market == "us":
+            return [{"symbol": query.upper(), "name": query.upper(), "close": 227.3}]
         return [
             {"代码": "600519", "名称": "贵州茅台", "最新价": 1700, "涨跌幅": 2.5, "成交额": 9000},
             {"代码": "000001", "名称": "平安银行", "最新价": 10, "涨跌幅": -1.2, "成交额": 1000},
@@ -50,7 +52,7 @@ def test_history_is_bounded_and_analysis_is_descriptive(tmp_path) -> None:
     result = service.analysis({
         "market": "a-share",
         "symbol": "600519",
-        "startDate": "2026-08-01",
+        "startDate": "2026-06-01",
         "endDate": "2026-08-19",
         "maxBars": 60,
         "indicators": ["sma", "macd", "rsi", "boll", "volume-ma", "atr"],
@@ -61,3 +63,23 @@ def test_history_is_bounded_and_analysis_is_descriptive(tmp_path) -> None:
     assert set(("trend", "momentum", "volatility", "volumePrice", "warnings")) <= set(result["analysisSummary"])
     assert result["metrics"]["latestClose"] is not None
     assert provider.history_calls == 1
+
+
+def test_us_snapshot_and_weekly_aggregation_use_normalized_contract(tmp_path) -> None:
+    provider = FixtureProvider()
+    service = MarketService(provider=provider, cache_dir=tmp_path / "cache")
+    snapshot = service.snapshot({"market": "us", "query": "AAPL", "limit": 1})
+    assert snapshot["rows"][0]["symbol"] == "AAPL"
+    assert snapshot["rows"][0]["currency"] == "USD"
+
+    history = service.history({
+        "market": "a-share",
+        "symbol": "600519",
+        "period": "weekly",
+        "startDate": "2026-06-01",
+        "endDate": "2026-06-30",
+        "maxBars": 10,
+    })
+    assert history["kind"] == "history"
+    assert len(history["bars"]) == 5
+    assert any("聚合为weekly" in warning for warning in history["quality"]["warnings"])

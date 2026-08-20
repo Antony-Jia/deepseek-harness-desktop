@@ -16,6 +16,7 @@ from akshare_service.protocol import (
 def test_normalizes_market_symbols_and_dates() -> None:
     assert normalize_symbol("a-share", "600519") == "600519"
     assert normalize_symbol("hk", 700) == "00700"
+    assert normalize_symbol("us", "aapl") == "AAPL"
     assert parse_date("2026-08-19", "date") == "2026-08-19"
     assert parse_date("20260819", "date") == "2026-08-19"
 
@@ -29,6 +30,12 @@ def test_rejects_unknown_keys_and_unsafe_values() -> None:
         normalize_history_request({"market": "a-share", "symbol": "600519", "unknown": 1})
     with pytest.raises(ProtocolError):
         normalize_history_request({"market": "hk", "symbol": "123456"})
+    with pytest.raises(ProtocolError):
+        normalize_snapshot_request({"market": "us"})
+    with pytest.raises(ProtocolError):
+        normalize_history_request({"market": "us", "symbol": "AAPL", "adjust": "hfq"})
+    with pytest.raises(ProtocolError):
+        normalize_symbol("us", "AAPL/$")
     with pytest.raises(ProtocolError):
         parse_date("2026-02-30", "date")
 
@@ -55,6 +62,11 @@ def test_normalized_requests_keep_fixed_contract() -> None:
     }, analysis=True)
     assert analysis["symbol"] == "000001"
     assert analysis["indicators"] == ["sma", "rsi"]
+
+    us_snapshot = normalize_snapshot_request({"market": "us", "query": " aapl ", "limit": 1})
+    assert us_snapshot["query"] == "aapl"
+    us_history = normalize_history_request({"market": "us", "symbol": "msft", "adjust": "qfq"})
+    assert us_history["symbol"] == "MSFT"
 
 
 def test_json_safe_and_hash_are_deterministic() -> None:

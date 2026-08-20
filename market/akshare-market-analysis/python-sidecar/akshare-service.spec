@@ -2,6 +2,10 @@
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = collect_all("akshare")
+mini_racer_datas, mini_racer_binaries, mini_racer_hiddenimports = collect_all("py_mini_racer")
+datas += mini_racer_datas
+binaries += mini_racer_binaries
+hiddenimports += mini_racer_hiddenimports
 
 a = Analysis(
     ["src/akshare_service/main.py"],

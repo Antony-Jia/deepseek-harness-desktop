@@ -11,7 +11,7 @@ from .protocol import normalize_symbol
 
 SNAPSHOT_ALIASES = {
     "symbol": ("代码", "股票代码", "H股代码", "code", "symbol"),
-    "name": ("名称", "股票名称", "name"),
+    "name": ("名称", "中文名称", "股票名称", "name", "cname"),
     "price": ("最新价", "最新价-HKD", "最新价-RMB", "价格", "price", "close"),
     "changePct": ("涨跌幅", "H股-涨跌幅", "涨跌幅(%)", "changePct", "change_pct"),
     "volume": ("成交量", "成交量(股)", "volume"),
@@ -101,6 +101,11 @@ def _clean_symbol(value: Any, market: str) -> str | None:
     if value is None:
         return None
     raw = str(value).strip()
+    if market == "us":
+        try:
+            return normalize_symbol(market, raw)
+        except ValueError:
+            return None
     digits = "".join(char for char in raw if char.isdigit())
     if not digits:
         return None
@@ -131,7 +136,7 @@ def normalize_snapshot(frame: Any, market: str) -> tuple[list[dict[str, Any]], d
             "high": _number(_pick(source, SNAPSHOT_ALIASES["high"])),
             "low": _number(_pick(source, SNAPSHOT_ALIASES["low"])),
             "previousClose": _number(_pick(source, SNAPSHOT_ALIASES["previousClose"])),
-            "currency": "CNY" if market == "a-share" else "HKD",
+            "currency": {"a-share": "CNY", "hk": "HKD", "us": "USD"}.get(market),
         }
         rows.append(row)
     return rows, {

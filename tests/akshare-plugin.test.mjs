@@ -27,7 +27,7 @@ const text = (relativePath) => readFileSync(`${root}/${relativePath}`, 'utf8')
 test('AKShare package manifest and bundle patch are complete', () => {
   const manifest = JSON.parse(text('market/akshare-market-analysis/package.json'))
   assert.equal(manifest.name, PLUGIN_ID)
-  assert.equal(manifest.version, '0.1.3')
+  assert.equal(manifest.version, '0.1.6')
   assert.equal(manifest.main, 'lib/index.js')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.protocolVersion, 1)
@@ -35,13 +35,17 @@ test('AKShare package manifest and bundle patch are complete', () => {
   assert.ok(manifest.dsh.market.capabilities.includes('skills'))
   assert.ok(manifest.dsh.desktop.permissions.includes('process:execute-bundled'))
   assert.equal(manifest.dsh.desktop.contributes.titlebarActions[0].icon, 'chart-candlestick')
-  assert.match(text('market/akshare-market-analysis/cordis.patch.yml'), /inject: \[skills, tools, subprocess, webServer, logger\]/)
+  assert.match(text('market/akshare-market-analysis/cordis.patch.yml'), /inject: \[skills, tools, subprocess, webServer\]/)
+  assert.doesNotMatch(text('market/akshare-market-analysis/cordis.patch.yml'), /\blogger\b/)
   assert.match(text('market/akshare-market-analysis/skills/akshare-market-analysis/SKILL.md'), /akshare_market_snapshot/)
 })
 
 test('JS protocol rejects unsafe input and compacts replay metadata', () => {
   assert.equal(normalizeSnapshotArgs({ market: 'a-share', limit: 2 }).limit, 2)
   assert.equal(normalizeHistoryArgs({ market: 'hk', symbol: 700 }).symbol, '00700')
+  assert.equal(normalizeHistoryArgs({ market: 'us', symbol: 'aapl' }).symbol, 'AAPL')
+  assert.throws(() => normalizeSnapshotArgs({ market: 'us' }))
+  assert.throws(() => normalizeHistoryArgs({ market: 'us', symbol: 'AAPL', adjust: 'hfq' }))
   assert.throws(() => normalizeSnapshotArgs({ market: 'a-share', filters: { price: { gte: Number.NaN } } }))
   assert.throws(() => normalizeHistoryArgs({ market: 'a-share', symbol: '1', startDate: '2026-02-30' }))
   const compact = compactSnapshot({
@@ -165,6 +169,7 @@ test('host registers a skill, three tools, and a health route with reversible ef
     }
   }
   const plugin = createHost({ manager })
+  assert.deepEqual(plugin.inject, ['skills', 'tools', 'subprocess', 'webServer'])
   const returned = plugin.apply(ctx)
   assert.equal(returned, undefined)
   assert.equal(skills.length, 1)
@@ -198,6 +203,15 @@ test('client is a DSH module-loader bundle and does not import runtime modules',
   })
   assert.equal(Array.from(result.inject).join(','), 'slots,sessions')
   assert.equal(typeof result.apply, 'function')
+  assert.match(source, /var snapshot = Object\.assign\(\{\}, store\)/)
+  assert.match(source, /--aka-up:#e5484d/)
+  assert.match(source, /--aka-down:#00a870/)
+  assert.match(source, /--aka-line:#f59e0b/)
+  assert.match(source, /--aka-band:#3b82f6/)
+  assert.match(source, /className: 'aka-chart-caption'/)
+  assert.match(source, /className: 'aka-axis-title'/)
+  assert.match(source, /交易日期/)
+  assert.match(source, /价格/)
   assert.doesNotMatch(source, /from ['"]|require\(['"]node:/)
 })
 

@@ -2,7 +2,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -10,9 +10,6 @@ use std::{
 use crate::state::{PersistedState, DEFAULT_BACKGROUND_INTENSITY, DEFAULT_SKIN_ID};
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;
-pub const BUILTIN_NEON_ID: &str = "neon-agent";
-pub const BUILTIN_NEON_PACKAGE: &str = "@p-dsh-market/neon-agent-theme";
-
 const MAX_THEME_BYTES: u64 = 128 * 1024;
 const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STRING_LENGTH: usize = 512;
@@ -54,10 +51,6 @@ const ALLOWED_TOKENS: &[&str] = &[
     "components.panel.radius",
     "components.panel.shadow",
 ];
-
-const BUILTIN_BACKGROUND: &[u8] = include_bytes!("../../dist/assets/neon-agent-background.png");
-const BUILTIN_PREVIEW: &[u8] =
-    include_bytes!("../../dist/assets/neon-agent-background-with-operator.png");
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,10 +162,10 @@ struct MarketManifest {
 }
 
 pub fn list_theme_packs(dsh_home: &Path) -> Result<Vec<ThemePackSummary>, String> {
-    let mut packs = vec![builtin_default(), builtin_neon()];
+    let mut packs = vec![builtin_default()];
     let profile = dsh_home.join("profiles").join("web");
     let scope_dir = profile.join("node_modules").join("@p-dsh-market");
-    let enabled_manifest = profile_enabled_text(&profile);
+    let enabled_packages = profile_enabled_packages(&profile);
     if let Ok(entries) = fs::read_dir(&scope_dir) {
         for entry in entries.flatten() {
             let package_dir = entry.path();
@@ -192,13 +185,7 @@ pub fn list_theme_packs(dsh_home: &Path) -> Result<Vec<ThemePackSummary>, String
             if dsh.theme.is_none() {
                 continue;
             }
-            let enabled = enabled_manifest
-                .as_deref()
-                .map(|value| {
-                    value.contains(&format!("\"{}\"", manifest.name))
-                        || value.contains(&format!("'{}'", manifest.name))
-                })
-                .unwrap_or(false);
+            let enabled = enabled_packages.contains(&manifest.name);
             match load_installed_theme(&package_dir, &manifest, enabled) {
                 Ok(pack) => packs.push(pack),
                 Err(error) => packs.push(invalid_pack(&manifest, enabled, error)),
@@ -647,15 +634,21 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| error.to_string())
 }
 
-fn profile_enabled_text(profile: &Path) -> Option<String> {
-    let package = fs::read_to_string(profile.join("package.json")).ok();
-    let patch = fs::read_to_string(profile.join("cordis.patch.yml")).ok();
-    match (package, patch) {
-        (Some(package), Some(patch)) => Some(format!("{package}\n{patch}")),
-        (Some(package), None) => Some(package),
-        (None, Some(patch)) => Some(patch),
-        (None, None) => None,
-    }
+fn profile_enabled_packages(profile: &Path) -> BTreeSet<String> {
+    let Ok(raw) = fs::read(profile.join("package.json")) else {
+        return BTreeSet::new();
+    };
+    let Ok(manifest) = serde_json::from_slice::<Value>(&raw) else {
+        return BTreeSet::new();
+    };
+    manifest
+        .pointer("/dsh/profile/bundles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 fn invalid_pack(package: &PackageManifest, enabled: bool, error: String) -> ThemePackSummary {
@@ -698,137 +691,6 @@ fn builtin_default() -> ThemePackSummary {
     }
 }
 
-fn builtin_neon() -> ThemePackSummary {
-    let tokens = BTreeMap::from([
-        ("color.background.base".to_string(), "#02040D".to_string()),
-        (
-            "color.surface.primary".to_string(),
-            "rgba(7, 14, 38, 0.90)".to_string(),
-        ),
-        (
-            "color.surface.secondary".to_string(),
-            "rgba(12, 23, 58, 0.82)".to_string(),
-        ),
-        ("color.text.primary".to_string(), "#EDF4FF".to_string()),
-        ("color.text.secondary".to_string(), "#879AC8".to_string()),
-        (
-            "color.border.default".to_string(),
-            "rgba(61, 105, 255, 0.35)".to_string(),
-        ),
-        ("color.accent.primary".to_string(), "#1976FF".to_string()),
-        ("color.accent.secondary".to_string(), "#7B4DFF".to_string()),
-        ("color.success".to_string(), "#3BD6AF".to_string()),
-        ("color.warning".to_string(), "#F4C563".to_string()),
-        ("color.danger".to_string(), "#FF708C".to_string()),
-        (
-            "focus.ring".to_string(),
-            "0 0 0 3px rgba(25, 118, 255, 0.32)".to_string(),
-        ),
-        (
-            "desktop.titlebar.background".to_string(),
-            "rgba(2, 6, 22, 0.90)".to_string(),
-        ),
-        ("desktop.panel.backdropBlur".to_string(), "12px".to_string()),
-        (
-            "web.conversation.surface".to_string(),
-            "rgba(4, 10, 29, 0.76)".to_string(),
-        ),
-        (
-            "web.sidebar.surface".to_string(),
-            "rgba(3, 8, 24, 0.88)".to_string(),
-        ),
-        (
-            "components.button.background".to_string(),
-            "rgba(22, 61, 155, 0.32)".to_string(),
-        ),
-        (
-            "components.button.hoverBackground".to_string(),
-            "rgba(37, 91, 230, 0.50)".to_string(),
-        ),
-        (
-            "components.button.activeBackground".to_string(),
-            "rgba(55, 105, 255, 0.62)".to_string(),
-        ),
-        (
-            "components.button.disabledBackground".to_string(),
-            "rgba(38, 55, 105, 0.34)".to_string(),
-        ),
-        ("components.button.text".to_string(), "#EDF4FF".to_string()),
-        (
-            "components.button.hoverText".to_string(),
-            "#FFFFFF".to_string(),
-        ),
-        (
-            "components.button.border".to_string(),
-            "rgba(53, 112, 255, 0.55)".to_string(),
-        ),
-        ("components.button.radius".to_string(), "8px".to_string()),
-        (
-            "components.button.shadow".to_string(),
-            "0 0 18px rgba(35, 103, 255, 0.18)".to_string(),
-        ),
-        (
-            "components.input.background".to_string(),
-            "rgba(3, 10, 30, 0.78)".to_string(),
-        ),
-        (
-            "components.input.border".to_string(),
-            "rgba(74, 116, 255, 0.38)".to_string(),
-        ),
-        (
-            "components.input.focusBorder".to_string(),
-            "#397CFF".to_string(),
-        ),
-        (
-            "components.input.placeholder".to_string(),
-            "#6576A5".to_string(),
-        ),
-        ("components.input.caret".to_string(), "#6CA5FF".to_string()),
-        ("components.panel.radius".to_string(), "10px".to_string()),
-        (
-            "components.panel.shadow".to_string(),
-            "0 0 24px rgba(21, 60, 180, 0.20)".to_string(),
-        ),
-    ]);
-    ThemePackSummary {
-        package_name: BUILTIN_NEON_PACKAGE.to_string(),
-        id: BUILTIN_NEON_ID.to_string(),
-        display_name: "Neon Agent".to_string(),
-        version: "0.1.0".to_string(),
-        description: "近黑深海军蓝、电蓝与克制紫色的赛博科技主题。".to_string(),
-        source: "builtin".to_string(),
-        installed: true,
-        enabled: true,
-        protocol_compatible: true,
-        appearance: "dark".to_string(),
-        supported_appearances: vec!["dark".to_string()],
-        preview_url: Some(bytes_data_url(BUILTIN_PREVIEW, "image/png")),
-        tokens,
-        background: Some(ThemeBackground {
-            image_url: Some(bytes_data_url(BUILTIN_BACKGROUND, "image/png")),
-            targets: vec![
-                "desktop.home".to_string(),
-                "desktop.market".to_string(),
-                "web.shell".to_string(),
-            ],
-            fit: "cover".to_string(),
-            position: "center".to_string(),
-            opacity: DEFAULT_BACKGROUND_INTENSITY,
-            overlay: "rgba(1, 4, 15, 0.66)".to_string(),
-            blur: "0px".to_string(),
-            fixed: true,
-        }),
-        error: None,
-    }
-}
-
-fn bytes_data_url(bytes: &[u8], mime: &str) -> String {
-    format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
-}
-
 fn default_fit() -> String {
     "cover".to_string()
 }
@@ -856,25 +718,6 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builtin_neon_uses_local_assets_and_allowed_tokens() {
-        let pack = builtin_neon();
-        assert_eq!(pack.id, BUILTIN_NEON_ID);
-        assert!(pack
-            .preview_url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("data:image/png")));
-        assert!(pack
-            .background
-            .as_ref()
-            .and_then(|item| item.image_url.as_deref())
-            .is_some_and(|url| url.starts_with("data:image/png")));
-        assert!(pack
-            .tokens
-            .keys()
-            .all(|key| ALLOWED_TOKENS.contains(&key.as_str())));
-    }
 
     #[test]
     fn accepts_neon_theme_file_section_namespaces() {
@@ -924,7 +767,7 @@ mod tests {
         fs::create_dir_all(package.join("theme")).expect("create test theme");
         fs::write(
             root.join("profiles").join("web").join("package.json"),
-            r#"{"dependencies":{"@p-dsh-market/test-theme":"1.0.0"}}"#,
+            r#"{"dsh":{"profile":{"bundles":["@p-dsh-market/test-theme"]}},"dependencies":{"@p-dsh-market/test-theme":"1.0.0"}}"#,
         )
         .expect("write profile manifest");
         fs::write(
@@ -950,7 +793,51 @@ mod tests {
     }
 
     #[test]
-    fn accepts_package_relative_backgrounds_and_prefers_installed_pack() {
+    fn does_not_expose_uninstalled_or_disabled_themes_as_builtins() {
+        let empty_root =
+            std::env::temp_dir().join(format!("dsh-theme-empty-profile-{}", std::process::id()));
+        fs::create_dir_all(&empty_root).expect("create empty root");
+        let packs = list_theme_packs(&empty_root).expect("list empty themes");
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].id, DEFAULT_SKIN_ID);
+        let _ = fs::remove_dir_all(empty_root);
+
+        let root =
+            std::env::temp_dir().join(format!("dsh-theme-disabled-profile-{}", std::process::id()));
+        let package = root
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join("@p-dsh-market")
+            .join("disabled-theme");
+        fs::create_dir_all(package.join("theme")).expect("create disabled theme");
+        fs::write(
+            root.join("profiles").join("web").join("package.json"),
+            r#"{"dsh":{"profile":{"bundles":[]}},"dependencies":{"@p-dsh-market/disabled-theme":"1.0.0"}}"#,
+        )
+        .expect("write disabled profile manifest");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@p-dsh-market/disabled-theme","version":"1.0.0","description":"test","dsh":{"protocolVersion":1,"client":{"platform":"web"},"market":{"displayName":"Disabled Theme","capabilities":["skills","host","client","theme-pack"]},"theme":{"schemaVersion":1,"id":"disabled-theme","displayName":"Disabled Theme","entry":"./theme/theme.json","supportedAppearances":["dark"]}}}"#,
+        )
+        .expect("write disabled package manifest");
+        fs::write(
+            package.join("theme").join("theme.json"),
+            r##"{"schemaVersion":1,"appearance":"dark","tokens":{"shared":{"color.text.primary":"#FFFFFF"}}}"##,
+        )
+        .expect("write disabled theme manifest");
+        let packs = list_theme_packs(&root).expect("list disabled themes");
+        let disabled = packs
+            .iter()
+            .find(|pack| pack.id == "disabled-theme")
+            .expect("discover installed disabled theme");
+        assert!(disabled.installed);
+        assert!(!disabled.enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_package_relative_backgrounds_from_installed_pack() {
         let root = std::env::temp_dir().join(format!(
             "dsh-theme-relative-background-{}",
             std::process::id()
@@ -965,7 +852,7 @@ mod tests {
         fs::create_dir_all(package.join("assets")).expect("create test assets");
         fs::write(
             root.join("profiles").join("web").join("package.json"),
-            r#"{"dependencies":{"@p-dsh-market/neon-agent-theme":"0.2.0"}}"#,
+            r#"{"dsh":{"profile":{"bundles":["@p-dsh-market/neon-agent-theme"]}},"dependencies":{"@p-dsh-market/neon-agent-theme":"0.2.0"}}"#,
         )
         .expect("write profile manifest");
         fs::write(
@@ -987,7 +874,7 @@ mod tests {
         let packs = list_theme_packs(&root).expect("list themes");
         let neon = packs
             .iter()
-            .find(|pack| pack.id == BUILTIN_NEON_ID)
+            .find(|pack| pack.id == "neon-agent")
             .expect("find neon theme");
         assert_eq!(neon.source, "profile");
         assert_eq!(neon.version, "0.2.0");
@@ -997,7 +884,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|url| url.starts_with("data:image/png"))
         }));
-        validate_installed_theme_package(&root, BUILTIN_NEON_PACKAGE)
+        validate_installed_theme_package(&root, "@p-dsh-market/neon-agent-theme")
             .expect("installed theme should pass validation");
         let _ = fs::remove_dir_all(root);
     }

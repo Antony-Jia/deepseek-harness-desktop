@@ -14,7 +14,7 @@ const snapshotParameters = {
   additionalProperties: false,
   required: ['market'],
   properties: {
-    market: { type: 'string', enum: ['a-share', 'hk'] },
+    market: { type: 'string', enum: ['a-share', 'hk', 'us'] },
     query: { type: 'string' },
     filters: {
       type: 'object',
@@ -44,7 +44,7 @@ const historyParameters = (analysis = false) => ({
   additionalProperties: false,
   required: ['market', 'symbol'],
   properties: {
-    market: { type: 'string', enum: ['a-share', 'hk'] },
+    market: { type: 'string', enum: ['a-share', 'hk', 'us'] },
     symbol: { type: 'string' },
     period: { type: 'string', enum: ['daily', 'weekly', 'monthly'] },
     startDate: { type: 'string' },

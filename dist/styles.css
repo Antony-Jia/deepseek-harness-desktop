@@ -293,6 +293,66 @@ button.titlebar-brand {
 .market-operation-details summary { cursor: pointer; }
 .market-operation-details .install-log { max-height: 150px; margin-top: 10px; }
 .market-readonly-note { margin: 18px 0 0; padding: 14px 16px; border-radius: 12px; color: #ffe0a1; background: rgba(248, 180, 76, .10); font-size: 13px; }
+.app-loading-overlay,
+.market-confirm-modal {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.app-loading-overlay {
+  background: rgba(4, 8, 20, .48);
+  backdrop-filter: blur(4px);
+}
+.app-loading-panel {
+  display: grid;
+  width: min(390px, calc(100vw - 48px));
+  justify-items: center;
+  gap: 12px;
+  padding: 28px 30px;
+  border: 1px solid rgba(165, 180, 252, .24);
+  border-radius: 18px;
+  color: #eef2ff;
+  background: linear-gradient(135deg, rgba(24, 33, 62, .98), rgba(12, 19, 42, .96));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(255, 255, 255, .08);
+  text-align: center;
+}
+.app-loading-panel strong { font-size: 15px; }
+.app-loading-panel > span:last-child { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.loading-spinner {
+  display: block;
+  width: 30px;
+  height: 30px;
+  border: 3px solid rgba(166, 178, 255, .22);
+  border-top-color: var(--accent-strong);
+  border-right-color: var(--success);
+  border-radius: 50%;
+  animation: dsh-loading-spin .8s linear infinite;
+}
+@keyframes dsh-loading-spin { to { transform: rotate(360deg); } }
+.market-confirm-modal {
+  background: rgba(3, 7, 18, .58);
+  backdrop-filter: blur(5px);
+}
+.market-confirm-backdrop { position: absolute; inset: 0; }
+.market-confirm-dialog {
+  position: relative;
+  z-index: 1;
+  width: min(480px, calc(100vw - 48px));
+  padding: 27px 29px 24px;
+  border: 1px solid rgba(165, 180, 252, .28);
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(28, 38, 72, .99), rgba(13, 21, 45, .99));
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .46), inset 0 1px 0 rgba(255, 255, 255, .09);
+}
+.market-confirm-dialog h2 { margin-bottom: 12px; }
+.market-confirm-message { margin-bottom: 13px; color: #eef2ff; line-height: 1.65; overflow-wrap: anywhere; }
+.market-confirm-note { margin-bottom: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.market-confirm-note code { color: var(--accent-strong); font-family: Consolas, monospace; }
+.market-confirm-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+body.modal-open { overflow: hidden; }
 .hero { display: flex; gap: 18px; align-items: center; margin-bottom: 34px; }
 .brand-mark {
   display: grid; place-items: center; width: 64px; height: 64px; border-radius: 20px;

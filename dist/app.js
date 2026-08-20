@@ -19,8 +19,12 @@
   var marketResult = null
   var marketQuery = ''
   var marketBusy = false
+  var marketConfirming = false
+  var marketConfirmResolver = null
   var marketError = ''
   var marketOperation = null
+  var appLoadingMessage = ''
+  var appLoadingDetail = ''
   var pendingRestartNames = []
   var localDetecting = false
   var themePacks = []
@@ -38,15 +42,22 @@
   function el(id) { return document.getElementById(id) }
   function setText(id, value) { if (el(id)) el(id).textContent = value == null ? '' : String(value) }
   function setHidden(id, hidden) { if (el(id)) el(id).hidden = hidden }
+  function setAppLoading(message, detail) {
+    appLoadingMessage = message ? String(message) : ''
+    appLoadingDetail = detail ? String(detail) : ''
+    setText('app-loading-title', appLoadingMessage)
+    setText('app-loading-detail', appLoadingDetail)
+    setHidden('app-loading-overlay', !appLoadingMessage)
+    var overlay = el('app-loading-overlay')
+    if (overlay) overlay.setAttribute('aria-busy', appLoadingMessage ? 'true' : 'false')
+  }
+  function clearAppLoading() { setAppLoading('', '') }
   function effectiveTheme(theme) {
     return theme === 'light' || theme === 'dark' ? theme : (systemThemeMedia.matches ? 'dark' : 'light')
   }
   function fallbackThemePacks() {
     return [
-      { packageName: 'builtin.default', id: 'builtin.default', displayName: '默认主题', version: 'builtin', source: 'builtin', installed: true, enabled: true, protocolCompatible: true, appearance: 'light', supportedAppearances: ['light', 'dark'], tokens: {}, background: null, previewUrl: null },
-      { packageName: '@p-dsh-market/neon-agent-theme', id: 'neon-agent', displayName: 'Neon Agent', version: '0.1.0', source: 'builtin', installed: true, enabled: true, protocolCompatible: true, appearance: 'dark', supportedAppearances: ['dark'], tokens: {
-        'color.background.base': '#02040D', 'color.surface.primary': 'rgba(7, 14, 38, 0.90)', 'color.surface.secondary': 'rgba(12, 23, 58, 0.82)', 'color.text.primary': '#EDF4FF', 'color.text.secondary': '#879AC8', 'color.border.default': 'rgba(61, 105, 255, 0.35)', 'color.accent.primary': '#1976FF', 'color.accent.secondary': '#7B4DFF', 'color.success': '#3BD6AF', 'color.warning': '#F4C563', 'color.danger': '#FF708C', 'focus.ring': '0 0 0 3px rgba(25, 118, 255, 0.32)', 'desktop.titlebar.background': 'rgba(2, 6, 22, 0.90)', 'desktop.panel.backdropBlur': '12px', 'web.conversation.surface': 'rgba(4, 10, 29, 0.76)', 'web.sidebar.surface': 'rgba(3, 8, 24, 0.88)', 'components.button.background': 'rgba(22, 61, 155, 0.32)', 'components.button.hoverBackground': 'rgba(37, 91, 230, 0.50)', 'components.button.activeBackground': 'rgba(55, 105, 255, 0.62)', 'components.button.disabledBackground': 'rgba(38, 55, 105, 0.34)', 'components.button.text': '#EDF4FF', 'components.button.hoverText': '#FFFFFF', 'components.button.border': 'rgba(53, 112, 255, 0.55)', 'components.button.radius': '8px', 'components.button.shadow': '0 0 18px rgba(35, 103, 255, 0.18)', 'components.input.background': 'rgba(3, 10, 30, 0.78)', 'components.input.border': 'rgba(74, 116, 255, 0.38)', 'components.input.focusBorder': '#397CFF', 'components.input.placeholder': '#6576A5', 'components.input.caret': '#6CA5FF', 'components.panel.radius': '10px', 'components.panel.shadow': '0 0 24px rgba(21, 60, 180, 0.20)'
-      }, background: { imageUrl: './assets/neon-agent-background.png', targets: ['desktop.home', 'desktop.market', 'web.shell'], fit: 'cover', position: 'center', opacity: 0.32, overlay: 'rgba(1, 4, 15, 0.66)', blur: '0px', fixed: true }, previewUrl: './assets/neon-agent-background-with-operator.png' }
+      { packageName: 'builtin.default', id: 'builtin.default', displayName: '默认主题', version: 'builtin', source: 'builtin', installed: true, enabled: true, protocolCompatible: true, appearance: 'light', supportedAppearances: ['light', 'dark'], tokens: {}, background: null, previewUrl: null }
     ]
   }
   function availableThemePacks() {
@@ -58,6 +69,12 @@
       if (!current || (pack.source === 'profile' && current.source !== 'profile')) byId[pack.id] = pack
     })
     return Object.keys(byId).map(function (id) { return byId[id] })
+  }
+  function selectableThemePacks() {
+    return availableThemePacks().filter(function (pack) {
+      if (pack.id === 'builtin.default') return true
+      return pack.source === 'profile' && pack.installed === true && pack.enabled === true && pack.protocolCompatible === true && pendingRestartNames.indexOf(pack.packageName) < 0
+    })
   }
   function themePackById(id) {
     var packs = availableThemePacks()
@@ -71,7 +88,7 @@
     if (themePreviewId) id = themePreviewId
     var pack = themePackById(id)
     var active = effectiveTheme(snapshot && snapshot.appearanceMode ? snapshot.appearanceMode : 'system')
-    return pack && pack.id !== 'builtin.default' && packSupportsAppearance(pack, active) && pack.protocolCompatible !== false && pack.enabled !== false
+    return pack && pack.id !== 'builtin.default' && pack.source === 'profile' && pack.installed === true && packSupportsAppearance(pack, active) && pack.protocolCompatible === true && pack.enabled === true
       ? pack
       : themePackById('builtin.default')
   }
@@ -190,13 +207,13 @@
     var container = el('skin-options')
     if (!container) return
     container.replaceChildren()
-    availableThemePacks().forEach(function (pack) {
+    selectableThemePacks().forEach(function (pack) {
       var button = document.createElement('button')
       button.type = 'button'
       button.className = 'skin-option' + (activePack && activePack.id === pack.id ? ' active' : '')
       button.setAttribute('role', 'listitem')
       button.setAttribute('aria-pressed', activePack && activePack.id === pack.id ? 'true' : 'false')
-      button.disabled = desktopActionsBusy || pack.protocolCompatible === false || pack.enabled === false
+      button.disabled = desktopActionsBusy
       var preview = document.createElement('span')
       preview.className = 'skin-preview'
       if (pack.previewUrl) preview.style.backgroundImage = 'url("' + String(pack.previewUrl).replace(/"/g, '%22') + '")'
@@ -204,7 +221,7 @@
       var text = document.createElement('span')
       text.className = 'skin-option-copy'
       text.appendChild(makeNode('strong', null, pack.displayName || pack.id))
-      text.appendChild(makeNode('small', null, pack.id === 'builtin.default' ? '宿主内建' : (pack.source === 'profile' ? '已安装 · ' + pack.version : '本地示例 · 暗色')))
+      text.appendChild(makeNode('small', null, pack.id === 'builtin.default' ? '宿主内建' : '插件已启用 · ' + pack.version))
       button.appendChild(text)
       if (pack.error) button.title = pack.error
       button.addEventListener('click', function () { previewThemePack(pack) })
@@ -257,6 +274,7 @@
     document.querySelectorAll('[data-theme-choice]').forEach(function (button) { button.disabled = !!busy })
     renderSkinOptions(state || {}, activeSkinFor(state || {}))
     renderDesktopActions()
+    renderMarket()
   }
   function updateView() {
     var url = state && state.webUrl ? String(state.webUrl) : ''
@@ -333,7 +351,18 @@
   }
   function restartDsh() {
     if (!state || !state.webUrl) return
-    action(function () { return invokeOrThrow('restart_dsh') })
+    action(function () {
+      return invokeOrThrow('restart_dsh').then(function (result) {
+        setAppLoading('DSH 已重启，正在加载插件状态…', '正在重新读取 web profile 和桌面插件入口，请稍候。')
+        // restart_dsh stops and starts inside one command, so polling never
+        // observes the intermediate stopped state. Clear the install guard on
+        // successful restart so newly active titlebar contributions can load.
+        pendingRestartNames = []
+        desktopContributionsKey = ''
+        themePacksLoaded = false
+        return result
+      })
+    }, '正在重启 DSH…', '正在停止并重新启动运行时，请稍候。')
   }
   function postDshMessage(type, payload) {
     var frame = el('dsh-frame')
@@ -487,6 +516,7 @@
     var source = state && state.runtimeSource === 'local' ? '本地' : '桌面托管'
     var runtimeReady = marketResult ? !!marketResult.runtimeReady : true
     var packageManagerReady = marketResult ? !!marketResult.packageManagerReady : false
+    var interactionBusy = marketBusy || marketConfirming || desktopActionsBusy
     setText('market-runtime-title', runtimeReady ? '当前使用' + source + ' DSH' : '插件市场只读')
     setText('market-runtime-message', marketResult && marketResult.message
       ? marketResult.message
@@ -496,7 +526,7 @@
     var marketRestartButton = el('market-restart-dsh')
     if (marketRestartButton) {
       var marketCanRestart = !!(state && state.webUrl) && runtimeReady
-      marketRestartButton.disabled = !marketCanRestart || marketBusy || desktopActionsBusy
+      marketRestartButton.disabled = !marketCanRestart || interactionBusy || desktopActionsBusy
       marketRestartButton.title = marketCanRestart ? '停止并重新启动当前 DSH 工作区' : 'DSH 当前未运行，无法重启'
       marketRestartButton.setAttribute('aria-label', marketRestartButton.title)
     }
@@ -505,10 +535,10 @@
     var canSearch = !marketResult || (runtimeReady && packageManagerReady)
     var searchButton = el('market-search-button')
     if (searchButton) {
-      searchButton.disabled = marketBusy || !canSearch
+      searchButton.disabled = interactionBusy || !canSearch
       searchButton.textContent = marketBusy ? '处理中…' : '搜索'
     }
-    if (query) query.disabled = marketBusy || !canSearch
+    if (query) query.disabled = interactionBusy || !canSearch
     var message = marketError || (marketResult && marketResult.message) || ''
     if (!message && marketResult) message = marketResult.plugins.length + ' 个插件通过协议校验。'
     if (pendingRestartNames.length) {
@@ -526,7 +556,7 @@
     if (results) {
       results.replaceChildren()
       if (marketResult && marketResult.plugins && marketResult.plugins.length) {
-        marketResult.plugins.forEach(function (plugin) { results.appendChild(renderMarketPlugin(plugin, runtimeReady && packageManagerReady)) })
+        marketResult.plugins.forEach(function (plugin) { results.appendChild(renderMarketPlugin(plugin, runtimeReady && packageManagerReady && !interactionBusy)) })
       } else if (marketResult && runtimeReady && packageManagerReady && !marketBusy) {
         var empty = makeNode('div', 'market-empty', marketResult.message || '没有符合条件的插件。')
         results.appendChild(empty)
@@ -569,14 +599,14 @@
     if (plugin.theme && plugin.installed) {
       var previewButton = makeNode('button', 'button secondary', '预览主题')
       previewButton.type = 'button'
-      previewButton.disabled = !enabled || marketBusy
+      previewButton.disabled = !enabled || pendingRestartNames.indexOf(plugin.name) >= 0
       previewButton.title = '在 Desktop 设置中预览此主题包'
       previewButton.addEventListener('click', function () { previewMarketTheme(plugin) })
       footer.appendChild(previewButton)
     }
     var actionButton = makeNode('button', 'button ' + (plugin.installed ? 'danger-button' : 'primary'), plugin.installed ? (plugin.theme ? '卸载主题' : '卸载') : (plugin.theme ? '安装主题' : '安装'))
     actionButton.type = 'button'
-    actionButton.disabled = !enabled || marketBusy
+    actionButton.disabled = !enabled
     actionButton.title = plugin.installed ? (plugin.theme ? '卸载此主题包；当前主题会先回退默认主题' : '从 web profile 卸载此插件') : '安装搜索结果中的确定版本 ' + plugin.version
     actionButton.addEventListener('click', function () { runMarketOperation(plugin, plugin.installed ? 'uninstall' : 'install') })
     footer.appendChild(actionButton)
@@ -584,7 +614,7 @@
     return card
   }
   function previewMarketTheme(plugin) {
-    if (!plugin || marketBusy) return
+    if (!plugin || marketBusy || marketConfirming || desktopActionsBusy) return
     loadThemePacks(true).then(function () {
       var metadata = plugin.theme || {}
       var pack = availableThemePacks().find(function (item) {
@@ -598,11 +628,56 @@
       renderMarket()
     })
   }
+  function confirmMarketOperation(plugin, operation) {
+    if (marketConfirming || marketConfirmResolver) return Promise.resolve(false)
+    var installing = operation === 'install'
+    var noun = plugin.theme ? '主题包' : '插件'
+    var displayName = plugin.displayName || plugin.name
+    var version = installing ? '@' + plugin.version : ''
+    setText('market-confirm-title', installing ? '确认安装' + noun : '确认卸载' + noun)
+    setText('market-confirm-message', installing
+      ? '确认将 ' + displayName + '（' + plugin.name + version + '）安装到 DSH web profile？'
+      : '确认从 DSH web profile 卸载 ' + displayName + '（' + plugin.name + '）？')
+    marketConfirming = true
+    var modal = el('market-confirm-modal')
+    if (modal) {
+      modal.hidden = false
+      modal.setAttribute('aria-hidden', 'false')
+    }
+    document.body.classList.add('modal-open')
+    renderMarket()
+    return new Promise(function (resolve) {
+      marketConfirmResolver = resolve
+      window.setTimeout(function () {
+        var accept = el('market-confirm-accept')
+        if (accept) accept.focus()
+      }, 0)
+    })
+  }
+  function resolveMarketConfirmation(confirmed) {
+    var resolver = marketConfirmResolver
+    if (!resolver) return
+    marketConfirmResolver = null
+    marketConfirming = false
+    var modal = el('market-confirm-modal')
+    if (modal) {
+      modal.hidden = true
+      modal.setAttribute('aria-hidden', 'true')
+    }
+    document.body.classList.remove('modal-open')
+    if (confirmed) {
+      marketBusy = true
+      setAppLoading('正在准备插件操作…', '正在连接 npm 并准备更新 web profile，请稍候。')
+    }
+    renderMarket()
+    resolver(confirmed === true)
+  }
   function marketSearch(queryValue) {
-    if (marketBusy) return Promise.resolve()
+    if (marketBusy || marketConfirming) return Promise.resolve()
     marketQuery = String(queryValue == null ? '' : queryValue).trim()
     marketError = ''
     marketBusy = true
+    setAppLoading('正在向 npm 确认插件信息…', '正在读取市场目录、校验清单并同步 web profile 状态，请稍候。')
     renderMarket()
     return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (result) {
       marketResult = result || null
@@ -617,38 +692,46 @@
     }).finally(function () {
       marketBusy = false
       renderMarket()
+      clearAppLoading()
     })
   }
   function runMarketOperation(plugin, operation) {
-    if (marketBusy || !marketResult || !marketResult.runtimeReady || !marketResult.packageManagerReady) return
+    if (marketBusy || marketConfirming || !marketResult || !marketResult.runtimeReady || !marketResult.packageManagerReady) return
     var actionText = operation === 'install' ? '安装' : '卸载'
-    var confirmation = operation === 'install'
-      ? '确认安装 ' + plugin.name + '@' + plugin.version + ' 到 web profile？'
-      : '确认从 web profile 卸载 ' + plugin.name + '？'
-    if (typeof window.confirm === 'function' && !window.confirm(confirmation)) return
-    marketBusy = true
-    marketError = ''
-    marketOperation = { running: true, operation: operation, name: plugin.name, theme: !!plugin.theme, message: '正在' + actionText + '，请稍候…', log: '' }
-    renderMarket()
-    var command = operation === 'install' ? 'install_market_plugin' : 'uninstall_market_plugin'
-    var args = operation === 'install' ? { name: plugin.name, version: plugin.version } : { name: plugin.name }
-    invokeOrThrow(command, args).then(function (result) {
-      marketOperation = Object.assign({}, result || {}, { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: true })
-      if (result && result.restartRequired && pendingRestartNames.indexOf(plugin.name) < 0) pendingRestartNames.push(plugin.name)
-      return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (next) {
-        marketResult = next || marketResult
-        marketQuery = next && next.query != null ? String(next.query) : marketQuery
-      }).catch(function (error) {
-        marketError = '操作已完成，但刷新插件列表失败：' + messageOf(error)
-      }).then(function () {
-        return loadThemePacks(true).then(function () { return refreshDesktopContributions(true) })
-      })
-    }).catch(function (error) {
-      marketOperation = { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
-      marketError = messageOf(error)
-    }).finally(function () {
-      marketBusy = false
+    return confirmMarketOperation(plugin, operation).then(function (confirmed) {
+      if (!confirmed) return null
+      marketBusy = true
+      marketError = ''
+      marketOperation = { running: true, operation: operation, name: plugin.name, theme: !!plugin.theme, message: '正在' + actionText + '，请稍候…', log: '' }
+      setAppLoading(
+        operation === 'install' ? '正在向 npm 确认插件并安装…' : '正在卸载插件并复核状态…',
+        operation === 'install'
+          ? '正在校验精确版本、执行 pnpm 安装并复核 web profile。'
+          : '正在执行 pnpm 卸载并确认 web profile 已更新。'
+      )
       renderMarket()
+      var command = operation === 'install' ? 'install_market_plugin' : 'uninstall_market_plugin'
+      var args = operation === 'install' ? { name: plugin.name, version: plugin.version } : { name: plugin.name }
+      return invokeOrThrow(command, args).then(function (result) {
+        marketOperation = Object.assign({}, result || {}, { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: true })
+        if (result && result.restartRequired && pendingRestartNames.indexOf(plugin.name) < 0) pendingRestartNames.push(plugin.name)
+        setAppLoading(actionText + '完成，正在刷新市场状态…', '正在重新确认插件清单、主题状态和桌面入口，请稍候。')
+        return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (next) {
+          marketResult = next || marketResult
+          marketQuery = next && next.query != null ? String(next.query) : marketQuery
+        }).catch(function (error) {
+          marketError = '操作已完成，但刷新插件列表失败：' + messageOf(error)
+        }).then(function () {
+          return loadThemePacks(true).then(function () { return refreshDesktopContributions(true) })
+        })
+      }).catch(function (error) {
+        marketOperation = { running: false, operation: operation, name: plugin.name, theme: !!plugin.theme, ok: false, message: actionText + '失败：' + messageOf(error), log: messageOf(error) }
+        marketError = messageOf(error)
+      }).finally(function () {
+        marketBusy = false
+        renderMarket()
+        clearAppLoading()
+      })
     })
   }
   function loadThemePacks(force) {
@@ -856,12 +939,18 @@
       setText('status-pill', '错误')
     })
   }
-  function action(work) {
+  function action(work, loadingMessage, loadingDetail) {
     versionHint = ''
     setBusy(true)
+    if (loadingMessage) setAppLoading(loadingMessage, loadingDetail || '请稍候，操作完成后会自动刷新状态。')
     return Promise.resolve().then(work).catch(function (error) {
       render(Object.assign({}, state || {}, { status: 'failed', error: messageOf(error), message: '操作失败' }))
-    }).finally(function () { setBusy(false); return refresh() })
+    }).finally(function () {
+      setBusy(false)
+      return refresh().finally(function () {
+        if (loadingMessage) clearAppLoading()
+      })
+    })
   }
   function detectAction(work) {
     localDetecting = true
@@ -950,6 +1039,17 @@
   el('market-search-form').addEventListener('submit', function (event) {
     event.preventDefault()
     marketSearch(el('market-query').value)
+  })
+  el('market-confirm-cancel').addEventListener('click', function () { resolveMarketConfirmation(false) })
+  el('market-confirm-accept').addEventListener('click', function () { resolveMarketConfirmation(true) })
+  el('market-confirm-modal').addEventListener('click', function (event) {
+    if (event.target && event.target.getAttribute('data-market-confirm-cancel') === 'true') resolveMarketConfirmation(false)
+  })
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && marketConfirming) {
+      event.preventDefault()
+      resolveMarketConfirmation(false)
+    }
   })
   el('detect-local').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('detect_local_runtime') }) })
   el('use-local').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('set_runtime_source', { source: 'local' }) }) })

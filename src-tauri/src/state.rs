@@ -12,7 +12,7 @@ pub const THEME_LIGHT: &str = "light";
 pub const THEME_DARK: &str = "dark";
 pub const THEME_SYSTEM: &str = "system";
 pub const DEFAULT_SKIN_ID: &str = "builtin.default";
-pub const DEFAULT_BACKGROUND_INTENSITY: f32 = 0.32;
+pub const DEFAULT_BACKGROUND_INTENSITY: f32 = 0.58;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

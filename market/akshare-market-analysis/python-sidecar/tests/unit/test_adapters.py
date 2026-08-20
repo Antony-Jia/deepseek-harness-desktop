@@ -24,6 +24,21 @@ def test_normalizes_snapshot_aliases_for_a_share() -> None:
     assert quality["droppedRows"] == 1
 
 
+def test_normalizes_hk_and_us_snapshot_symbols() -> None:
+    hk_rows, _ = normalize_snapshot(Frame([
+        {"代码": "00001", "中文名称": "长和", "最新价": 69.5, "涨跌幅": 1.2},
+    ]), "hk")
+    us_rows, _ = normalize_snapshot(Frame([
+        {"symbol": "AAPL", "name": "AAPL", "close": 227.3, "volume": 1000},
+    ]), "us")
+    assert hk_rows[0]["symbol"] == "00001"
+    assert hk_rows[0]["name"] == "长和"
+    assert hk_rows[0]["currency"] == "HKD"
+    assert us_rows[0]["symbol"] == "AAPL"
+    assert us_rows[0]["price"] == 227.3
+    assert us_rows[0]["currency"] == "USD"
+
+
 def test_normalizes_history_orders_and_deduplicates() -> None:
     rows, quality = normalize_history(Frame([
         {"日期": "2026-08-19", "开盘": 12, "最高": 13, "最低": 11, "收盘": 12.5, "成交量": 100},

@@ -7,7 +7,7 @@ export const TOOL_NAMES = Object.freeze({
   history: 'akshare_stock_history',
   analysis: 'akshare_technical_analysis'
 })
-export const MARKETS = new Set(['a-share', 'hk'])
+export const MARKETS = new Set(['a-share', 'hk', 'us'])
 export const PERIODS = new Set(['daily', 'weekly', 'monthly'])
 export const ADJUSTMENTS = new Set(['none', 'qfq', 'hfq'])
 export const SNAPSHOT_FIELDS = new Set(['price', 'changePct', 'volume', 'amount', 'turnoverRate'])
@@ -41,7 +41,12 @@ function finiteNumber(value, label) {
 }
 
 export function normalizeSymbol(market, value) {
-  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share 或 hk。')
+  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share、hk 或 us。')
+  if (market === 'us') {
+    const raw = typeof value === 'string' ? value.trim().toUpperCase() : ''
+    if (!/^[A-Z0-9._-]{1,15}$/.test(raw) || !/[A-Z0-9]/.test(raw)) throw new ProtocolError('美股 symbol 必须是 1 到 15 位 ticker 字符串。')
+    return raw
+  }
   const raw = typeof value === 'number' && Number.isInteger(value) ? String(value) : typeof value === 'string' ? value.trim() : ''
   if (!/^\d+$/.test(raw)) throw new ProtocolError('symbol 只能包含数字。')
   const width = market === 'a-share' ? 6 : 5
@@ -71,9 +76,10 @@ function defaultDates() {
 export function normalizeSnapshotArgs(input = {}) {
   assertKeys(input, new Set(['market', 'query', 'filters', 'sort', 'limit']), 'snapshot')
   const market = input.market
-  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share 或 hk。')
+  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share、hk 或 us。')
   const query = input.query === undefined ? '' : input.query
   if (typeof query !== 'string' || query.length > 100) throw new ProtocolError('query 必须是有限长度字符串。')
+  if (market === 'us' && !query.trim()) throw new ProtocolError('美股快照需要在 query 中传入 ticker，例如 AAPL。')
   const filtersInput = input.filters === undefined || input.filters === null ? {} : input.filters
   assertKeys(filtersInput, SNAPSHOT_FIELDS, 'filters')
   const filters = {}
@@ -102,7 +108,7 @@ export function normalizeHistoryArgs(input = {}, { analysis = false } = {}) {
   if (analysis) allowed.add('indicators')
   assertKeys(input, allowed, 'history')
   const market = input.market
-  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share 或 hk。')
+  if (!MARKETS.has(market)) throw new ProtocolError('market 必须是 a-share、hk 或 us。')
   const symbol = normalizeSymbol(market, input.symbol)
   const dates = defaultDates()
   const startDate = normalizeDate(input.startDate === undefined ? dates.start : input.startDate, 'startDate')
@@ -112,6 +118,7 @@ export function normalizeHistoryArgs(input = {}, { analysis = false } = {}) {
   if (!PERIODS.has(period)) throw new ProtocolError('period 必须是 daily、weekly 或 monthly。')
   const adjust = input.adjust === undefined ? 'none' : input.adjust
   if (!ADJUSTMENTS.has(adjust)) throw new ProtocolError('adjust 必须是 none、qfq 或 hfq。')
+  if (market === 'us' && adjust === 'hfq') throw new ProtocolError('当前美股新浪接口不提供 hfq，改用 none 或 qfq。')
   const maxBars = input.maxBars === undefined ? 240 : input.maxBars
   if (!Number.isInteger(maxBars) || maxBars < 1 || maxBars > MAX_HISTORY_BARS) throw new ProtocolError(`maxBars 必须是 1 到 ${MAX_HISTORY_BARS} 的整数。`)
   const result = { market, symbol, period, startDate, endDate, adjust, maxBars }
@@ -195,7 +202,10 @@ export function contentText(value) {
   if (!isObject(value)) return '行情工具返回了空结果。'
   if (value.kind === 'snapshot') {
     const lines = [`市场：${value.market}；数据时间：${value.fetchedAt}；来源：${value.source}；匹配 ${value.totalMatched} 条${value.truncated ? '，结果已截断' : ''}。`]
-    if (value.delayMinutes) lines.push(`港股数据源可能延迟约 ${value.delayMinutes} 分钟。`)
+    if (value.delayMinutes) {
+      const marketLabel = value.market === 'hk' ? '港股' : value.market === 'us' ? '美股' : '行情'
+      lines.push(`${marketLabel}数据源可能延迟约 ${value.delayMinutes} 分钟，快照可能代表最近交易日数据。`)
+    }
     for (const row of (value.rows || []).slice(0, 20)) lines.push(`${row.symbol} ${row.name}：价格 ${row.price ?? '—'}，涨跌幅 ${row.changePct ?? '—'}%，成交额 ${row.amount ?? '—'}。`)
     return lines.join('\n')
   }

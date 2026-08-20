@@ -22,9 +22,66 @@ from .protocol import (
 from .provider import AkShareProvider, DataSourceError
 from .retry import retry_call
 
-SERVICE_VERSION = "0.1.0"
+SERVICE_VERSION = "0.1.1"
 MAX_RESPONSE_ROWS = 100
 LOGGER = logging.getLogger("akshare-sidecar")
+
+DEFAULT_SOURCES = {
+    ("snapshot", "a-share"): "AKShare/stock_zh_a_spot",
+    ("snapshot", "hk"): "AKShare/stock_hk_spot",
+    ("snapshot", "us"): "AKShare/stock_us_daily",
+    ("history", "a-share"): "AKShare/stock_zh_a_daily",
+    ("history", "hk"): "AKShare/stock_hk_daily",
+    ("history", "us"): "AKShare/stock_us_daily",
+}
+
+
+def _provider_source(provider: Any, operation: str, market: str) -> str:
+    source = getattr(provider, "source", None)
+    if callable(source):
+        try:
+            value = source(operation, market)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    return DEFAULT_SOURCES.get((operation, market), "AKShare")
+
+
+def _aggregate_bars(bars: list[dict[str, Any]], period: str) -> list[dict[str, Any]]:
+    if period == "daily":
+        return bars
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for bar in bars:
+        try:
+            day = datetime.fromisoformat(str(bar["date"])).date()
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = day.isocalendar()[:2] if period == "weekly" else (day.year, day.month)
+        grouped.setdefault((int(key[0]), int(key[1])), []).append(bar)
+
+    result: list[dict[str, Any]] = []
+    for entries in grouped.values():
+        first = entries[0]
+        last = entries[-1]
+        aggregated = {
+            "date": last["date"],
+            "open": first.get("open"),
+            "high": max((item["high"] for item in entries if item.get("high") is not None), default=None),
+            "low": min((item["low"] for item in entries if item.get("low") is not None), default=None),
+            "close": last.get("close"),
+            "volume": None,
+            "amount": None,
+            "changePct": None,
+            "turnoverRate": last.get("turnoverRate"),
+        }
+        for field in ("volume", "amount"):
+            values = [item[field] for item in entries if item.get(field) is not None]
+            aggregated[field] = sum(values) if values else None
+        if first.get("close") not in (None, 0) and last.get("close") is not None:
+            aggregated["changePct"] = (last["close"] / first["close"] - 1) * 100
+        result.append(aggregated)
+    return result
 
 
 class MarketService:
@@ -55,6 +112,12 @@ class MarketService:
             "schemaVersion": SCHEMA_VERSION,
             "serviceVersion": SERVICE_VERSION,
             "akshareVersion": self.akshare_version,
+            "markets": ["a-share", "hk", "us"],
+            "providers": {
+                "a-share": ["stock_zh_a_spot", "stock_zh_a_daily", "stock_zh_a_hist_tx", "stock_zh_a_spot_em", "stock_zh_a_hist"],
+                "hk": ["stock_hk_spot", "stock_hk_daily", "stock_hk_spot_em", "stock_hk_hist"],
+                "us": ["stock_us_daily", "stock_us_spot_em", "stock_us_hist"],
+            },
             "endpoints": [
                 "/health",
                 "/v1/market/snapshot",
@@ -84,12 +147,12 @@ class MarketService:
         started_at = monotonic()
         LOGGER.info("snapshot normalized market=%s queryPresent=%s limit=%d", args["market"], bool(args.get("query")), args["limit"])
         cache_key = self.cache.key({"schemaVersion": SCHEMA_VERSION, "akshareVersion": self.akshare_version, "endpoint": "snapshot", "args": args})
-        ttl = 60 if args["market"] == "hk" else 20
+        ttl = 60 if args["market"] in {"hk", "us"} else 20
         cached = self.cache.get(cache_key, ttl)
         if cached is not None:
             LOGGER.info("snapshot cache hit market=%s ttlSeconds=%d elapsedMs=%d", args["market"], ttl, int((monotonic() - started_at) * 1000))
             return {**cached, "cache": {"hit": True, "ttlSeconds": ttl}}
-        frame = self._call(lambda: self.provider.snapshot(args["market"]), "snapshot")
+        frame = self._call(lambda: self.provider.snapshot(args["market"], args.get("query", "")), "snapshot")
         source_rows, quality = normalize_snapshot(frame, args["market"])
         filtered = [row for row in source_rows if self._matches(row, args)]
         if args["sort"] is not None:
@@ -109,9 +172,9 @@ class MarketService:
             "totalMatched": total,
             "truncated": total > len(rows),
             "fetchedAt": now_iso(),
-            "source": "AKShare/stock_zh_a_spot_em" if args["market"] == "a-share" else "AKShare/stock_hk_spot_em",
+            "source": _provider_source(self.provider, "snapshot", args["market"]),
             "akshareVersion": self.akshare_version,
-            "delayMinutes": 15 if args["market"] == "hk" else None,
+            "delayMinutes": 15 if args["market"] in {"hk", "us"} else None,
             "quality": quality,
             "cache": {"hit": False, "ttlSeconds": ttl},
         }
@@ -149,6 +212,10 @@ class MarketService:
             return {**cached, "cache": {"hit": True, "ttlSeconds": ttl}}
         frame = self._call(lambda: self.provider.history(args["market"], args["symbol"], args["period"], args["startDate"], args["endDate"], args["adjust"]), endpoint)
         bars, quality = normalize_history(frame, args["market"])
+        bars = [bar for bar in bars if args["startDate"] <= bar["date"] <= args["endDate"]]
+        if args["period"] != "daily":
+            bars = _aggregate_bars(bars, args["period"])
+            quality["warnings"].append(f"已使用日线数据聚合为{args['period']}。")
         truncated = len(bars) > args["maxBars"]
         if truncated:
             bars = bars[-args["maxBars"] :]
@@ -161,11 +228,11 @@ class MarketService:
             "name": args["symbol"],
             "period": args["period"],
             "adjust": args["adjust"],
-            "currency": "CNY" if args["market"] == "a-share" else "HKD",
+            "currency": {"a-share": "CNY", "hk": "HKD", "us": "USD"}[args["market"]],
             "startDate": args["startDate"],
             "endDate": args["endDate"],
             "fetchedAt": now_iso(),
-            "source": "AKShare/stock_zh_a_hist" if args["market"] == "a-share" else "AKShare/stock_hk_hist",
+            "source": _provider_source(self.provider, "history", args["market"]),
             "akshareVersion": self.akshare_version,
             "bars": bars,
             "quality": quality,

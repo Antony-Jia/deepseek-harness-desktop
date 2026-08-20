@@ -210,6 +210,26 @@
         <p id="market-readonly-note" class="market-readonly-note" hidden>当前没有可调用的 DSH 运行时。请返回首页安装桌面托管运行时，或选择可用的本地运行时。</p>
       </div>
     </main>
+    <div id="app-loading-overlay" class="app-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
+      <div class="app-loading-panel">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <strong id="app-loading-title">正在处理…</strong>
+        <span id="app-loading-detail">请稍候，操作完成后会自动刷新状态。</span>
+      </div>
+    </div>
+    <div id="market-confirm-modal" class="market-confirm-modal" hidden aria-hidden="true">
+      <div class="market-confirm-backdrop" data-market-confirm-cancel="true"></div>
+      <section class="market-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="market-confirm-title" aria-describedby="market-confirm-message">
+        <p class="eyebrow">插件市场操作</p>
+        <h2 id="market-confirm-title">确认操作</h2>
+        <p id="market-confirm-message" class="market-confirm-message"></p>
+        <p class="market-confirm-note">操作会访问 npm 并更新当前 DSH <code>web</code> profile；完成后可能需要重启 DSH 才能生效。</p>
+        <div class="market-confirm-actions">
+          <button id="market-confirm-cancel" class="button secondary" type="button">取消</button>
+          <button id="market-confirm-accept" class="button primary" type="button">确认</button>
+        </div>
+      </section>
+    </div>
     <script src="./app.js"></script>
   </body>
 </html>

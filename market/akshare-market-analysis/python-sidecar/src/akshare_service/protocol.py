@@ -9,7 +9,7 @@ import math
 from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
-MARKETS = {"a-share", "hk"}
+MARKETS = {"a-share", "hk", "us"}
 PERIODS = {"daily", "weekly", "monthly"}
 ADJUSTMENTS = {"none", "qfq", "hfq"}
 SNAPSHOT_FIELDS = {"price", "changePct", "volume", "amount", "turnoverRate"}
@@ -66,8 +66,15 @@ def _default_dates() -> tuple[str, str]:
 
 def normalize_symbol(market: str, value: Any) -> str:
     if market not in MARKETS:
-        raise ProtocolError("market 必须是 a-share 或 hk。")
-    if not isinstance(value, str | int) or isinstance(value, bool):
+        raise ProtocolError("market 必须是 a-share、hk 或 us。")
+    if market == "us":
+        if not isinstance(value, str):
+            raise ProtocolError("美股 symbol 必须是 ticker 字符串。")
+        raw = value.strip().upper()
+        if not 1 <= len(raw) <= 15 or not all(char.isalnum() or char in ".-_" for char in raw) or not any(char.isalnum() for char in raw):
+            raise ProtocolError("美股 symbol 必须是 1 到 15 位字母、数字、点、短横线或下划线。")
+        return raw
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
         raise ProtocolError("symbol 必须是数字代码字符串。")
     raw = str(value).strip()
     if not raw.isdigit():
@@ -84,10 +91,12 @@ def normalize_snapshot_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     _assert_keys(payload, {"market", "query", "filters", "sort", "limit"}, "snapshot")
     market = payload.get("market")
     if market not in MARKETS:
-        raise ProtocolError("market 必须是 a-share 或 hk。")
+        raise ProtocolError("market 必须是 a-share、hk 或 us。")
     query = payload.get("query", "")
     if not isinstance(query, str) or len(query.strip()) > MAX_QUERY_LENGTH:
         raise ProtocolError("query 必须是有限长度字符串。")
+    if market == "us" and not query.strip():
+        raise ProtocolError("美股快照需要在 query 中传入 ticker，例如 AAPL。")
 
     raw_filters = payload.get("filters", {})
     if raw_filters is None:
@@ -141,7 +150,7 @@ def normalize_history_request(payload: Mapping[str, Any], *, analysis: bool = Fa
     _assert_keys(payload, allowed, "history")
     market = payload.get("market")
     if market not in MARKETS:
-        raise ProtocolError("market 必须是 a-share 或 hk。")
+        raise ProtocolError("market 必须是 a-share、hk 或 us。")
     symbol = normalize_symbol(market, payload.get("symbol"))
     period = payload.get("period", "daily")
     if period not in PERIODS:
@@ -154,6 +163,8 @@ def normalize_history_request(payload: Mapping[str, Any], *, analysis: bool = Fa
     adjust = payload.get("adjust", "none")
     if adjust not in ADJUSTMENTS:
         raise ProtocolError("adjust 必须是 none、qfq 或 hfq。")
+    if market == "us" and adjust == "hfq":
+        raise ProtocolError("当前美股新浪接口不提供 hfq，改用 none 或 qfq。")
     max_bars = payload.get("maxBars", 240)
     if isinstance(max_bars, bool) or not isinstance(max_bars, int) or not 1 <= max_bars <= MAX_HISTORY_BARS:
         raise ProtocolError(f"maxBars 必须是 1 到 {MAX_HISTORY_BARS} 的整数。")

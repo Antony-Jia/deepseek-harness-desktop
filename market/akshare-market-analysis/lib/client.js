@@ -47,7 +47,10 @@ window.__ModuleLoader__.load({
     }
 
     function notify() {
-      var snapshot = store
+      // React ignores state updates that reuse the same object identity. The
+      // store is intentionally mutated in place, so publish a fresh snapshot
+      // for every panel/open/resize change.
+      var snapshot = Object.assign({}, store)
       listeners.slice().forEach(function (listener) { listener(snapshot) })
       announceDesktop('analysis-panel-state', {
         open: snapshot.open,
@@ -205,9 +208,28 @@ window.__ModuleLoader__.load({
       return Array.isArray(meta && meta.bars) ? meta.bars : []
     }
 
-    function chartY(value, minimum, maximum, height, padding) {
-      if (maximum === minimum) return height / 2
-      return padding + (maximum - value) / (maximum - minimum) * (height - padding * 2)
+    function chartY(value, minimum, maximum, top, bottom) {
+      if (maximum === minimum) return (top + bottom) / 2
+      return top + (maximum - value) / (maximum - minimum) * (bottom - top)
+    }
+
+    function periodLabel(period) {
+      return period === 'weekly' ? '周线' : period === 'monthly' ? '月线' : '日线'
+    }
+
+    function chartTitle(meta) {
+      var identity = [meta.symbol, meta.name].filter(function (value) { return value }).join(' ')
+      var kind = meta.kind === 'analysis' ? 'K线与技术分析' : '历史K线'
+      return identity ? identity + ' · ' + kind : kind
+    }
+
+    function chartYAxisLabel(meta) {
+      return '价格' + (meta.currency ? '（' + meta.currency + '）' : '')
+    }
+
+    function formatAxisNumber(value) {
+      var number = finite(value)
+      return number === null ? '—' : formatNumber(number, Math.abs(number) < 1 ? 4 : 2)
     }
 
     function CandleChart(props) {
@@ -218,10 +240,13 @@ window.__ModuleLoader__.load({
       bars.forEach(function (bar) { ;[bar[2], bar[3], bar[1], bar[4]].forEach(function (value) { if (finite(value) !== null) numbers.push(Number(value)) }) })
       var minimum = Math.min.apply(Math, numbers)
       var maximum = Math.max.apply(Math, numbers)
-      var width = 720
-      var height = 280
-      var padding = 24
-      var step = (width - padding * 2) / Math.max(1, bars.length)
+      var width = 760
+      var height = 300
+      var plotLeft = 58
+      var plotRight = 14
+      var plotTop = 28
+      var plotBottom = height - 38
+      var step = (width - plotLeft - plotRight) / Math.max(1, bars.length)
       var bodyWidth = Math.max(2, step * 0.58)
       var children = []
       bars.forEach(function (bar, index) {
@@ -230,14 +255,14 @@ window.__ModuleLoader__.load({
         var low = finite(bar[3])
         var close = finite(bar[4])
         if (open === null || high === null || low === null || close === null) return
-        var x = padding + step * index + step / 2
+        var x = plotLeft + step * index + step / 2
         var color = close >= open ? 'var(--aka-up)' : 'var(--aka-down)'
-        var yHigh = chartY(high, minimum, maximum, height, padding)
-        var yLow = chartY(low, minimum, maximum, height, padding)
-        var yOpen = chartY(open, minimum, maximum, height, padding)
-        var yClose = chartY(close, minimum, maximum, height, padding)
+        var yHigh = chartY(high, minimum, maximum, plotTop, plotBottom)
+        var yLow = chartY(low, minimum, maximum, plotTop, plotBottom)
+        var yOpen = chartY(open, minimum, maximum, plotTop, plotBottom)
+        var yClose = chartY(close, minimum, maximum, plotTop, plotBottom)
         children.push(React.createElement('line', { key: 'wick-' + index, x1: x, x2: x, y1: yHigh, y2: yLow, stroke: color, strokeWidth: 1 }))
-        children.push(React.createElement('rect', { key: 'body-' + index, x: x - bodyWidth / 2, y: Math.min(yOpen, yClose), width: bodyWidth, height: Math.max(1, Math.abs(yOpen - yClose)), fill: color, opacity: 0.86 }))
+        children.push(React.createElement('rect', { key: 'body-' + index, x: x - bodyWidth / 2, y: Math.min(yOpen, yClose), width: bodyWidth, height: Math.max(1, Math.abs(yOpen - yClose)), fill: color, opacity: 0.96 }))
       })
       var series = meta.series || {}
       ;[['sma20', 'var(--aka-line)'], ['bollMiddle', 'var(--aka-band)']].forEach(function (entry) {
@@ -246,22 +271,43 @@ window.__ModuleLoader__.load({
         values.forEach(function (value, index) {
           var number = finite(value)
           if (number === null) return
-          var x = padding + step * index + step / 2
-          var y = chartY(number, minimum, maximum, height, padding)
+          var x = plotLeft + step * index + step / 2
+          var y = chartY(number, minimum, maximum, plotTop, plotBottom)
           points.push(x + ',' + y)
         })
         if (points.length > 1) children.push(React.createElement('polyline', { key: entry[0], points: points.join(' '), fill: 'none', stroke: entry[1], strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }))
       })
+      var yTickValues = [maximum]
+      if (minimum !== maximum) yTickValues.push((maximum + minimum) / 2, minimum)
+      var axisChildren = [
+        React.createElement('line', { key: 'axis-x', x1: plotLeft, x2: width - plotRight, y1: plotBottom, y2: plotBottom, className: 'aka-axis-line' }),
+        React.createElement('line', { key: 'axis-y', x1: plotLeft, x2: plotLeft, y1: plotTop, y2: plotBottom, className: 'aka-axis-line' })
+      ]
+      yTickValues.forEach(function (value, index) {
+        var y = chartY(value, minimum, maximum, plotTop, plotBottom)
+        axisChildren.push(React.createElement('line', { key: 'grid-' + index, x1: plotLeft, x2: width - plotRight, y1: y, y2: y, className: 'aka-grid' }))
+        axisChildren.push(React.createElement('text', { key: 'y-label-' + index, x: plotLeft - 8, y: y + 4, textAnchor: 'end', className: 'aka-axis-text' }, formatAxisNumber(value)))
+      })
+      var xTicks = [{ index: 0, label: formatDate(bars[0][0]) }]
+      if (bars.length > 1) xTicks.push({ index: bars.length - 1, label: formatDate(bars[bars.length - 1][0]) })
+      xTicks.forEach(function (tick, index) {
+        var x = plotLeft + step * tick.index + step / 2
+        axisChildren.push(React.createElement('line', { key: 'x-tick-' + index, x1: x, x2: x, y1: plotBottom, y2: plotBottom + 5, className: 'aka-axis-line' }))
+        axisChildren.push(React.createElement('text', { key: 'x-label-' + index, x: x, y: plotBottom + 17, textAnchor: index === 0 ? 'start' : 'end', className: 'aka-axis-text' }, tick.label))
+      })
+      var title = chartTitle(meta)
+      var yAxisLabel = chartYAxisLabel(meta)
+      var ariaLabel = title + '，横轴交易日期，纵轴' + yAxisLabel
+      axisChildren.push(React.createElement('text', { key: 'y-title', x: 15, y: (plotTop + plotBottom) / 2, textAnchor: 'middle', transform: 'rotate(-90 15 ' + ((plotTop + plotBottom) / 2) + ')', className: 'aka-axis-title' }, yAxisLabel))
+      axisChildren.push(React.createElement('text', { key: 'x-title', x: (plotLeft + width - plotRight) / 2, y: height - 4, textAnchor: 'middle', className: 'aka-axis-title' }, '交易日期'))
       return React.createElement('div', { className: 'aka-chart-wrap' }, [
-        React.createElement('svg', { key: 'svg', className: 'aka-chart', viewBox: '0 0 ' + width + ' ' + height, role: 'img', 'aria-label': 'K线图' }, [
-          React.createElement('line', { key: 'grid1', x1: padding, x2: width - padding, y1: padding, y2: padding, className: 'aka-grid' }),
-          React.createElement('line', { key: 'grid2', x1: padding, x2: width - padding, y1: height / 2, y2: height / 2, className: 'aka-grid' }),
-          React.createElement('line', { key: 'grid3', x1: padding, x2: width - padding, y1: height - padding, y2: height - padding, className: 'aka-grid' })
-        ].concat(children)),
-        React.createElement('div', { key: 'axis', className: 'aka-chart-axis' }, [
-          React.createElement('span', { key: 'start' }, formatDate(bars[0][0])),
-          React.createElement('span', { key: 'end' }, formatDate(bars[bars.length - 1][0]))
-        ])
+        React.createElement('div', { key: 'caption', className: 'aka-chart-caption' }, [
+          React.createElement('strong', { key: 'title' }, title),
+          React.createElement('span', { key: 'subtitle' }, periodLabel(meta.period) + ' · 复权：' + (meta.adjust || 'none') + ' · ' + bars.length + ' 根')
+        ]),
+        React.createElement('svg', { key: 'svg', className: 'aka-chart', viewBox: '0 0 ' + width + ' ' + height, role: 'img', 'aria-label': ariaLabel }, [
+          React.createElement('title', { key: 'svg-title' }, ariaLabel)
+        ].concat(axisChildren, children))
       ])
     }
 
@@ -351,14 +397,14 @@ window.__ModuleLoader__.load({
 
     var CSS = `
 .aka-overlay{position:fixed;inset:0;z-index:90;display:flex;justify-content:flex-end;background:rgba(3,8,20,.12)}
-.aka-panel{position:relative;height:100%;max-width:calc(100vw - 16px);display:flex;flex-direction:column;background:var(--color-surface-primary,rgba(18,24,40,.98));color:var(--color-text-primary,#e8edf7);border-left:1px solid var(--color-border-default,rgba(128,145,178,.28));box-shadow:-14px 0 38px rgba(0,0,0,.24);overflow:hidden}
+.aka-panel,.aka-tool{--aka-up:#e5484d;--aka-down:#00a870;--aka-line:#f59e0b;--aka-band:#3b82f6}.aka-panel{position:relative;height:100%;max-width:calc(100vw - 16px);display:flex;flex-direction:column;background:var(--color-surface-primary,rgba(18,24,40,.98));color:var(--color-text-primary,#e8edf7);border-left:1px solid var(--color-border-default,rgba(128,145,178,.28));box-shadow:-14px 0 38px rgba(0,0,0,.24);overflow:hidden}
 .aka-resize{position:absolute;left:-5px;top:0;bottom:0;width:10px;cursor:ew-resize;z-index:2}
 .aka-head{display:flex;align-items:center;gap:10px;min-height:58px;padding:10px 16px;border-bottom:1px solid var(--color-border-default,rgba(128,145,178,.2));background:var(--color-surface-secondary,rgba(25,32,52,.72))}
 .aka-title{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.aka-title strong{font-size:15px}.aka-title span,.aka-meta-line,.aka-foot{font-size:11px;color:var(--color-text-secondary,#8f9cb3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .aka-close,.aka-small-button,.aka-open-button{border:1px solid var(--color-border-default,rgba(128,145,178,.3));border-radius:6px;background:var(--components-button-background,rgba(90,110,150,.18));color:var(--color-text-primary,#e8edf7);cursor:pointer}.aka-close{font-size:22px;line-height:25px;width:30px;height:30px}.aka-small-button{padding:5px 8px;font-size:11px}.aka-open-button{padding:6px 10px;font-size:12px}.aka-close:hover,.aka-small-button:hover,.aka-open-button:hover{background:var(--components-button-hoverBackground,rgba(90,125,210,.3))}
 .aka-panel-body{min-height:0;flex:1;overflow:auto;padding:14px 16px}.aka-meta-line{margin-bottom:10px}.aka-panel-empty{flex:1;padding:42px 28px;color:var(--color-text-secondary,#8f9cb3);line-height:1.7}.aka-foot{padding:8px 16px;border-top:1px solid var(--color-border-default,rgba(128,145,178,.2))}
 .aka-table-wrap{overflow:auto;border:1px solid var(--color-border-default,rgba(128,145,178,.18));border-radius:7px}.aka-table{width:100%;border-collapse:collapse;font-size:12px}.aka-table th,.aka-table td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--color-border-default,rgba(128,145,178,.12));white-space:nowrap}.aka-table th{position:sticky;top:0;background:var(--color-surface-secondary,rgba(25,32,52,.98));color:var(--color-text-secondary,#8f9cb3);font-weight:500}.aka-table tr:last-child td{border-bottom:0}.aka-number{text-align:right!important;font-variant-numeric:tabular-nums}.aka-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.aka-up{color:var(--aka-up,#ef6e76)}.aka-down{color:var(--aka-down,#48bd91)}.aka-empty{padding:28px;text-align:center;color:var(--color-text-secondary,#8f9cb3)}
-.aka-chart-wrap{border:1px solid var(--color-border-default,rgba(128,145,178,.16));border-radius:7px;padding:8px;background:rgba(0,0,0,.06)}.aka-chart{display:block;width:100%;height:auto;min-height:180px}.aka-chart .aka-grid,.aka-grid{stroke:var(--color-border-default,rgba(128,145,178,.22));stroke-width:1;stroke-dasharray:3 4}.aka-chart-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--color-text-secondary,#8f9cb3);padding:4px 8px 0}.aka-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.aka-summary-card{display:flex;flex-direction:column;gap:5px;padding:9px;border:1px solid var(--color-border-default,rgba(128,145,178,.16));border-radius:7px;font-size:12px;line-height:1.45}.aka-summary-card strong{font-size:11px;color:var(--color-text-secondary,#8f9cb3)}.aka-warnings{grid-column:1/-1;padding:8px 10px;color:#d9ac5c;border:1px solid rgba(217,172,92,.28);border-radius:7px;font-size:11px;line-height:1.5}
+ .aka-chart-wrap{border:1px solid var(--color-border-default,rgba(128,145,178,.32));border-radius:7px;padding:8px;background:var(--color-surface-primary,rgba(18,24,40,.72))}.aka-chart-caption{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:0 2px 6px;min-width:0}.aka-chart-caption strong{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.aka-chart-caption span{font-size:10px;color:var(--color-text-secondary,#8f9cb3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.aka-chart{display:block;width:100%;height:auto;min-height:180px}.aka-chart .aka-grid,.aka-grid{stroke:var(--color-border-default,rgba(128,145,178,.38));stroke-width:1;stroke-dasharray:3 4}.aka-chart .aka-axis-line{stroke:var(--color-border-default,rgba(128,145,178,.52));stroke-width:1}.aka-chart .aka-axis-text{fill:var(--color-text-secondary,#8f9cb3);font-size:11px}.aka-chart .aka-axis-title{fill:var(--color-text-secondary,#8f9cb3);font-size:11px;font-weight:500}.aka-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.aka-summary-card{display:flex;flex-direction:column;gap:5px;padding:9px;border:1px solid var(--color-border-default,rgba(128,145,178,.16));border-radius:7px;font-size:12px;line-height:1.45}.aka-summary-card strong{font-size:11px;color:var(--color-text-secondary,#8f9cb3)}.aka-warnings{grid-column:1/-1;padding:8px 10px;color:#d9ac5c;border:1px solid rgba(217,172,92,.28);border-radius:7px;font-size:11px;line-height:1.5}
 .aka-tool{margin:6px 0;padding:10px;border:1px solid var(--color-border-default,rgba(128,145,178,.2));border-radius:8px;background:var(--color-surface-secondary,rgba(25,32,52,.36))}.aka-tool-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;font-size:12px}.aka-tool-head span{color:var(--color-text-secondary,#8f9cb3)}.aka-tool .aka-chart{max-height:190px}.aka-tool .aka-table{font-size:11px}.aka-tool .aka-table th,.aka-tool .aka-table td{padding:5px 6px}.aka-tool-running,.aka-tool-error{font-size:12px;color:var(--color-text-secondary,#8f9cb3)}.aka-tool-error{color:var(--color-danger,#ef6e76)}
 `
 

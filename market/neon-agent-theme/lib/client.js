@@ -11,7 +11,7 @@ window.__ModuleLoader__.load({
     // normal npm-started Harness as well and keeps the theme data out of DOM
     // selectors and arbitrary CSS.
     var tokens = {
-      '--dsw-alias-bg-base': '#02040D',
+      '--dsw-alias-bg-base': 'rgba(2, 4, 13, 0.64)',
       '--dsw-alias-bg-layer-1': 'rgba(7, 14, 38, 0.90)',
       '--dsw-alias-bg-layer-2': 'rgba(12, 23, 58, 0.82)',
       '--dsw-alias-label-primary': '#EDF4FF',

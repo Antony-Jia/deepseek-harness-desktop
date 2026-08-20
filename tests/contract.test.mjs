@@ -95,10 +95,18 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.match(html, /titlebar-market/)
   assert.match(html, /id="market-view"/)
   assert.match(html, /market-search-form/)
+  assert.match(html, /id="app-loading-overlay"/)
+  assert.match(html, /id="market-confirm-modal"/)
   assert.match(javascript, /viewMode = 'market'/)
   assert.match(javascript, /search_market_plugins/)
   assert.match(javascript, /install_market_plugin/)
   assert.match(javascript, /uninstall_market_plugin/)
+  assert.match(javascript, /function setAppLoading/)
+  assert.match(javascript, /function confirmMarketOperation/)
+  assert.match(javascript, /function resolveMarketConfirmation/)
+  assert.doesNotMatch(javascript, /window\.confirm/)
+  assert.match(javascript, /正在向 npm 确认插件信息/)
+  assert.match(javascript, /正在重启 DSH/)
   assert.match(javascript, /previewMarketTheme/)
   assert.match(javascript, /卸载此主题包；当前主题会先回退默认主题/)
   assert.equal(fixture.name, '@p-dsh-market/example')
@@ -180,6 +188,13 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   assert.match(javascript, /terminal-panel-toggle/)
   assert.match(javascript, /get_desktop_contributions/)
   assert.match(javascript, /function restartDsh/)
+  const restartSection = javascript.slice(
+    javascript.indexOf('function restartDsh'),
+    javascript.indexOf('function postDshMessage'),
+  )
+  assert.match(restartSection, /invokeOrThrow\('restart_dsh'\)\.then/)
+  assert.match(restartSection, /pendingRestartNames = \[\]/)
+  assert.match(restartSection, /desktopContributionsKey = ''/)
   assert.match(javascript, /desktop\.titlebar\.workspaceActions/)
   assert.match(rust, /fn get_desktop_contributions/)
   assert.match(desktopRust, /DESKTOP_TITLEBAR_WORKSPACE_ACTIONS/)
@@ -291,7 +306,7 @@ test('theme pack contract keeps the skin declarative and local', () => {
   assert.match(javascript, /set_background_preferences/)
   assert.match(styles, /data-skin="neon-agent"/)
   assert.equal(manifest.name, '@p-dsh-market/neon-agent-theme')
-  assert.equal(manifest.version, '0.1.1')
+  assert.equal(manifest.version, '0.1.2')
   assert.deepEqual(manifest.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-theme'])
   assert.equal(manifest.dsh.theme.schemaVersion, 1)
   assert.deepEqual(manifest.dsh.theme.supportedAppearances, ['dark'])
@@ -299,23 +314,35 @@ test('theme pack contract keeps the skin declarative and local', () => {
   assert.match(client, /service\.register\(/)
   assert.match(client, /id: 'neon-agent'/)
   assert.equal(theme.background.image, '../assets/background.png')
-  assert.equal(existsSync(file('dist/assets/neon-agent-background.png')), true)
-  assert.equal(existsSync(file('dist/assets/neon-agent-background-with-operator.png')), true)
+  assert.equal(theme.background.position, '68% center')
+  assert.deepEqual(
+    readFileSync(file('market/neon-agent-theme/assets/background.png')),
+    readFileSync(file('feature_doc/assets/neon-agent-background-with-operator.png')),
+  )
   assert.equal(existsSync(file('market/neon-agent-theme/assets/preview.png')), true)
+  assert.doesNotMatch(rust, /builtin_neon/)
+  const fallbackSection = javascript.slice(
+    javascript.indexOf('function fallbackThemePacks'),
+    javascript.indexOf('function availableThemePacks'),
+  )
+  assert.doesNotMatch(fallbackSection, /neon-agent/)
+  assert.match(javascript, /pack\.source === 'profile'/)
+  assert.match(javascript, /pack\.installed === true/)
 })
 
 test('desktop bridge projects theme packs through the DSH Web ThemeService', () => {
   const source = text('plugins/dsh-desktop-bridge/lib/client.js')
   assert.match(source, /ctx\.get\('theme'\)/)
-  assert.match(source, /service\.register\(definition\)/)
+  assert.doesNotMatch(source, /service\.register\(definition\)/)
   assert.match(source, /service\.setTheme\(skinId\)/)
-  assert.match(source, /--dsw-alias-bg-base/)
+  assert.match(source, /backgroundImage/)
   assert.doesNotMatch(source, /querySelector\(/)
 
   let moduleExports
   const listeners = new Map()
   const messages = []
   const parent = { postMessage: (message) => messages.push(message) }
+  const bodyStyle = {}
   const browserWindow = {
     parent,
     addEventListener: (type, listener) => listeners.set(type, listener),
@@ -333,9 +360,10 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
         },
       },
     },
+    document: { body: { style: bodyStyle } },
   })
 
-  const registered = []
+  const registered = [{ id: 'neon-agent', colorScheme: 'dark', tokens: {} }]
   let current = 'system'
   const service = {
     getTheme: () => ({ themes: [
@@ -343,13 +371,6 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
       { id: 'dark', colorScheme: 'dark', tokens: {} },
       ...registered,
     ] }),
-    register: (definition) => {
-      registered.push(definition)
-      return () => {
-        const index = registered.indexOf(definition)
-        if (index >= 0) registered.splice(index, 1)
-      }
-    },
     setTheme: (id) => { current = id },
   }
   const client = moduleExports
@@ -364,16 +385,35 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
       skinId: 'neon-agent',
       appearance: 'dark',
       appearanceMode: 'dark',
-      tokens: {
-        'color.background.base': '#02040D',
-        'web.sidebar.surface': 'rgba(3, 8, 24, 0.88)',
+      backgroundIntensity: 1,
+      background: {
+        imageUrl: 'data:image/png;base64,AAAA',
+        targets: ['web.shell'],
+        fit: 'cover',
+        position: '68% center',
+        overlay: 'rgba(1, 4, 15, 0.52)',
+        fixed: true,
       },
     },
   })
   assert.equal(current, 'neon-agent')
-  assert.equal(registered[0].tokens['--dsw-alias-bg-base'], '#02040D')
-  assert.equal(registered[0].tokens['--dsw-specific-sidebar-fill'], 'rgba(3, 8, 24, 0.88)')
+  assert.match(bodyStyle.backgroundImage, /data:image\/png;base64,AAAA/)
+  assert.equal(bodyStyle.backgroundPosition, '68% center')
   assert.equal(messages.at(-1).type, 'theme-applied')
+
+  registered.splice(0)
+  listener({
+    source: parent,
+    data: {
+      source: 'dsh-desktop',
+      type: 'dsh-theme-apply',
+      skinId: 'missing-theme',
+      appearance: 'dark',
+      appearanceMode: 'dark',
+    },
+  })
+  assert.equal(messages.at(-1).type, 'theme-error')
+  assert.match(messages.at(-1).message, /尚未在 DSH Web 注册/)
 
   listener({
     source: parent,
@@ -387,7 +427,7 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
     },
   })
   assert.equal(current, 'light')
-  assert.equal(registered.length, 0)
+  assert.equal(bodyStyle.backgroundImage, '')
   cleanup()
 })
 

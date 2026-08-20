@@ -10,6 +10,14 @@ uv run pytest
 uv run pyinstaller --noconfirm .\akshare-service.spec
 ```
 
+The spec explicitly bundles `py_mini_racer` and its native `mini_racer.dll`; the
+Sina A-share, Hong Kong, and U.S. history functions require that runtime file.
+
+The fixed provider order is Sina for A-share/Hong Kong snapshots and daily
+history, Tencent as the A-share history fallback, and Sina per-ticker daily
+history for U.S. data. Eastmoney remains a last-resort fallback and is not
+required for the normal paths.
+
 The service binds to `127.0.0.1` on an ephemeral port and requires the bearer
 token supplied in `DSH_AKSHARE_TOKEN`. It exposes only `/health`,
 `/v1/market/snapshot`, `/v1/stock/history`, and `/v1/stock/analysis`. It never

@@ -816,10 +816,26 @@ fn list_theme_packs(
 fn get_active_theme_pack(
     context: tauri::State<'_, DesktopContext>,
 ) -> Result<theme::ThemePackSummary, String> {
-    let state = context.store.load().map_err(io_error)?;
+    let mut state = context.store.load().map_err(io_error)?;
     let preview = current_theme_preview(&context);
     let id = theme::active_skin_id(&state, preview.as_ref().map(|item| item.id.as_str()));
-    theme::get_theme_pack(&context.dsh_home, &id)
+    match theme::get_theme_pack(&context.dsh_home, &id) {
+        Ok(pack)
+            if pack.id == DEFAULT_SKIN_ID
+                || (pack.source == "profile"
+                    && pack.installed
+                    && pack.enabled
+                    && pack.protocol_compatible) =>
+        {
+            Ok(pack)
+        }
+        _ => {
+            state.skin_id = DEFAULT_SKIN_ID.to_string();
+            context.store.save(&state).map_err(io_error)?;
+            cancel_theme_preview_inner(&context);
+            theme::get_theme_pack(&context.dsh_home, DEFAULT_SKIN_ID)
+        }
+    }
 }
 
 #[tauri::command]
@@ -828,7 +844,12 @@ fn preview_theme_pack(
     id: String,
 ) -> Result<ThemePreviewResult, String> {
     let pack = theme::get_theme_pack(&context.dsh_home, &id)?;
-    if !pack.protocol_compatible || !pack.enabled {
+    if pack.id != DEFAULT_SKIN_ID
+        && (pack.source != "profile"
+            || !pack.installed
+            || !pack.protocol_compatible
+            || !pack.enabled)
+    {
         return Err(pack
             .error
             .unwrap_or_else(|| format!("主题包 {id} 当前不可用。")));
@@ -882,6 +903,16 @@ fn confirm_theme_pack(context: tauri::State<'_, DesktopContext>, id: String) -> 
     if preview.expires_at <= now_millis() || preview.id != id {
         cancel_theme_preview_inner(&context);
         return Err("主题预览已过期，请重新预览。".to_string());
+    }
+    let pack = theme::get_theme_pack(&context.dsh_home, &id)?;
+    if pack.id != DEFAULT_SKIN_ID
+        && (pack.source != "profile"
+            || !pack.installed
+            || !pack.enabled
+            || !pack.protocol_compatible)
+    {
+        cancel_theme_preview_inner(&context);
+        return Err(format!("主题插件 {} 已不再可用。", pack.display_name));
     }
     let mut state = context.store.load().map_err(io_error)?;
     state.skin_id = id;
