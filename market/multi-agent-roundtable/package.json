@@ -1,0 +1,51 @@
+{
+  "name": "@p-dsh-market/multi-agent-roundtable",
+  "version": "0.1.0",
+  "description": "DSH 多 Agent 圆桌讨论：独立会话、角色 Prompt、交叉评审与 Markdown 消息流",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "multi-agent",
+    "roundtable",
+    "agent-review"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/orchestration.js",
+    "lib/protocol.js",
+    "lib/role-schema.js",
+    "presets/default-roles.json",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "多 Agent 圆桌讨论",
+      "capabilities": ["skills", "host", "client"]
+    }
+  }
+}

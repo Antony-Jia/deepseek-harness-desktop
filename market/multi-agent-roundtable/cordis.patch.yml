@@ -1,0 +1,4 @@
+- insert:
+    - id: p-dsh-market-multi-agent-roundtable
+      name: '@p-dsh-market/multi-agent-roundtable'
+      inject: [agents, settings, sessions, webServer]
