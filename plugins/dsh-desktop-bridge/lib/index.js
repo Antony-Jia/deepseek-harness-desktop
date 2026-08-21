@@ -4,12 +4,13 @@ const TOKEN = process.env.DSH_DESKTOP_TOKEN
 export default {
   // The plugin remains inert in a normal dsh web process. The client can
   // therefore share the user's profile with command-line DSH.
-  inject: ['sessions', 'webServer'],
+  inject: ['sessions', 'tools', 'webServer'],
 
   apply(ctx) {
     if (!CONTROL || !TOKEN) return
 
     const sessionService = ctx.get('sessions') ?? ctx.sessions
+    const toolService = ctx.get('tools') ?? ctx.tools
     const subscriptions = []
     const startedAt = new Map()
 
@@ -18,6 +19,11 @@ export default {
         registerRoute(ctx, 'POST', '/dsh-desktop-bridge/pick-folder', () => callControl('/pick-folder', 'POST')),
         registerRoute(ctx, 'POST', '/dsh-desktop-bridge/focus', () => callControl('/focus', 'POST')),
         registerRoute(ctx, 'GET', '/dsh-desktop-bridge/health', () => callControl('/health', 'GET')),
+        registerJsonRoute(ctx, 'GET', '/dsh-desktop-bridge/mcp-status', () => ({
+          ok: true,
+          tools: mcpToolNames(toolService),
+          observedAt: Date.now(),
+        })),
       )
 
       subscriptions.push(
@@ -60,6 +66,36 @@ export default {
       }
     })
   },
+}
+
+function registerJsonRoute(ctx, method, path, handler) {
+  const server = ctx.get('webServer') ?? ctx.webServer
+  if (!server?.register) return () => {}
+  return ctx.effect(() => server.register({
+    kind: 'exact',
+    path,
+    handler: async (_req, res) => {
+      try {
+        const body = JSON.stringify(await handler())
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(body)
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: messageOf(error) }))
+      }
+    },
+  }))
+}
+
+function mcpToolNames(toolService) {
+  if (!toolService || typeof toolService.schemas !== 'function') return []
+  return toolService.schemas()
+    .map((schema) => schema && typeof schema.name === 'string' ? schema.name : '')
+    .filter((name) => name.startsWith('mcp__'))
+    .sort()
 }
 
 function registerRoute(ctx, method, path, handler) {

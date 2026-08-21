@@ -2,6 +2,7 @@
 
 mod control;
 mod market;
+mod mcp;
 mod plugin;
 mod process;
 mod runtime;
@@ -13,6 +14,7 @@ use control::ControlServer;
 use market::{
     DesktopContributionsResult, MarketManager, MarketOperationResult, MarketSearchResult,
 };
+use mcp::{McpConfigResult, McpManager, McpRuntimeResult};
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
@@ -43,6 +45,7 @@ use tauri::{
 pub struct DesktopContext {
     manager: Arc<RuntimeManager>,
     market: Arc<MarketManager>,
+    mcp: Arc<McpManager>,
     store: StateStore,
     dsh_home: PathBuf,
     local_runtime: Arc<Mutex<Option<LocalRuntime>>>,
@@ -77,11 +80,13 @@ impl DesktopContext {
             .unwrap_or_else(|| env::temp_dir().join(".dsh"));
         let manager = Arc::new(RuntimeManager::new(base_dir.clone()));
         let market = Arc::new(MarketManager::new(base_dir.clone()));
+        let mcp = Arc::new(McpManager::new(base_dir.clone()));
         let store = StateStore::new(base_dir.join("state.json"));
         let _ = manager.ensure_layout();
         Self {
             manager,
             market,
+            mcp,
             store,
             dsh_home,
             local_runtime: Arc::new(Mutex::new(None)),
@@ -135,6 +140,9 @@ pub fn run() {
             search_market_plugins,
             install_market_plugin,
             uninstall_market_plugin,
+            list_mcp_servers,
+            save_mcp_server,
+            get_mcp_runtime_status,
             set_theme,
             list_theme_packs,
             get_active_theme_pack,
@@ -786,6 +794,98 @@ async fn uninstall_market_plugin(
 }
 
 #[tauri::command]
+fn list_mcp_servers(context: tauri::State<'_, DesktopContext>) -> Result<McpConfigResult, String> {
+    context.mcp.list()
+}
+
+#[tauri::command]
+fn save_mcp_server(
+    context: tauri::State<'_, DesktopContext>,
+    id: String,
+    enabled: bool,
+    api_key: Option<String>,
+    clear_api_key: bool,
+) -> Result<McpConfigResult, String> {
+    let running = is_dsh_running(&context);
+    let (mcp_command, mcp_command_args) = context.manager.mcp_npx_command();
+    let api_key_changed = api_key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || clear_api_key;
+    let mut result = context.mcp.save_server(
+        &context.dsh_home,
+        &mcp_command,
+        &mcp_command_args,
+        &id,
+        enabled,
+        api_key,
+        clear_api_key,
+    )?;
+    result.restart_required = running;
+    result.message = if running {
+        "配置已保存。重启 DSH 后会按当前开关重新注册 MCP 工具。".to_string()
+    } else {
+        "配置已保存。下次启动 DSH 时会按当前开关注册 MCP 工具。".to_string()
+    };
+    add_log(
+        &context,
+        format!("MCP 配置已更新: id={id} enabled={enabled} apiKeyChanged={api_key_changed}"),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+async fn get_mcp_runtime_status(
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<McpRuntimeResult, String> {
+    let url = context.process.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|process| process.is_running())
+            .map(|process| process.url.clone())
+    });
+    let manager = context.mcp.clone();
+    let Some(url) = url else {
+        return manager.runtime_status(false, Vec::new(), None);
+    };
+    tauri::async_runtime::spawn_blocking(move || match fetch_mcp_tool_names(&url) {
+        Ok(tools) => manager.runtime_status(true, tools, None),
+        Err(error) => manager.runtime_status(true, Vec::new(), Some(error)),
+    })
+    .await
+    .map_err(|error| format!("读取 MCP 运行状态失败：{error}"))?
+}
+
+fn fetch_mcp_tool_names(dsh_url: &str) -> Result<Vec<String>, String> {
+    let endpoint = format!(
+        "{}/dsh-desktop-bridge/mcp-status",
+        dsh_url.trim_end_matches('/')
+    );
+    let response = ureq::get(&endpoint)
+        .set("Accept", "application/json")
+        .set("User-Agent", "dsh-desktop-mcp-status")
+        .timeout(Duration::from_secs(3))
+        .call()
+        .map_err(|error| format!("状态端点请求失败: {error}"))?;
+    let payload = response
+        .into_string()
+        .map_err(|error| format!("状态端点响应读取失败: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| format!("状态端点响应不是有效 JSON: {error}"))?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("状态端点返回失败。".to_string());
+    }
+    Ok(value
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|name| name.starts_with("mcp__"))
+        .map(str::to_string)
+        .collect())
+}
+
+#[tauri::command]
 fn set_theme(context: tauri::State<'_, DesktopContext>, theme: String) -> Result<(), String> {
     if !matches!(theme.as_str(), THEME_LIGHT | THEME_DARK | THEME_SYSTEM) {
         return Err(format!("不支持的主题模式: {theme}"));
@@ -1221,6 +1321,11 @@ fn start_once(app: &AppHandle, context: &DesktopContext) -> Result<DshProcess, S
             );
             "尚未选择有效工作区".to_string()
         })?;
+    let (mcp_command, mcp_command_args) = context.manager.mcp_npx_command();
+    context
+        .mcp
+        .sync_profile(&context.dsh_home, &mcp_command, &mcp_command_args)?;
+    let mcp_environment = context.mcp.process_environment()?;
     if state.runtime_source == RUNTIME_SOURCE_LOCAL {
         let local = context.manager.detect_local();
         cache_local_runtime(context, local.clone());
@@ -1250,6 +1355,7 @@ fn start_once(app: &AppHandle, context: &DesktopContext) -> Result<DshProcess, S
                 &context.dsh_home,
                 &control_url,
                 &token,
+                &mcp_environment,
                 move |line| add_log(&context_for_log, line),
             );
         }
@@ -1308,6 +1414,7 @@ fn start_once(app: &AppHandle, context: &DesktopContext) -> Result<DshProcess, S
         &context.dsh_home,
         &control_url,
         &token,
+        &mcp_environment,
         move |line| add_log(&context_for_log, line),
     )
 }

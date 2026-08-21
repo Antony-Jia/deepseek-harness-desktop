@@ -83,6 +83,33 @@ impl RuntimeManager {
         }
     }
 
+    pub fn npx_command(&self) -> PathBuf {
+        let portable = self
+            .node_dir
+            .join(if cfg!(windows) { "npx.cmd" } else { "npx" });
+        if portable.is_file() {
+            portable
+        } else if cfg!(windows) {
+            PathBuf::from("npx.cmd")
+        } else {
+            PathBuf::from("npx")
+        }
+    }
+
+    pub fn mcp_npx_command(&self) -> (PathBuf, Vec<String>) {
+        let cli = self
+            .node_dir
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npx-cli.js");
+        if cli.is_file() {
+            (self.node_command(), vec![cli.to_string_lossy().to_string()])
+        } else {
+            (self.npx_command(), Vec::new())
+        }
+    }
+
     pub fn npm_command(&self) -> (PathBuf, Option<PathBuf>) {
         let node = self.node_command();
         let portable_cli = self

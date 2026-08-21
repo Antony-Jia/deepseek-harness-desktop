@@ -30,7 +30,7 @@ pub fn ensure_profile_plugin(source: Option<&Path>, dsh_home: &Path) -> Result<b
         content.push_str("\n\n");
     }
     content.push_str(&format!(
-        "{DESKTOP_BEGIN}\n- insert:\n    - id: {PLUGIN_NAME}\n      name: {PLUGIN_NAME}\n      inject: [sessions, webServer]\n{DESKTOP_END}\n"
+        "{DESKTOP_BEGIN}\n- insert:\n    - id: {PLUGIN_NAME}\n      name: {PLUGIN_NAME}\n      inject: [sessions, tools, webServer]\n{DESKTOP_END}\n"
     ));
     if content != existing {
         atomic_write(&patch_path, content.as_bytes()).map_err(io_error)?;

@@ -26,6 +26,13 @@
   var marketOperation = null
   var marketCategory = 'all'
   var marketSelectedPlugin = null
+  var mcpResult = null
+  var mcpBusy = false
+  var mcpError = ''
+  var mcpDraftEnabled = {}
+  var mcpRuntimeResult = null
+  var mcpRuntimeRequest = null
+  var mcpRuntimeCheckedAt = 0
   var appLoadingMessage = ''
   var appLoadingDetail = ''
   var pendingRestartNames = []
@@ -270,7 +277,7 @@
   }
   function setBusy(busy) {
     desktopActionsBusy = !!busy
-    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
@@ -278,11 +285,12 @@
     renderSkinOptions(state || {}, activeSkinFor(state || {}))
     renderDesktopActions()
     renderMarket()
+    renderMcp()
   }
   function updateView() {
     var url = state && state.webUrl ? String(state.webUrl) : ''
     if (url) {
-      if (!autoOpenedUrl && viewMode !== 'market') viewMode = 'dsh'
+      if (!autoOpenedUrl && viewMode !== 'market' && viewMode !== 'mcp') viewMode = 'dsh'
       autoOpenedUrl = url
     } else if (viewMode === 'dsh') {
       viewMode = 'home'
@@ -292,14 +300,16 @@
     }
     var showingDsh = !!url && viewMode === 'dsh'
     var showingMarket = viewMode === 'market'
-    setHidden('setup-view', showingDsh || showingMarket)
+    var showingMcp = viewMode === 'mcp'
+    setHidden('setup-view', showingDsh || showingMarket || showingMcp)
     setHidden('dsh-view', !showingDsh)
     setHidden('market-view', !showingMarket)
+    setHidden('mcp-view', !showingMcp)
     setHidden('app-actions', !showingDsh)
     var titlebarHome = el('titlebar-home')
     if (titlebarHome) {
-      titlebarHome.disabled = !url && !showingMarket
-      titlebarHome.title = showingMarket
+      titlebarHome.disabled = !url && !showingMarket && !showingMcp
+      titlebarHome.title = showingMarket || showingMcp
         ? (url ? '进入 DSH 页面' : '返回配置首页')
         : (!url ? 'DSH 未启动，无法切换页面' : (showingDsh ? '返回配置首页' : '进入 DSH 页面'))
       titlebarHome.setAttribute('aria-label', titlebarHome.title)
@@ -308,6 +318,11 @@
     if (marketButton) {
       marketButton.classList.toggle('active', showingMarket)
       marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
+    }
+    var mcpButton = el('titlebar-mcp')
+    if (mcpButton) {
+      mcpButton.classList.toggle('active', showingMcp)
+      mcpButton.setAttribute('aria-pressed', showingMcp ? 'true' : 'false')
     }
     if (!showingMarket) closeMarketDetail()
     renderDesktopActions()
@@ -338,6 +353,11 @@
     viewMode = 'market'
     updateView()
     if (!marketBusy) marketSearch(marketResult ? marketQuery : '')
+  }
+  function openMcp() {
+    viewMode = 'mcp'
+    updateView()
+    if (!mcpBusy) loadMcpServers()
   }
   function enterDsh() {
     if (state && state.webUrl) {
@@ -882,6 +902,128 @@
       })
     })
   }
+  function mcpServerById(id) {
+    var servers = mcpResult && Array.isArray(mcpResult.servers) ? mcpResult.servers : []
+    return servers.find(function (server) { return server.id === id }) || null
+  }
+  function mcpRuntimeServerById(id) {
+    var servers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
+    return servers.find(function (server) { return server.id === id }) || null
+  }
+  function syncMcpDrafts(result, force) {
+    var servers = result && Array.isArray(result.servers) ? result.servers : []
+    servers.forEach(function (server) {
+      if (!server || !server.id) return
+      if (force || !Object.prototype.hasOwnProperty.call(mcpDraftEnabled, server.id)) {
+        mcpDraftEnabled[server.id] = !!server.enabled
+      }
+    })
+  }
+  function renderMcp() {
+    var running = !!(state && state.webUrl)
+    var runtimeServers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
+    var enabledCount = runtimeServers.filter(function (server) { return server.status !== 'disabled' }).length
+    var connectedCount = runtimeServers.filter(function (server) { return server.status === 'connected' }).length
+    setText('mcp-runtime-title', !running ? 'DSH 当前未启动' : connectedCount ? 'MCP 工具已注入 Harness' : enabledCount ? 'MCP 尚未连接' : '没有启用的 MCP 服务')
+    setText('mcp-runtime-pill', !running ? '已停止' : connectedCount + '/' + enabledCount + ' 已连接')
+    if (el('mcp-runtime-pill')) el('mcp-runtime-pill').className = 'pill ' + (connectedCount ? 'good' : enabledCount ? 'warn' : 'neutral')
+    setText('mcp-message', mcpError || (mcpRuntimeResult && mcpRuntimeResult.message) || (mcpResult && mcpResult.message) || 'API Key 使用当前 Windows 用户的 DPAPI 加密且不会回显；配置变更将在下次启动或重启 DSH 时生效。')
+    var restart = el('mcp-restart-dsh')
+    if (restart) restart.disabled = !running || mcpBusy || desktopActionsBusy
+    ;['tavily', 'firecrawl'].forEach(function (id) {
+      var server = mcpServerById(id)
+      var runtimeServer = mcpRuntimeServerById(id)
+      var enabled = el('mcp-' + id + '-enabled')
+      var key = el('mcp-' + id + '-key')
+      var save = document.querySelector('[data-mcp-save="' + id + '"]')
+      if (enabled && server) {
+        enabled.checked = Object.prototype.hasOwnProperty.call(mcpDraftEnabled, id)
+          ? !!mcpDraftEnabled[id]
+          : !!server.enabled
+      }
+      if (enabled) enabled.disabled = mcpBusy || desktopActionsBusy
+      if (key) {
+        key.disabled = mcpBusy || desktopActionsBusy
+        key.placeholder = server && server.apiKeyConfigured ? '已配置；留空会保留当前 Key' : '填写 API Key 后即可启用'
+      }
+      if (save) save.disabled = mcpBusy || desktopActionsBusy
+      var status = el('mcp-' + id + '-status')
+      if (status) {
+        var toolSummary = runtimeServer && Array.isArray(runtimeServer.tools)
+          ? runtimeServer.tools.slice(0, 4).map(function (name) { return name.replace('mcp__' + id + '__', '') }).join('、')
+          : ''
+        status.textContent = !server
+          ? '正在读取配置…'
+          : runtimeServer && runtimeServer.status === 'connected'
+            ? runtimeServer.message + (toolSummary ? ' ' + toolSummary + (runtimeServer.toolCount > 4 ? ' 等' : '') : '')
+          : server.enabled
+            ? ((runtimeServer && runtimeServer.message) || (server.apiKeyConfigured ? '已启用；重启 DSH 后注册工具。' : '缺少 API Key。'))
+            : (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。')
+        status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : server && server.enabled ? 'warn' : server && server.apiKeyConfigured ? '' : 'warn')
+      }
+    })
+  }
+  function refreshMcpRuntimeStatus(force) {
+    if (!invoke || mcpRuntimeRequest) return mcpRuntimeRequest || Promise.resolve(mcpRuntimeResult)
+    if (!force && Date.now() - mcpRuntimeCheckedAt < 2000) return Promise.resolve(mcpRuntimeResult)
+    mcpRuntimeCheckedAt = Date.now()
+    mcpRuntimeRequest = invokeOrThrow('get_mcp_runtime_status').then(function (result) {
+      mcpRuntimeResult = result || null
+      renderMcp()
+      return mcpRuntimeResult
+    }).catch(function (error) {
+      mcpError = '读取 MCP 启动状态失败：' + messageOf(error)
+      renderMcp()
+      return null
+    }).finally(function () {
+      mcpRuntimeRequest = null
+    })
+    return mcpRuntimeRequest
+  }
+  function loadMcpServers() {
+    if (mcpBusy) return Promise.resolve()
+    mcpBusy = true
+    mcpError = ''
+    renderMcp()
+    return invokeOrThrow('list_mcp_servers').then(function (result) {
+      mcpResult = result || { servers: [] }
+      syncMcpDrafts(mcpResult, true)
+    }).catch(function (error) {
+      mcpError = '读取 MCP 配置失败：' + messageOf(error)
+    }).finally(function () {
+      mcpBusy = false
+      renderMcp()
+      refreshMcpRuntimeStatus(true)
+    })
+  }
+  function saveMcpServer(id) {
+    if (mcpBusy || desktopActionsBusy) return
+    var enabled = el('mcp-' + id + '-enabled')
+    var key = el('mcp-' + id + '-key')
+    var apiKey = key ? key.value.trim() : ''
+    mcpBusy = true
+    mcpError = ''
+    setAppLoading('正在保存 MCP 配置', '配置将写入 DSH web profile，API Key 不会显示在界面中。')
+    renderMcp()
+    invokeOrThrow('save_mcp_server', {
+      id: id,
+      enabled: !!(enabled && enabled.checked),
+      apiKey: apiKey || null,
+      clearApiKey: false
+    }).then(function (result) {
+      mcpResult = result || mcpResult
+      syncMcpDrafts(mcpResult, true)
+      if (key) key.value = ''
+    }).catch(function (error) {
+      mcpError = '保存失败：' + messageOf(error)
+      syncMcpDrafts(mcpResult, true)
+    }).finally(function () {
+      mcpBusy = false
+      clearAppLoading()
+      renderMcp()
+      refreshMcpRuntimeStatus(true)
+    })
+  }
   function loadThemePacks(force) {
     if (!invoke) return Promise.resolve(themePacks)
     if (!force && themePacksLoaded) return Promise.resolve(themePacks)
@@ -972,6 +1114,8 @@
     applyTheme(state)
     updateView()
     renderMarket()
+    renderMcp()
+    if (viewMode === 'mcp') refreshMcpRuntimeStatus(false)
     var meta = statusMeta(state.status)
     setText('status-title', state.message || '等待操作')
     setText('status-pill', meta[0])
@@ -1130,7 +1274,7 @@
   })
   el('titlebar-home').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-home').addEventListener('click', function () {
-    if (viewMode === 'market') {
+    if (viewMode === 'market' || viewMode === 'mcp') {
       if (state && state.webUrl) { viewMode = 'dsh'; updateView() } else showHome()
       return
     }
@@ -1140,6 +1284,8 @@
   })
   el('titlebar-market').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-market').addEventListener('click', openMarket)
+  el('titlebar-mcp').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-mcp').addEventListener('click', openMcp)
   window.addEventListener('message', function (event) {
     var frame = el('dsh-frame')
     if (!frame || event.source !== frame.contentWindow) return
@@ -1190,6 +1336,20 @@
     action(function () { return invokeOrThrow('stop_dsh') })
   })
   el('market-back-home').addEventListener('click', function () { showHome() })
+  el('mcp-back-home').addEventListener('click', function () { showHome() })
+  document.querySelectorAll('[data-mcp-save]').forEach(function (button) {
+    button.addEventListener('click', function () { saveMcpServer(button.getAttribute('data-mcp-save')) })
+  })
+  document.querySelectorAll('[data-mcp-server] input[type="checkbox"]').forEach(function (checkbox) {
+    checkbox.addEventListener('change', function () {
+      var card = checkbox.closest('[data-mcp-server]')
+      var id = card && card.getAttribute('data-mcp-server')
+      if (id) {
+        mcpDraftEnabled[id] = checkbox.checked
+        saveMcpServer(id)
+      }
+    })
+  })
   el('market-search-form').addEventListener('submit', function (event) {
     event.preventDefault()
     marketSearch(el('market-query').value)
@@ -1261,6 +1421,7 @@
   el('toggle-dsh').addEventListener('click', toggleDsh)
   el('restart-dsh').addEventListener('click', restartDsh)
   el('market-restart-dsh').addEventListener('click', restartDsh)
+  el('mcp-restart-dsh').addEventListener('click', restartDsh)
   el('enter-dsh').addEventListener('click', enterDsh)
   el('primary-action').addEventListener('click', function () {
     action(function () { return state && state.status === 'needs_workspace' ? invokeOrThrow('choose_workspace') : invokeOrThrow('start_dsh') })

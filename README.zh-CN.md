@@ -10,9 +10,9 @@ DSH Desktop 是一个基于 Windows/Tauri 的桌面客户端，用于管理并�
 ## 下载与安装
 
 当前 Windows x64 安装包位于
-[GitHub v0.1.2 Release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.2)：
+[GitHub v0.1.3 Release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.3)：
 
-[下载 DSH Desktop Windows 安装包](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.2/DSH.Desktop_0.1.2_x64-setup.exe)
+[下载 DSH Desktop Windows 安装包](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.3/DSH.Desktop_0.1.3_x64-setup.exe)
 
 安装包内置经过 SHA256 校验的 Node.js v24.19.0 x64 运行时，因此目标电脑不需要预先安装 Node.js、npm 或 npx。首次安装桌面托管版 DSH 时，仍需要联网从 npm registry 下载所选的 `@deepseek-ai/dsh` 版本。
 
@@ -24,11 +24,19 @@ DSH Desktop 是一个基于 Windows/Tauri 的桌面客户端，用于管理并�
 - Web/控制端口仅监听回环地址，使用随机 Bearer token，并通过配置了 `KILL_ON_JOB_CLOSE` 的 Windows Job Object 管理子进程。
 - 支持系统中的本地 DSH，也支持独立的桌面托管 DSH。托管版本安装在独立目录中，不会覆盖系统 npm。
 - 提供面向 Web profile 的插件市场，可搜索、安装和卸载通过清单协议校验的插件与主题包，并按安装、启用和协议兼容状态控制入口。
+- 在插件市场旁提供 MCP 管理入口，通过 DSH 官方 MCP Client 注册工具；内置默认关闭的 Tavily Search 与 Firecrawl，填写 API Key 后可按需启用。
 - 支持受控的桌面顶栏扩展、工作区文件浏览、终端、股票行情分析和多 Agent 圆桌讨论。
 - 在恢复首页显示启动、安装、更新和失败日志。
 - 提供可见的系统托盘图标、原生通知桥接和无边框窗口控制。
 - 将窗口位置、尺寸、最大化状态、外观模式、界面皮肤、背景强度和减少效果偏好保存到 `%LOCALAPPDATA%/dsh-desktop/state.json`。
 - 提供受控的 Neon Agent Theme Pack 预览、15 秒确认回退、本地背景资源和默认主题恢复；主题包不能携带任意 CSS、selector、远程资源或桌面命令。
+
+### MCP 管理
+
+插件市场旁的 MCP 页面用于管理默认关闭的 Tavily Search 和 Firecrawl
+预设。填写 API Key 并保存后，重启 DSH 即可通过官方
+`@deepseek-ai/dsh-mcp-client` 注册工具。API Key 使用 Windows DPAPI 保护，
+不会在界面中回显；两个预设只有在用户明确启用后才会生效。
 
 ## 界面预览
 
@@ -95,7 +103,7 @@ npm run build
 Windows NSIS 安装包生成在：
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.2_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.3_x64-setup.exe
 ```
 
 `.gitignore` 会忽略 `src-tauri/target/`、`dist/bundle/`、portable Node 二进制和安装包文件；这些内容只作为 release 构建输入或输出，不应提交到源码仓库。

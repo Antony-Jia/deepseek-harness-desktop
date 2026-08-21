@@ -19,6 +19,7 @@
         <div class="titlebar-tools" aria-label="工作区工具">
           <div id="titlebar-plugin-actions" class="titlebar-plugin-actions" aria-label="插件工作区操作"></div>
           <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
+          <button id="titlebar-mcp" class="titlebar-market" type="button" title="打开 MCP 管理" aria-label="打开 MCP 管理" aria-pressed="false">MCP</button>
         </div>
       </div>
       <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作" hidden>
@@ -290,6 +291,75 @@
           <div class="market-detail-actions" id="market-detail-actions"></div>
         </section>
       </aside>
+    </main>
+    <main id="mcp-view" class="market-view" hidden>
+      <div class="market-shell mcp-shell">
+        <section class="market-hero">
+          <div>
+            <p class="eyebrow">DSH Desktop / MCP</p>
+            <h1>MCP 管理</h1>
+            <p class="subtitle">配置外部工具并注册到 DeepSeek Harness。服务默认关闭，由你决定是否启用。</p>
+          </div>
+          <button id="mcp-back-home" class="button ghost" type="button">返回首页</button>
+        </section>
+
+        <section class="card market-runtime-card" aria-live="polite">
+          <div>
+            <p class="eyebrow">注册状态</p>
+            <h2 id="mcp-runtime-title">正在读取 MCP 配置</h2>
+            <p id="mcp-message" class="muted">API Key 使用当前 Windows 用户的 DPAPI 加密且不会回显；配置变更将在下次启动或重启 DSH 时生效。</p>
+          </div>
+          <div class="market-runtime-controls">
+            <span id="mcp-runtime-pill" class="pill neutral">未检查</span>
+            <button id="mcp-restart-dsh" class="button secondary" type="button" disabled>重启 DSH</button>
+          </div>
+        </section>
+
+        <div id="mcp-server-list" class="mcp-server-list" aria-live="polite">
+          <article class="card mcp-server-card" data-mcp-server="tavily">
+            <div class="mcp-server-heading">
+              <div class="mcp-server-icon">T</div>
+              <div>
+                <p class="eyebrow">默认搜索</p>
+                <h2>Tavily Search</h2>
+                <code>tavily-mcp@0.2.22</code>
+              </div>
+              <label class="mcp-switch"><input id="mcp-tavily-enabled" type="checkbox" /><span>启用</span></label>
+            </div>
+            <p class="mcp-server-description">为模型提供实时网页搜索、正文提取、地图与站点抓取工具。</p>
+            <label class="mcp-key-label" for="mcp-tavily-key">Tavily API Key</label>
+            <div class="mcp-key-row">
+              <input id="mcp-tavily-key" class="market-query" type="password" maxlength="512" autocomplete="off" placeholder="填写新 Key；留空保留已配置的 Key" />
+              <button class="button primary" type="button" data-mcp-save="tavily">保存</button>
+            </div>
+            <p id="mcp-tavily-status" class="mcp-server-status">尚未配置。</p>
+          </article>
+
+          <article class="card mcp-server-card" data-mcp-server="firecrawl">
+            <div class="mcp-server-heading">
+              <div class="mcp-server-icon firecrawl">F</div>
+              <div>
+                <p class="eyebrow">默认抓取</p>
+                <h2>Firecrawl</h2>
+                <code>firecrawl-mcp@3.24.0</code>
+              </div>
+              <label class="mcp-switch"><input id="mcp-firecrawl-enabled" type="checkbox" /><span>启用</span></label>
+            </div>
+            <p class="mcp-server-description">为模型提供网页搜索、抓取、爬取、结构化提取与深度研究工具。</p>
+            <label class="mcp-key-label" for="mcp-firecrawl-key">Firecrawl API Key</label>
+            <div class="mcp-key-row">
+              <input id="mcp-firecrawl-key" class="market-query" type="password" maxlength="512" autocomplete="off" placeholder="填写新 Key；留空保留已配置的 Key" />
+              <button class="button primary" type="button" data-mcp-save="firecrawl">保存</button>
+            </div>
+            <p id="mcp-firecrawl-status" class="mcp-server-status">尚未配置。</p>
+          </article>
+        </div>
+
+        <section class="card mcp-note">
+          <p class="eyebrow">工作方式</p>
+          <p>桌面端通过 DSH 官方 <code>@deepseek-ai/dsh-mcp-client</code> 注册工具；启用后工具名称使用 <code>mcp__tavily__*</code> 与 <code>mcp__firecrawl__*</code> 命名空间。首次启动会由桌面托管的 Node/npm 下载固定版本 MCP 包。</p>
+        </section>
+      </div>
     </main>
     <div id="app-loading-overlay" class="app-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
       <div class="app-loading-panel">

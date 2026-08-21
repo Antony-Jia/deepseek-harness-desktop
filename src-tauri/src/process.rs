@@ -1,5 +1,6 @@
 use crate::runtime::{LocalRuntime, RuntimeManager};
 use std::{
+    collections::BTreeMap,
     fs::{File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -26,6 +27,7 @@ impl DshProcess {
         dsh_home: &Path,
         control_url: &str,
         token: &str,
+        environment: &BTreeMap<String, String>,
         on_log: F,
     ) -> Result<Self, String>
     where
@@ -54,6 +56,7 @@ impl DshProcess {
             dsh_home,
             control_url,
             token,
+            environment,
             node,
             args,
             on_log,
@@ -67,6 +70,7 @@ impl DshProcess {
         dsh_home: &Path,
         control_url: &str,
         token: &str,
+        environment: &BTreeMap<String, String>,
         on_log: F,
     ) -> Result<Self, String>
     where
@@ -88,6 +92,7 @@ impl DshProcess {
             dsh_home,
             control_url,
             token,
+            environment,
             local.command.clone(),
             args,
             on_log,
@@ -101,6 +106,7 @@ impl DshProcess {
         dsh_home: &Path,
         control_url: &str,
         token: &str,
+        environment: &BTreeMap<String, String>,
         program: std::path::PathBuf,
         args: Vec<String>,
         on_log: F,
@@ -135,6 +141,7 @@ impl DshProcess {
             .env("DSH_DESKTOP_CTRL", control_url)
             .env("DSH_DESKTOP_TOKEN", token)
             .env("DSH_DESKTOP_VERSION", version)
+            .envs(environment)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         emit(

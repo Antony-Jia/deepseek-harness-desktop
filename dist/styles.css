@@ -411,6 +411,26 @@ button.titlebar-brand {
 .market-operation-details summary { cursor: pointer; }
 .market-operation-details .install-log { max-height: 150px; margin-top: 10px; }
 .market-readonly-note { margin: 18px 0 0; padding: 14px 16px; border-radius: 12px; color: #ffe0a1; background: rgba(248, 180, 76, .10); font-size: 13px; }
+.mcp-shell code { color: var(--accent-strong); font-family: Consolas, monospace; }
+.mcp-server-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
+.mcp-server-card { display: flex; min-width: 0; flex-direction: column; }
+.mcp-server-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.mcp-server-heading h2 { margin-bottom: 4px; }
+.mcp-server-heading code { font-size: 12px; }
+.mcp-server-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 16px; color: #091128; background: linear-gradient(135deg, #a6b2ff, #7de2bc); font-size: 21px; font-weight: 900; box-shadow: 0 10px 26px rgba(126, 150, 255, .20); }
+.mcp-server-icon.firecrawl { color: #28120a; background: linear-gradient(135deg, #ffbd8a, #ff735f); }
+.mcp-switch { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid rgba(165, 180, 252, .16); border-radius: 999px; color: #d7def4; background: rgba(139, 156, 246, .08); cursor: pointer; font-size: 12px; font-weight: 700; }
+.mcp-switch input { accent-color: var(--accent); }
+.mcp-server-description { min-height: 48px; margin: 18px 0; color: #d6dcf4; font-size: 13px; line-height: 1.7; }
+.mcp-key-label { margin-bottom: 8px; color: var(--accent-strong); font-size: 12px; font-weight: 700; }
+.mcp-key-row { display: flex; gap: 9px; }
+.mcp-key-row .button { flex: 0 0 auto; }
+.mcp-server-status { min-height: 20px; margin: 11px 0 0; color: var(--muted); font-size: 12px; }
+.mcp-server-status.good { color: var(--success); }
+.mcp-server-status.warn { color: #ffe0a1; }
+.mcp-server-status.bad { color: var(--danger); }
+.mcp-note { margin-top: 18px; }
+.mcp-note p:last-child { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.75; }
 .app-loading-overlay,
 .market-confirm-modal {
   position: fixed;
@@ -471,6 +491,11 @@ button.titlebar-brand {
 .market-confirm-note code { color: var(--accent-strong); font-family: Consolas, monospace; }
 .market-confirm-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
 body.modal-open { overflow: hidden; }
+
+@media (max-width: 820px) {
+  .mcp-server-list { grid-template-columns: 1fr; }
+  .mcp-key-row { flex-direction: column; }
+}
 
 .market-detail-panel {
   position: fixed;
