@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/multi-agent-roundtable",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DSH 多 Agent 圆桌讨论：独立会话、角色 Prompt、交叉评审与 Markdown 消息流",
   "keywords": [
     "dsh",

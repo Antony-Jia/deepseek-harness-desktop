@@ -72,6 +72,9 @@ test('multi-agent roundtable package exposes the planned host/client contract', 
   assert.match(client, /mar-reasoning/)
   assert.match(client, /新建群聊/)
   assert.match(client, /群聊历史记录/)
+  assert.match(client, /--dsw-alias-bg-base/)
+  assert.match(client, /--dsw-alias-label-primary/)
+  assert.match(client, /--dsw-specific-bubble/)
   assert.match(host, /writePluginConfig/)
   assert.match(host, /createRoundtableToolDefinition/)
   assert.match(orchestration, /composeFrom/)
@@ -123,16 +126,22 @@ test('conversation index persists independently and migrates legacy discussions'
       status: 'completed',
       createdAt: 10,
       updatedAt: 20,
-      participants: [{ roleId: 'architect', childSessionId: 'child-1' }]
+      participants: [{ roleId: 'architect', childSessionId: 'child-1', status: 'completed' }],
+      messages: [{
+        id: 'message-1', roleId: 'architect', roleName: '架构师', color: '#4f8cff', round: 1,
+        content: '持久化正式消息', reasoning: '持久化思考', status: 'complete', createdAt: 11, updatedAt: 12
+      }]
     }]
     const migrated = normalizeConversationIndex(null, legacy)
     assert.equal(migrated.conversations[0].discussionId, 'discussion-legacy')
     assert.equal(migrated.conversations[0].discussion.participants[0].childSessionId, 'child-1')
+    assert.equal(migrated.conversations[0].discussion.messages[0].content, '持久化正式消息')
     migrated.conversations.unshift(createConversation({ id: 'conversation-new', boundSessionId: '' }, 30))
     await writeConversationIndex(path, migrated)
     const restored = readConversationIndex(path)
     assert.equal(restored.conversations.length, 2)
     assert.equal(restored.conversations[0].id, 'conversation-new')
+    assert.equal(restored.conversations[1].discussion.messages[0].reasoning, '持久化思考')
     assert.match(path, /dsh-desktop[\\/]plugin-data[\\/]multi-agent-roundtable[\\/]conversations\.json$/)
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -272,21 +281,14 @@ test('orchestrator creates child sessions and projects assistant output', async 
 
   const metadata = orchestrator.persistedMetadata()[0]
   assert.equal(metadata.conversationId, 'conversation-test')
-  const restoredSessions = new Map(metadata.participants.map((participant) => [participant.childSessionId, {
-    id: participant.childSessionId,
-    events: [{
-      type: 'assistant/message',
-      data: { turn: 1, step: 1, message: { id: `restored-${participant.roleId}`, content: [{ type: 'text', text: '恢复的历史消息。' }] } }
-    }]
-  }]))
+  assert.ok(metadata.messages.some((message) => message.content === '这是一个可执行结论。'))
   const restored = new RoundtableOrchestrator({
-    sessions: { get(id) { return restoredSessions.get(id) } },
     config: defaultConfig(),
     now: () => 1700000000001
   })
   restored.hydrate([metadata])
   assert.equal(restored.get('discussion-test').status, 'completed')
-  assert.ok(restored.get('discussion-test').messages.some((message) => message.content === '恢复的历史消息。'))
+  assert.ok(restored.get('discussion-test').messages.some((message) => message.content === '这是一个可执行结论。'))
   await restored.dispose()
 
   const userMessage = makeUserMessage('hello', 'message-1')
@@ -294,6 +296,48 @@ test('orchestrator creates child sessions and projects assistant output', async 
   const splitMessage = { content: [{ type: 'reasoning', text: 'think' }, { type: 'text', text: 'answer' }] }
   assert.equal(messageMarkdown(splitMessage), 'answer')
   assert.equal(messageReasoning(splitMessage), 'think')
+  await orchestrator.dispose()
+})
+
+test('legacy discussion restores messages from persisted child sessions and then projects them for storage', async () => {
+  const config = defaultConfig()
+  const childSessionId = 'legacy-child-session'
+  const metadata = {
+    id: 'discussion-legacy-session-query',
+    conversationId: 'conversation-legacy-session-query',
+    parentSessionId: 'parent-legacy',
+    prompt: '恢复旧记录',
+    mode: 'independent',
+    rounds: 1,
+    currentRound: 1,
+    status: 'completed',
+    createdAt: 1,
+    updatedAt: 2,
+    participants: [{ roleId: 'architect', childSessionId }],
+    messages: []
+  }
+  let persisted
+  const orchestrator = new RoundtableOrchestrator({
+    config,
+    sessionQuery: {
+      async readSession(id) {
+        assert.equal(id, childSessionId)
+        return {
+          header: { id },
+          events: [{
+            type: 'assistant/message',
+            data: { turn: 1, step: 1, message: { id: 'legacy-answer', content: [{ type: 'text', text: '从持久化子会话恢复的回答。' }] } }
+          }]
+        }
+      }
+    },
+    onPersist: async (value) => { persisted = value }
+  })
+  orchestrator.hydrate([metadata])
+  const restored = await orchestrator.restorePersistedProjection(metadata.id)
+  assert.ok(restored.messages.some((message) => message.content === '从持久化子会话恢复的回答。'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(persisted[0].messages.some((message) => message.id === 'legacy-answer'))
   await orchestrator.dispose()
 })
 

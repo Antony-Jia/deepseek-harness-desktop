@@ -70,6 +70,7 @@ export class RoundtableOrchestrator {
     this.agentDefaultModel = options.agentDefaultModel
     this.agentPresets = options.agentPresets
     this.sessions = options.sessions
+    this.sessionQuery = options.sessionQuery
     this.settingsScope = options.settingsScope
     this.now = options.now || (() => Date.now())
     this.idFactory = options.idFactory || (() => `discussion-${randomUUID()}`)
@@ -114,13 +115,16 @@ export class RoundtableOrchestrator {
           // session recoverable instead of presenting a permanently running
           // discussion with no worker loop behind it.
           status: item.status === 'running' ? 'created' : item.status,
+          error: item.error,
+          finalMessageId: item.finalMessageId,
+          messages: item.messages,
           restored: true,
           participantMetadata: item.participants
         })
-        this.appendUserMessage(state, state.prompt, 0)
+        if (state.messages.length === 0) this.appendUserMessage(state, state.prompt, 0)
         this.discussions.set(state.id, state)
         this.indexStateSessions(state)
-        this.restoreSessionProjection(state)
+        if (!state.messages.some((message) => message.roleId !== 'user')) this.restoreSessionProjection(state)
       } catch {
         // A removed role or malformed old record must not prevent DSH boot.
       }
@@ -137,10 +141,10 @@ export class RoundtableOrchestrator {
         roleName: role?.name || roleId,
         color: role?.color || '#4f8cff',
         childSessionId: saved?.childSessionId || childSessionId(id, roleId),
-        status: 'idle',
-        error: '',
+        status: String(saved?.status || 'idle'),
+        error: String(saved?.error || ''),
         turnError: '',
-        activeRound: 0,
+        activeRound: Number.isInteger(saved?.activeRound) ? saved.activeRound : 0,
         cancelled: false,
         handle: null,
         restored: extras.restored === true
@@ -158,18 +162,30 @@ export class RoundtableOrchestrator {
       hostRoleId: request.hostRoleId || '',
       roleDefinitions: request.roles,
       participants,
-      messages: [],
+      messages: (Array.isArray(extras.messages) ? extras.messages : []).map((message) => ({
+        id: String(message?.id || `restored-${randomUUID()}`),
+        roleId: String(message?.roleId || ''),
+        roleName: String(message?.roleName || message?.roleId || ''),
+        color: String(message?.color || '#4f8cff'),
+        round: Number.isInteger(message?.round) ? message.round : 0,
+        content: shortText(message?.content || '', 20000),
+        reasoning: shortText(message?.reasoning || '', 20000),
+        status: String(message?.status || 'complete'),
+        createdAt: Number.isFinite(message?.createdAt) ? message.createdAt : time,
+        updatedAt: Number.isFinite(message?.updatedAt) ? message.updatedAt : time
+      })).filter((message) => message.roleId),
       events: [],
       nextEventId: 1,
       currentRound: extras.currentRound || 0,
       status: extras.status || 'created',
-      error: '',
-      finalMessageId: '',
+      error: String(extras.error || ''),
+      finalMessageId: String(extras.finalMessageId || ''),
       createdAt: extras.createdAt || time,
       updatedAt: extras.updatedAt || time,
       startedAt: 0,
       restored: extras.restored === true,
       cancelled: false,
+      restoringProjection: false,
       runPromise: null
     }
   }
@@ -193,12 +209,58 @@ export class RoundtableOrchestrator {
   }
 
   restoreSessionProjection(state) {
-    for (const participant of state.participants) {
-      const session = this.sessions?.get?.(participant.childSessionId)
-      if (!session || !Array.isArray(session.events)) continue
-      participant.activeRound = state.currentRound || 1
-      for (const event of session.events) this.onSessionEvent(session, event)
+    let restored = 0
+    const previousUpdatedAt = state.updatedAt
+    state.restoringProjection = true
+    try {
+      for (const participant of state.participants) {
+        const session = this.sessions?.get?.(participant.childSessionId)
+        if (!session || !Array.isArray(session.events)) continue
+        participant.activeRound = state.currentRound || 1
+        for (const event of session.events) {
+          if (Number.isInteger(event?.data?.turn) && event.data.turn > 0) participant.activeRound = event.data.turn
+          this.onSessionEvent(session, event)
+        }
+        restored += 1
+      }
+    } finally {
+      state.restoringProjection = false
+      state.updatedAt = previousUpdatedAt
     }
+    return restored
+  }
+
+  async restorePersistedProjection(id) {
+    const state = this.requireState(id)
+    if (state.messages.some((message) => message.roleId !== 'user')) return this.toPublic(state)
+    if (this.restoreSessionProjection(state) > 0) {
+      this.schedulePersist()
+      return this.toPublic(state)
+    }
+    if (typeof this.sessionQuery?.readSession !== 'function') return this.toPublic(state)
+    let restored = 0
+    const previousUpdatedAt = state.updatedAt
+    state.restoringProjection = true
+    try {
+      for (const participant of state.participants) {
+        try {
+          const snapshot = await this.sessionQuery.readSession(participant.childSessionId)
+          if (!snapshot || !Array.isArray(snapshot.events)) continue
+          participant.activeRound = state.currentRound || 1
+          const session = { id: participant.childSessionId, header: snapshot.header, events: snapshot.events }
+          for (const event of snapshot.events) {
+            if (Number.isInteger(event?.data?.turn) && event.data.turn > 0) participant.activeRound = event.data.turn
+            this.onSessionEvent(session, event)
+          }
+          restored += 1
+        } catch { /* one missing legacy child log must not hide the other roles */ }
+      }
+    } finally {
+      state.restoringProjection = false
+      state.updatedAt = previousUpdatedAt
+    }
+    if (restored > 0) this.schedulePersist()
+    return this.toPublic(state)
   }
 
   appendEvent(state, type, payload = {}) {
@@ -256,11 +318,28 @@ export class RoundtableOrchestrator {
       hostRoleId: state.hostRoleId,
       currentRound: state.currentRound,
       status: state.status,
+      error: state.error,
+      finalMessageId: state.finalMessageId,
       createdAt: state.createdAt,
       updatedAt: state.updatedAt,
       participants: state.participants.map((participant) => ({
         roleId: participant.roleId,
-        childSessionId: participant.childSessionId
+        childSessionId: participant.childSessionId,
+        status: participant.status,
+        error: participant.error,
+        activeRound: participant.activeRound
+      })),
+      messages: state.messages.map((message) => ({
+        id: message.id,
+        roleId: message.roleId,
+        roleName: message.roleName,
+        color: message.color,
+        round: message.round,
+        content: message.content,
+        reasoning: message.reasoning || '',
+        status: message.status,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt
       }))
     }))
   }
@@ -638,6 +717,7 @@ export class RoundtableOrchestrator {
         round: projected.round,
         event: summary
       })
+      if (!state.restoringProjection) this.schedulePersist()
       return
     }
     if (event.type === 'turn/start') {

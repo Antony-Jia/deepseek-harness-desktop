@@ -5,6 +5,8 @@ import { dirname, resolve } from 'node:path'
 
 const DATA_FOLDER = 'multi-agent-roundtable'
 const CONVERSATIONS_FILE = 'conversations.json'
+const MAX_PERSISTED_MESSAGES = 240
+const MAX_MESSAGE_TEXT = 20000
 
 export function resolveConversationIndexPath(env = process.env) {
   const localAppData = typeof env.LOCALAPPDATA === 'string' ? env.LOCALAPPDATA.trim() : ''
@@ -29,6 +31,25 @@ function cleanConversation(value) {
   }
 }
 
+function cleanMessage(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  const roleId = String(value.roleId || '').trim()
+  if (!id || !roleId) return null
+  return {
+    id,
+    roleId,
+    roleName: String(value.roleName || roleId).trim().slice(0, 120) || roleId,
+    color: String(value.color || '#4f8cff').trim().slice(0, 32) || '#4f8cff',
+    round: Number.isInteger(value.round) ? value.round : 0,
+    content: String(value.content || '').slice(0, MAX_MESSAGE_TEXT),
+    reasoning: String(value.reasoning || '').slice(0, MAX_MESSAGE_TEXT),
+    status: String(value.status || 'complete').slice(0, 32),
+    createdAt: Number.isFinite(value.createdAt) ? value.createdAt : Date.now(),
+    updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : Date.now()
+  }
+}
+
 function cleanDiscussion(value) {
   if (!value || typeof value !== 'object') return null
   const id = String(value.id || '').trim()
@@ -43,12 +64,21 @@ function cleanDiscussion(value) {
     hostRoleId: String(value.hostRoleId || '').trim(),
     currentRound: Number.isInteger(value.currentRound) ? value.currentRound : 0,
     status: String(value.status || 'created'),
+    error: String(value.error || '').slice(0, 2000),
+    finalMessageId: String(value.finalMessageId || '').trim(),
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : Date.now(),
     updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : Date.now(),
     participants: (Array.isArray(value.participants) ? value.participants : []).map((participant) => ({
       roleId: String(participant?.roleId || '').trim(),
-      childSessionId: String(participant?.childSessionId || '').trim()
-    })).filter((participant) => participant.roleId && participant.childSessionId)
+      childSessionId: String(participant?.childSessionId || '').trim(),
+      status: String(participant?.status || 'idle'),
+      error: String(participant?.error || '').slice(0, 1200),
+      activeRound: Number.isInteger(participant?.activeRound) ? participant.activeRound : 0
+    })).filter((participant) => participant.roleId && participant.childSessionId),
+    messages: (Array.isArray(value.messages) ? value.messages : [])
+      .slice(-MAX_PERSISTED_MESSAGES)
+      .map(cleanMessage)
+      .filter(Boolean)
   }
 }
 

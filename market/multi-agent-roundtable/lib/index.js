@@ -135,6 +135,7 @@ export function createHost(options = {}) {
       const agentDefaultModel = options.agentDefaultModel || getService(ctx, 'agentDefaultModel')
       const agentPresets = options.agentPresets || getService(ctx, 'agentPresets')
       const sessions = options.sessions || getService(ctx, 'sessions')
+      const sessionQuery = options.sessionQuery || getService(ctx, 'sessionQuery')
       const skills = options.skills || getService(ctx, 'skills')
       const tools = options.tools || getService(ctx, 'tools')
       const webServer = options.webServer || getService(ctx, 'webServer')
@@ -183,10 +184,12 @@ export function createHost(options = {}) {
           conversationIndex = normalizeConversationIndex(null, config.discussions)
         }
         const indexedDiscussions = conversationIndex.conversations.map((item) => item.discussion).filter(Boolean)
+        let hydrationDiscussions = config.discussions
         if (indexedDiscussions.length) {
           const byId = new Map(config.discussions.map((item) => [item.id, item]))
           for (const discussion of indexedDiscussions) byId.set(discussion.id, discussion)
-          config = normalizeConfig({ ...config, discussions: [...byId.values()] }, config)
+          hydrationDiscussions = [...byId.values()]
+          config = normalizeConfig({ ...config, discussions: hydrationDiscussions }, config)
         }
         for (const discussion of config.discussions) {
           const conversation = conversationIndex.conversations.find((item) => item.discussionId === discussion.id)
@@ -201,6 +204,7 @@ export function createHost(options = {}) {
           agentDefaultModel,
           agentPresets,
           sessions,
+          sessionQuery,
           settingsScope,
           config,
           onPersist: async (discussions) => {
@@ -221,10 +225,27 @@ export function createHost(options = {}) {
               conversation.title = conversationTitle(discussion.prompt)
               conversation.updatedAt = discussion.updatedAt
             }
-            await Promise.all([settingsScope.update({ discussions }), persistConversationIndex()])
+            const compatibilityDiscussions = discussions.map((discussion) => ({
+              id: discussion.id,
+              conversationId: discussion.conversationId,
+              parentSessionId: discussion.parentSessionId,
+              prompt: discussion.prompt,
+              mode: discussion.mode,
+              rounds: discussion.rounds,
+              hostRoleId: discussion.hostRoleId,
+              currentRound: discussion.currentRound,
+              status: discussion.status,
+              createdAt: discussion.createdAt,
+              updatedAt: discussion.updatedAt,
+              participants: discussion.participants.map((participant) => ({
+                roleId: participant.roleId,
+                childSessionId: participant.childSessionId
+              }))
+            }))
+            await Promise.all([settingsScope.update({ discussions: compatibilityDiscussions }), persistConversationIndex()])
           }
         })
-        orchestrator.hydrate(config.discussions)
+        orchestrator.hydrate(hydrationDiscussions)
         void persistConversationIndex().catch(() => {})
 
         registerEffect(ctx, skills, {
@@ -421,8 +442,9 @@ export function createHost(options = {}) {
               }
               if (parsed.segments.length === 1) {
                 if (method !== 'GET') return jsonResponse(res, 405, { ok: false, error: '仅支持 GET。' })
-                const discussion = orchestrator.get(id)
+                let discussion = orchestrator.get(id)
                 if (!discussion) return jsonResponse(res, 404, { ok: false, error: '讨论不存在。' })
+                if (!discussion.messages.some((message) => message.roleId !== 'user')) discussion = await orchestrator.restorePersistedProjection(id)
                 return jsonResponse(res, 200, { ok: true, discussion })
               }
               return jsonResponse(res, 404, { ok: false, error: 'Not found' })
