@@ -34,123 +34,168 @@
       </div>
     </header>
 
-    <main id="setup-view" class="shell">
-      <section class="hero">
-        <div class="brand-mark">D</div>
-        <div>
-          <p class="eyebrow">DeepSeek Harness</p>
-          <h1>DSH Desktop</h1>
-          <p class="subtitle">瘦壳负责运行时、进程与桌面体验，上游界面保持原样。</p>
+    <main id="setup-view" class="setup-shell">
+      <aside class="setup-sidebar" aria-label="首页导航">
+        <div class="sidebar-brand">
+          <div class="brand-mark">D</div>
+          <div class="sidebar-brand-text">
+            <strong>DSH Desktop</strong>
+            <small>DeepSeek Harness</small>
+          </div>
         </div>
-      </section>
+        <nav class="sidebar-nav" id="sidebar-nav" aria-label="页面分区">
+          <a class="sidebar-nav-item active" href="#status-card" data-target="status-card">
+            <span class="sidebar-nav-index">01</span>
+            <span class="sidebar-nav-label">启动状态</span>
+          </a>
+          <a class="sidebar-nav-item" href="#runtime-source-card" data-target="runtime-source-card">
+            <span class="sidebar-nav-index">02</span>
+            <span class="sidebar-nav-label">运行来源</span>
+          </a>
+          <a class="sidebar-nav-item" href="#appearance-card" data-target="appearance-card">
+            <span class="sidebar-nav-index">03</span>
+            <span class="sidebar-nav-label">外观模式</span>
+          </a>
+          <a class="sidebar-nav-item" href="#skin-card" data-target="skin-card">
+            <span class="sidebar-nav-index">04</span>
+            <span class="sidebar-nav-label">界面皮肤</span>
+          </a>
+          <a class="sidebar-nav-item" href="#update-card" data-target="update-card" data-optional="true">
+            <span class="sidebar-nav-index">05</span>
+            <span class="sidebar-nav-label">运行时版本</span>
+          </a>
+          <a class="sidebar-nav-item" href="#home-actions" data-target="home-actions">
+            <span class="sidebar-nav-index">06</span>
+            <span class="sidebar-nav-label">快捷操作</span>
+          </a>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="sidebar-status-row">
+            <span class="sidebar-status-caption">运行状态</span>
+            <span id="sidebar-status-pill" class="pill neutral">检查中</span>
+          </div>
+          <p class="sidebar-foot-note">瘦壳负责运行时、进程与桌面体验，上游界面保持原样。</p>
+        </div>
+      </aside>
 
-      <section class="card status-card" aria-live="polite">
-        <div class="status-heading">
+      <div class="setup-main dashboard">
+        <section class="hero dashboard-full">
+          <div class="brand-mark brand-mark-hero">D</div>
+          <div class="hero-text">
+            <p class="eyebrow">DeepSeek Harness</p>
+            <h1>DSH Desktop</h1>
+            <p class="subtitle">瘦壳负责运行时、进程与桌面体验，上游界面保持原样。</p>
+          </div>
+        </section>
+
+        <section id="status-card" class="card status-card dashboard-full" aria-live="polite">
+          <div class="status-heading">
+            <div>
+              <p class="eyebrow">启动状态</p>
+              <h2 id="status-title">正在检查运行环境…</h2>
+            </div>
+            <span id="status-pill" class="pill neutral">检查中</span>
+          </div>
+          <p id="status-message" class="status-message">客户端正在读取固定版本与工作区设置。</p>
+          <div class="progress-track" id="progress-track" hidden>
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+          <pre id="install-log" class="install-log" hidden></pre>
+          <div class="home-entry">
+            <div>
+              <p class="eyebrow">进入 DSH</p>
+              <p id="entry-message" class="muted">未启动时会先启动 DSH，启动后自动进入上游页面。</p>
+            </div>
+            <div class="home-entry-actions">
+              <button id="toggle-dsh" class="button primary" type="button">启动</button>
+              <button id="restart-dsh" class="button secondary" type="button" disabled>重启</button>
+              <button id="enter-dsh" class="button secondary" type="button" disabled>进入页面</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="runtime-source-card" class="card runtime-source-card dashboard-half">
           <div>
-            <p class="eyebrow">启动状态</p>
-            <h2 id="status-title">正在检查运行环境…</h2>
+            <p class="eyebrow">运行来源</p>
+            <h2 id="runtime-source-title">正在检测本地 DSH</h2>
+            <p id="runtime-source-message" class="muted">正在检查系统 PATH 与 npx 缓存中的 @deepseek-ai/dsh。</p>
           </div>
-          <span id="status-pill" class="pill neutral">检查中</span>
-        </div>
-        <p id="status-message" class="status-message">客户端正在读取固定版本与工作区设置。</p>
-        <div class="progress-track" id="progress-track" hidden>
-          <div class="progress-bar" id="progress-bar"></div>
-        </div>
-        <pre id="install-log" class="install-log" hidden></pre>
-        <div class="home-entry">
+          <div class="runtime-source-actions">
+            <button id="detect-local" class="button ghost">重新检测</button>
+            <button id="use-local" class="button secondary" hidden>使用本地版本</button>
+            <button id="use-managed" class="button secondary" hidden>切换到托管版</button>
+          </div>
+        </section>
+
+        <section id="appearance-card" class="card appearance-card dashboard-half">
           <div>
-            <p class="eyebrow">进入 DSH</p>
-            <p id="entry-message" class="muted">未启动时会先启动 DSH，启动后自动进入上游页面。</p>
+            <p class="eyebrow">外观模式</p>
+            <h2>亮色、暗色或跟随系统</h2>
+            <p id="theme-message" class="muted">跟随系统主题。</p>
           </div>
-          <div class="home-entry-actions">
-            <button id="toggle-dsh" class="button primary" type="button">启动</button>
-            <button id="restart-dsh" class="button secondary" type="button" disabled>重启</button>
-            <button id="enter-dsh" class="button secondary" type="button" disabled>进入页面</button>
+          <div class="theme-options" role="radiogroup" aria-label="主题模式">
+            <button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false">亮色</button>
+            <button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false">暗色</button>
+            <button class="theme-option" type="button" data-theme-choice="system" aria-pressed="false">跟随系统</button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="card runtime-source-card">
-        <div>
-          <p class="eyebrow">运行来源</p>
-          <h2 id="runtime-source-title">正在检测本地 DSH</h2>
-          <p id="runtime-source-message" class="muted">正在检查系统 PATH 与 npx 缓存中的 @deepseek-ai/dsh。</p>
-        </div>
-        <div class="runtime-source-actions">
-          <button id="detect-local" class="button ghost">重新检测</button>
-          <button id="use-local" class="button secondary" hidden>使用本地版本</button>
-          <button id="use-managed" class="button secondary" hidden>切换到托管版</button>
-        </div>
-      </section>
+        <section id="skin-card" class="card skin-card dashboard-full">
+          <div class="skin-heading">
+            <div>
+              <p class="eyebrow">界面皮肤</p>
+              <h2>受控 Theme Pack</h2>
+              <p id="skin-message" class="muted">默认主题不读取外部资源。</p>
+            </div>
+            <span id="skin-status-pill" class="pill neutral">默认主题</span>
+          </div>
+          <div id="skin-options" class="skin-options" role="list" aria-label="界面皮肤"></div>
+          <div class="skin-preferences">
+            <label class="range-control" for="background-intensity">
+              <span>背景强度</span>
+              <input id="background-intensity" type="range" min="0" max="1" step="0.01" value="0.32" />
+              <output id="background-intensity-value" for="background-intensity">32%</output>
+            </label>
+            <label class="effects-toggle">
+              <input id="reduce-effects" type="checkbox" />
+              <span>减少光晕和模糊效果</span>
+            </label>
+          </div>
+          <div id="theme-preview-banner" class="theme-preview-banner" hidden>
+            <div>
+              <strong id="theme-preview-title">正在预览主题</strong>
+              <span id="theme-preview-countdown">15 秒后自动恢复</span>
+            </div>
+            <div class="theme-preview-actions">
+              <button id="confirm-theme-preview" class="button primary" type="button">保留主题</button>
+              <button id="cancel-theme-preview" class="button secondary" type="button">取消预览</button>
+            </div>
+          </div>
+          <button id="reset-theme" class="button ghost reset-theme" type="button">恢复默认主题</button>
+        </section>
 
-      <section class="card appearance-card">
-        <div>
-          <p class="eyebrow">外观模式</p>
-          <h2>亮色、暗色或跟随系统</h2>
-          <p id="theme-message" class="muted">跟随系统主题。</p>
-        </div>
-        <div class="theme-options" role="radiogroup" aria-label="主题模式">
-          <button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false">亮色</button>
-          <button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false">暗色</button>
-          <button class="theme-option" type="button" data-theme-choice="system" aria-pressed="false">跟随系统</button>
-        </div>
-      </section>
-
-      <section class="card skin-card">
-        <div class="skin-heading">
+        <section id="update-card" class="card update-card dashboard-full" hidden>
           <div>
-            <p class="eyebrow">界面皮肤</p>
-            <h2>受控 Theme Pack</h2>
-            <p id="skin-message" class="muted">默认主题不读取外部资源。</p>
+            <p class="eyebrow">桌面托管运行时</p>
+            <h2 id="version-summary">固定版本</h2>
+            <p id="update-message" class="muted">安装只会写入桌面托管目录，不会覆盖系统中的本地版本。</p>
           </div>
-          <span id="skin-status-pill" class="pill neutral">默认主题</span>
-        </div>
-        <div id="skin-options" class="skin-options" role="list" aria-label="界面皮肤"></div>
-        <div class="skin-preferences">
-          <label class="range-control" for="background-intensity">
-            <span>背景强度</span>
-            <input id="background-intensity" type="range" min="0" max="1" step="0.01" value="0.32" />
-            <output id="background-intensity-value" for="background-intensity">32%</output>
-          </label>
-          <label class="effects-toggle">
-            <input id="reduce-effects" type="checkbox" />
-            <span>减少光晕和模糊效果</span>
-          </label>
-        </div>
-        <div id="theme-preview-banner" class="theme-preview-banner" hidden>
-          <div>
-            <strong id="theme-preview-title">正在预览主题</strong>
-            <span id="theme-preview-countdown">15 秒后自动恢复</span>
+          <div class="update-actions">
+            <select id="version-select" aria-label="选择运行时版本"></select>
+            <button id="install-version" class="button secondary">安装并切换到托管版</button>
           </div>
-          <div class="theme-preview-actions">
-            <button id="confirm-theme-preview" class="button primary" type="button">保留主题</button>
-            <button id="cancel-theme-preview" class="button secondary" type="button">取消预览</button>
-          </div>
-        </div>
-        <button id="reset-theme" class="button ghost reset-theme" type="button">恢复默认主题</button>
-      </section>
+        </section>
 
-      <section id="update-card" class="card update-card" hidden>
-        <div>
-          <p class="eyebrow">桌面托管运行时</p>
-          <h2 id="version-summary">固定版本</h2>
-          <p id="update-message" class="muted">安装只会写入桌面托管目录，不会覆盖系统中的本地版本。</p>
-        </div>
-        <div class="update-actions">
-          <select id="version-select" aria-label="选择运行时版本"></select>
-          <button id="install-version" class="button secondary">安装并切换到托管版</button>
-        </div>
-      </section>
+        <section id="home-actions" class="actions dashboard-full">
+          <button id="primary-action" class="button primary">重启</button>
+          <button id="check-updates" class="button secondary">检查更新</button>
+          <button id="open-logs" class="button ghost">打开日志目录</button>
+          <button id="quit" class="button ghost">退出</button>
+        </section>
 
-      <section class="actions">
-        <button id="primary-action" class="button primary">重启</button>
-        <button id="check-updates" class="button secondary">检查更新</button>
-        <button id="open-logs" class="button ghost">打开日志目录</button>
-        <button id="quit" class="button ghost">退出</button>
-      </section>
-
-      <p id="error-detail" class="error-detail" hidden></p>
-      <p class="footer-note">本地版本通过 npx --no-install 启动；托管版本安装到独立目录，不覆盖系统 npm。</p>
+        <p id="error-detail" class="error-detail dashboard-full" hidden></p>
+        <p class="footer-note dashboard-full">本地版本通过 npx --no-install 启动；托管版本安装到独立目录，不覆盖系统 npm。</p>
+      </div>
     </main>
     <main id="dsh-view" class="dsh-view" hidden>
       <iframe id="dsh-frame" class="dsh-frame" title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write"></iframe>
@@ -165,6 +210,13 @@
           </div>
           <button id="market-back-home" class="button ghost" type="button">返回首页</button>
         </section>
+
+        <nav class="market-tabs" role="tablist" aria-label="插件分类" id="market-tabs">
+          <button class="market-tab active" type="button" data-category="all" role="tab" aria-selected="true">全部</button>
+          <button class="market-tab" type="button" data-category="plugin" role="tab" aria-selected="false">插件</button>
+          <button class="market-tab" type="button" data-category="theme" role="tab" aria-selected="false">主题</button>
+          <button class="market-tab" type="button" data-category="installed" role="tab" aria-selected="false">已安装</button>
+        </nav>
 
         <section class="card market-runtime-card" aria-live="polite">
           <div>
@@ -209,6 +261,35 @@
 
         <p id="market-readonly-note" class="market-readonly-note" hidden>当前没有可调用的 DSH 运行时。请返回首页安装桌面托管运行时，或选择可用的本地运行时。</p>
       </div>
+      <aside id="market-detail-panel" class="market-detail-panel" hidden aria-hidden="true">
+        <div class="market-detail-backdrop" data-market-detail-close="true"></div>
+        <section class="market-detail-card" role="dialog" aria-modal="false" aria-labelledby="market-detail-title">
+          <button class="market-detail-close" type="button" aria-label="关闭详情" data-market-detail-close="true">×</button>
+          <div class="market-detail-header">
+            <div class="market-detail-icon" id="market-detail-icon"></div>
+            <div class="market-detail-titles">
+              <p class="eyebrow" id="market-detail-category">插件</p>
+              <h2 id="market-detail-title">插件名称</h2>
+              <code class="market-detail-name" id="market-detail-name">package-name</code>
+            </div>
+          </div>
+          <div class="market-detail-body">
+            <div class="market-detail-section">
+              <p class="market-detail-label">插件介绍</p>
+              <p class="market-detail-description" id="market-detail-description">暂无描述。</p>
+            </div>
+            <div class="market-detail-section">
+              <p class="market-detail-label">基础信息</p>
+              <div class="market-detail-meta" id="market-detail-meta"></div>
+            </div>
+            <div class="market-detail-section" id="market-detail-capabilities-section">
+              <p class="market-detail-label">能力标签</p>
+              <div class="market-detail-capabilities" id="market-detail-capabilities"></div>
+            </div>
+          </div>
+          <div class="market-detail-actions" id="market-detail-actions"></div>
+        </section>
+      </aside>
     </main>
     <div id="app-loading-overlay" class="app-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
       <div class="app-loading-panel">
@@ -231,5 +312,102 @@
       </section>
     </div>
     <script src="./app.js"></script>
+    <script>
+      (function () {
+        function ready(fn) {
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', fn)
+          } else { fn() }
+        }
+        ready(function () {
+          var nav = document.getElementById('sidebar-nav')
+          var setupView = document.getElementById('setup-view')
+          var main = setupView && setupView.querySelector('.setup-main')
+          if (!nav || !main) return
+          var items = Array.prototype.slice.call(nav.querySelectorAll('.sidebar-nav-item'))
+
+          function targetOf(item) {
+            var id = item.getAttribute('data-target')
+            return id ? document.getElementById(id) : null
+          }
+          function setActive(item) {
+            items.forEach(function (it) { it.classList.toggle('active', it === item) })
+          }
+          function scrollToTarget(item) {
+            var target = targetOf(item)
+            if (!target) return
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            // 兼容自定义滚动容器：再校正到距顶 16px
+            try {
+              var rect = target.getBoundingClientRect()
+              var mainRect = main.getBoundingClientRect()
+              main.scrollTo({ top: main.scrollTop + rect.top - mainRect.top - 16, behavior: 'smooth' })
+            } catch (e) {}
+          }
+          function flashTarget(item) {
+            var target = targetOf(item)
+            if (!target) return
+            target.classList.remove('card-flash')
+            // 强制重排以重启动画
+            void target.offsetWidth
+            target.classList.add('card-flash')
+            window.setTimeout(function () { target.classList.remove('card-flash') }, 1500)
+          }
+          items.forEach(function (item) {
+            item.addEventListener('click', function (event) {
+              event.preventDefault()
+              setActive(item)
+              scrollToTarget(item)
+              flashTarget(item)
+            })
+          })
+
+          // 可选项导航：目标隐藏时同步隐藏
+          items.forEach(function (item) {
+            if (item.getAttribute('data-optional') !== 'true') return
+            var target = targetOf(item)
+            if (!target) return
+            var sync = function () { item.hidden = target.hidden }
+            sync()
+            if (window.MutationObserver) {
+              new MutationObserver(sync).observe(target, { attributes: true, attributeFilter: ['hidden'] })
+            }
+          })
+
+          // 同步运行状态到侧栏
+          var statusPill = document.getElementById('status-pill')
+          var sidebarPill = document.getElementById('sidebar-status-pill')
+          if (statusPill && sidebarPill && window.MutationObserver) {
+            var syncPill = function () {
+              sidebarPill.className = statusPill.className
+              sidebarPill.textContent = statusPill.textContent
+            }
+            syncPill()
+            new MutationObserver(syncPill).observe(statusPill, { attributes: true, attributeFilter: ['class'], characterData: true, subtree: true, childList: true })
+          }
+
+          // 滚动时高亮当前分区（简易 scrollspy）
+          if (window.IntersectionObserver) {
+            var visibleMap = {}
+            var observer = new IntersectionObserver(function (entries) {
+              entries.forEach(function (entry) {
+                visibleMap[entry.target.id] = entry.isIntersecting ? entry.intersectionRatio : 0
+              })
+              var bestId = null, bestRatio = 0
+              for (var id in visibleMap) {
+                if (visibleMap[id] > bestRatio) { bestRatio = visibleMap[id]; bestId = id }
+              }
+              if (!bestId) return
+              var best = items.filter(function (it) { return it.getAttribute('data-target') === bestId })[0]
+              if (best) setActive(best)
+            }, { root: main, threshold: [0.1, 0.25, 0.5], rootMargin: '-10% 0px -70% 0px' })
+            items.forEach(function (item) {
+              var target = targetOf(item)
+              if (target && !target.hidden) observer.observe(target)
+            })
+          }
+        })
+      })()
+    </script>
   </body>
 </html>

@@ -24,6 +24,8 @@
   var marketConfirmResolver = null
   var marketError = ''
   var marketOperation = null
+  var marketCategory = 'all'
+  var marketSelectedPlugin = null
   var appLoadingMessage = ''
   var appLoadingDetail = ''
   var pendingRestartNames = []
@@ -307,6 +309,7 @@
       marketButton.classList.toggle('active', showingMarket)
       marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
     }
+    if (!showingMarket) closeMarketDetail()
     renderDesktopActions()
     var frame = el('dsh-frame')
     if (frame && url && loadedFrameUrl !== url) {
@@ -525,6 +528,39 @@
     if (value != null) node.textContent = String(value)
     return node
   }
+  function pluginCategory(plugin) {
+    return plugin && plugin.theme ? 'theme' : 'plugin'
+  }
+  function pluginMatchesCategory(plugin, category) {
+    if (category === 'all') return true
+    if (category === 'installed') return !!plugin.installed
+    return pluginCategory(plugin) === category
+  }
+  function pluginInitials(name) {
+    if (!name) return '?'
+    var cleaned = String(name).replace(/^@[^/]+\//, '').replace(/[\s\u3000-\u303f\uff00-\uffef]+/g, '-')
+    var parts = cleaned.split(/[-_.]/)
+    var chars = []
+    for (var i = 0; i < parts.length && chars.length < 2; i++) {
+      var c = parts[i].charAt(0).toUpperCase()
+      if (c && /[a-zA-Z0-9\u4e00-\u9fa5]/.test(c)) chars.push(c)
+    }
+    return chars.join('') || name.charAt(0).toUpperCase()
+  }
+  function pluginIconGradient(name, theme) {
+    if (theme) return 'linear-gradient(135deg, #f6c8ff, #9d7bff)'
+    var seed = 0
+    var str = String(name)
+    for (var i = 0; i < str.length; i++) seed = ((seed << 5) - seed) + str.charCodeAt(i) | 0
+    var gradients = [
+      'linear-gradient(135deg, #c8d0ff, #7de2bc)',
+      'linear-gradient(135deg, #8b9cf6, #5eead4)',
+      'linear-gradient(135deg, #a8d8ff, #6a82fb)',
+      'linear-gradient(135deg, #ffd9a8, #ff8c8c)',
+      'linear-gradient(135deg, #9df3d7, #5bb8ff)'
+    ]
+    return gradients[Math.abs(seed) % gradients.length]
+  }
   function renderMarket() {
     var source = state && state.runtimeSource === 'local' ? '本地' : '桌面托管'
     var runtimeReady = marketResult ? !!marketResult.runtimeReady : true
@@ -565,16 +601,28 @@
       messageNode.className = 'market-message' + (marketError ? ' bad' : '')
     }
     setHidden('market-readonly-note', !!marketResult && !runtimeReady)
+    document.querySelectorAll('[data-category]').forEach(function (tab) {
+      var active = tab.getAttribute('data-category') === marketCategory
+      tab.classList.toggle('active', active)
+      tab.setAttribute('aria-selected', active ? 'true' : 'false')
+      tab.disabled = !marketResult || marketBusy
+    })
+    var filtered = (marketResult && marketResult.plugins) ? marketResult.plugins.filter(function (plugin) { return pluginMatchesCategory(plugin, marketCategory) }) : []
+    if (marketCategory !== 'all' && !marketError) {
+      message = filtered.length + ' 个' + (marketCategory === 'plugin' ? '插件' : marketCategory === 'theme' ? '主题包' : '已安装项目') + '。'
+    }
+    if (messageNode) messageNode.textContent = message
     var results = el('market-results')
     if (results) {
       results.replaceChildren()
-      if (marketResult && marketResult.plugins && marketResult.plugins.length) {
-        marketResult.plugins.forEach(function (plugin) { results.appendChild(renderMarketPlugin(plugin, runtimeReady && packageManagerReady && !interactionBusy)) })
+      if (filtered.length) {
+        filtered.forEach(function (plugin) { results.appendChild(renderMarketPlugin(plugin, runtimeReady && packageManagerReady && !interactionBusy)) })
       } else if (marketResult && runtimeReady && packageManagerReady && !marketBusy) {
         var empty = makeNode('div', 'market-empty', marketResult.message || '没有符合条件的插件。')
         results.appendChild(empty)
       }
     }
+    renderMarketDetail()
     var operationCard = el('market-operation-card')
     if (operationCard) operationCard.hidden = !marketOperation
     if (marketOperation) {
@@ -587,13 +635,25 @@
     }
   }
   function renderMarketPlugin(plugin, enabled) {
-    var card = makeNode('article', 'market-plugin-card')
+    var card = makeNode('article', 'market-plugin-card' + (enabled ? '' : ' disabled'))
+    card.dataset.pluginName = plugin.name
+    card.addEventListener('click', function (event) {
+      if (!event.target) return
+      var target = event.target.nodeType === 3 ? event.target.parentNode : event.target
+      if (target && (target.tagName === 'BUTTON' || target.closest && target.closest('button'))) return
+      openMarketDetail(plugin)
+    })
+    var header = makeNode('div', 'market-plugin-header')
+    var icon = makeNode('div', plugin.theme ? 'market-plugin-icon theme' : 'market-plugin-icon', pluginInitials(plugin.displayName || plugin.name))
+    icon.style.background = pluginIconGradient(plugin.name, !!plugin.theme)
+    header.appendChild(icon)
     var heading = makeNode('div', 'market-plugin-heading')
     var title = makeNode('h2', null, plugin.displayName || plugin.name)
     var packageName = makeNode('code', 'market-plugin-name', plugin.name)
     heading.appendChild(title)
     heading.appendChild(packageName)
-    card.appendChild(heading)
+    header.appendChild(heading)
+    card.appendChild(header)
     var description = makeNode('p', 'market-plugin-description', plugin.description || '暂无描述。')
     card.appendChild(description)
     var meta = makeNode('div', 'market-plugin-meta')
@@ -625,6 +685,80 @@
     footer.appendChild(actionButton)
     card.appendChild(footer)
     return card
+  }
+  function openMarketDetail(plugin) {
+    if (!plugin || marketBusy || marketConfirming) return
+    marketSelectedPlugin = plugin
+    renderMarketDetail()
+    var panel = el('market-detail-panel')
+    if (panel) {
+      panel.hidden = false
+      panel.setAttribute('aria-hidden', 'false')
+      panel.classList.add('open')
+    }
+  }
+  function closeMarketDetail() {
+    marketSelectedPlugin = null
+    var panel = el('market-detail-panel')
+    if (panel) {
+      panel.classList.remove('open')
+      panel.setAttribute('aria-hidden', 'true')
+      window.setTimeout(function () { if (!marketSelectedPlugin) panel.hidden = true }, 300)
+    }
+  }
+  function renderMarketDetail() {
+    var plugin = marketSelectedPlugin
+    if (!plugin) return
+    var isTheme = !!plugin.theme
+    setText('market-detail-category', isTheme ? '主题包' : '插件')
+    setText('market-detail-title', plugin.displayName || plugin.name)
+    setText('market-detail-name', plugin.name)
+    setText('market-detail-description', plugin.description || '暂无描述。')
+    var icon = el('market-detail-icon')
+    if (icon) {
+      icon.textContent = pluginInitials(plugin.displayName || plugin.name)
+      icon.className = isTheme ? 'market-detail-icon theme' : 'market-detail-icon'
+      icon.style.background = pluginIconGradient(plugin.name, isTheme)
+    }
+    var meta = el('market-detail-meta')
+    if (meta) {
+      meta.replaceChildren()
+      meta.appendChild(makeNode('span', 'market-plugin-version', '最新版本 ' + plugin.version))
+      if (plugin.installed) meta.appendChild(makeNode('span', 'pill good', '已安装 · ' + (plugin.installedVersion || '未知版本')))
+      if (isTheme) {
+        meta.appendChild(makeNode('span', 'pill neutral', '主题包'))
+        var appearances = Array.isArray(plugin.theme.supportedAppearances) ? plugin.theme.supportedAppearances : []
+        if (appearances.length) meta.appendChild(makeNode('span', 'market-plugin-version', '支持 ' + appearances.join(' / ')))
+      }
+    }
+    var caps = el('market-detail-capabilities')
+    if (caps) {
+      caps.replaceChildren()
+      ;(plugin.capabilities || []).forEach(function (capability) { caps.appendChild(makeNode('span', 'market-capability', capability)) })
+    }
+    var capsSection = el('market-detail-capabilities-section')
+    if (capsSection) capsSection.hidden = !(plugin.capabilities && plugin.capabilities.length)
+    var runtimeReady = marketResult ? !!marketResult.runtimeReady : true
+    var packageManagerReady = marketResult ? !!marketResult.packageManagerReady : false
+    var interactionBusy = marketBusy || marketConfirming || desktopActionsBusy
+    var enabled = runtimeReady && packageManagerReady && !interactionBusy
+    var actions = el('market-detail-actions')
+    if (actions) {
+      actions.replaceChildren()
+      if (isTheme && plugin.installed) {
+        var previewButton = makeNode('button', 'button secondary', '预览主题')
+        previewButton.type = 'button'
+        previewButton.disabled = !enabled || pendingRestartNames.indexOf(plugin.name) >= 0
+        previewButton.title = '在 Desktop 设置中预览此主题包'
+        previewButton.addEventListener('click', function () { previewMarketTheme(plugin) })
+        actions.appendChild(previewButton)
+      }
+      var actionButton = makeNode('button', 'button ' + (plugin.installed ? 'danger-button' : 'primary'), plugin.installed ? (isTheme ? '卸载主题' : '卸载') : (isTheme ? '安装主题' : '安装'))
+      actionButton.type = 'button'
+      actionButton.disabled = !enabled
+      actionButton.addEventListener('click', function () { runMarketOperation(plugin, plugin.installed ? 'uninstall' : 'install') })
+      actions.appendChild(actionButton)
+    }
   }
   function previewMarketTheme(plugin) {
     if (!plugin || marketBusy || marketConfirming || desktopActionsBusy) return
@@ -687,6 +821,7 @@
   }
   function marketSearch(queryValue) {
     if (marketBusy || marketConfirming) return Promise.resolve()
+    closeMarketDetail()
     marketQuery = String(queryValue == null ? '' : queryValue).trim()
     marketError = ''
     marketBusy = true
@@ -1064,10 +1199,28 @@
   el('market-confirm-modal').addEventListener('click', function (event) {
     if (event.target && event.target.getAttribute('data-market-confirm-cancel') === 'true') resolveMarketConfirmation(false)
   })
+  document.querySelectorAll('[data-category]').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      if (marketBusy || marketConfirming) return
+      marketCategory = tab.getAttribute('data-category') || 'all'
+      renderMarket()
+    })
+  })
+  var detailPanel = el('market-detail-panel')
+  if (detailPanel) {
+    detailPanel.addEventListener('click', function (event) {
+      if (event.target && event.target.getAttribute('data-market-detail-close') === 'true') closeMarketDetail()
+    })
+  }
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' && marketConfirming) {
       event.preventDefault()
       resolveMarketConfirmation(false)
+      return
+    }
+    if (event.key === 'Escape' && marketSelectedPlugin) {
+      event.preventDefault()
+      closeMarketDetail()
     }
   })
   el('detect-local').addEventListener('click', function () { detectAction(function () { return invokeOrThrow('detect_local_runtime') }) })
