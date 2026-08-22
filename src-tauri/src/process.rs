@@ -44,6 +44,7 @@ impl DshProcess {
         let args = vec![
             bin.to_string_lossy().to_string(),
             "web".to_string(),
+            "--no-open".to_string(),
             "--host".to_string(),
             "127.0.0.1".to_string(),
             "--port".to_string(),
@@ -80,6 +81,7 @@ impl DshProcess {
             "--no-install".to_string(),
             "@deepseek-ai/dsh".to_string(),
             "web".to_string(),
+            "--no-open".to_string(),
             "--host".to_string(),
             "127.0.0.1".to_string(),
             "--port".to_string(),

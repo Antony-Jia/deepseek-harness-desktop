@@ -1899,11 +1899,8 @@ mod tests {
             "../../market/deepseek-vision-bridge/package.json"
         ))
         .expect("vision bridge manifest should be valid JSON");
-        let result = validate_market_manifest(
-            "@p-dsh-market/deepseek-vision-bridge",
-            &manifest,
-        )
-        .expect("vision bridge manifest should satisfy the market contract");
+        let result = validate_market_manifest("@p-dsh-market/deepseek-vision-bridge", &manifest)
+            .expect("vision bridge manifest should satisfy the market contract");
         assert_eq!(result.version, "0.1.2");
         assert_eq!(result.display_name, "DeepSeek 视觉桥接");
         assert!(result.desktop.is_none());

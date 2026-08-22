@@ -10,9 +10,9 @@ DSH Desktop 是一个基于 Windows/Tauri 的桌面客户端，用于管理并�
 ## 下载与安装
 
 当前 Windows x64 安装包位于
-[GitHub v0.1.4 Release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.4)：
+[GitHub v0.1.5 Release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.5)：
 
-[下载 DSH Desktop Windows 安装包](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.4/DSH.Desktop_0.1.4_x64-setup.exe)
+[下载 DSH Desktop Windows 安装包](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.5/DSH.Desktop_0.1.5_x64-setup.exe)
 
 安装包内置经过 SHA256 校验的 Node.js v24.19.0 x64 运行时，因此目标电脑不需要预先安装 Node.js、npm 或 npx。首次安装桌面托管版 DSH 时，仍需要联网从 npm registry 下载所选的 `@deepseek-ai/dsh` 版本。
 
@@ -27,6 +27,7 @@ DSH Desktop 是一个基于 Windows/Tauri 的桌面客户端，用于管理并�
 - 在插件市场旁提供 MCP 管理入口，通过 DSH 官方 MCP Client 注册工具；内置默认关闭的 Tavily Search 与 Firecrawl，也支持用户添加 stdio/npm、本地命令或 Streamable HTTP MCP。
 - 自定义 MCP 添加对话框跟随亮色、暗色、系统主题和已安装 Theme Pack 外观变化。
 - 支持受控的桌面顶栏扩展、工作区文件浏览、终端、股票行情分析和多 Agent 圆桌讨论。
+- 市场内置 DeepSeek 视觉桥接插件，为不支持图片输入的模型提供 `/vision` 命令和受控的 `deepseek_vision_analyze` 工具，只分析 DSH 会话中已持久化的图片。
 - 在恢复首页显示启动、安装、更新和失败日志。
 - 提供可见的系统托盘图标、原生通知桥接和无边框窗口控制。
 - 将窗口位置、尺寸、最大化状态、外观模式、界面皮肤、背景强度和减少效果偏好保存到 `%LOCALAPPDATA%/dsh-desktop/state.json`。
@@ -40,6 +41,16 @@ DSH Desktop 是一个基于 Windows/Tauri 的桌面客户端，用于管理并�
 启用后通过官方 `@deepseek-ai/dsh-mcp-client` 注册为
 `mcp__<serverName>__*` 工具。API Key、环境变量和 HTTP Header 使用 Windows
 DPAPI 保护且不会回显；页面会显示每个服务的连接状态、工具数量和工具名称。
+
+### DeepSeek 视觉桥接
+
+市场内置 `@p-dsh-market/deepseek-vision-bridge`，用于让不支持图片输入的
+模型分析会话图片。安装插件并重启 DSH 后，附加图片并执行
+`/vision 你的问题`；插件会通过受控的 `deepseek_vision_analyze` 工具调用官方
+`deepseek-official/deepseek-v4-flash-vision-exp` 模型。未显式指定图片时，
+默认分析最近一条含图片消息中的全部图片；显式选择时最多支持 8 张。插件只
+读取 DSH 已持久化的会话附件，不读取任意本地路径或远程 URL；原生视觉模型会
+直接看图并隐藏桥接工具。
 
 ## 界面预览
 
@@ -106,7 +117,7 @@ npm run build
 Windows NSIS 安装包生成在：
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.4_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.5_x64-setup.exe
 ```
 
 `.gitignore` 会忽略 `src-tauri/target/`、`dist/bundle/`、portable Node 二进制和安装包文件；这些内容只作为 release 构建输入或输出，不应提交到源码仓库。

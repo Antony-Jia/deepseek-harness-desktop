@@ -42,6 +42,7 @@ test('desktop shell contract is represented in the project', () => {
   assert.match(rust, /自动切换到托管运行时/)
   assert.match(text('src-tauri/src/main.rs'), /windows_subsystem = "windows"/)
   assert.match(process, /CREATE_NO_WINDOW/)
+  assert.equal(process.match(/"--no-open"\.to_string\(\)/g)?.length, 2)
   assert.match(runtime, /CREATE_NO_WINDOW/)
   assert.match(state, /window_bounds/)
   assert.match(state, /THEME_SYSTEM/)

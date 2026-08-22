@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "A thin Windows/Tauri shell for the DeepSeek Harness npm runtime.",
   "scripts": {
