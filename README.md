@@ -12,9 +12,9 @@ code.
 ## Download and install
 
 The current Windows x64 installer is available from the
-[v0.1.3 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.3):
+[v0.1.4 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.4):
 
-[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.3/DSH.Desktop_0.1.3_x64-setup.exe)
+[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.4/DSH.Desktop_0.1.4_x64-setup.exe)
 
 The installer includes a checksum-verified Node.js v24.19.0 x64 runtime, so
 the target machine does not need Node.js, npm, or npx installed. The first
@@ -36,7 +36,10 @@ its embedded WebView; no manual browser URL copy is required.
 - Provides a validated marketplace for installing and uninstalling Web-profile
   plugins and theme packs, with installed/enabled/protocol compatibility gates.
 - Adds MCP management beside the marketplace and registers tools through DSH's
-  official MCP client. Opt-in Tavily Search and Firecrawl presets only require API keys.
+  official MCP client. It includes opt-in Tavily Search and Firecrawl presets and
+  user-managed stdio/npm, local-command, and Streamable HTTP servers.
+- Keeps the custom MCP editor aligned with light, dark, system, and installed
+  Theme Pack appearances.
 - Supports controlled desktop title-bar contributions, workspace browsing,
   terminal access, stock market analysis, and multi-Agent roundtable sessions.
 - Shows startup, installation, update, and failure logs in the recovery page.
@@ -48,10 +51,13 @@ its embedded WebView; no manual browser URL copy is required.
 ### MCP management
 
 The MCP view beside the marketplace manages opt-in Tavily Search and Firecrawl
-presets. Enter an API key, save the configuration, and restart DSH to register
-the tools through DSH's official `@deepseek-ai/dsh-mcp-client`. Keys are
-protected with Windows DPAPI and are never shown in the UI; both presets stay
-disabled until explicitly enabled.
+presets and user-added stdio npm packages, local commands, or Streamable HTTP
+servers. npm packages are installed by the desktop-managed Node/npm on first
+enabled startup. DSH registers each service through the official
+`@deepseek-ai/dsh-mcp-client` as `mcp__<serverName>__*`. API keys, environment
+variables, and HTTP headers are protected with Windows DPAPI and never shown in
+the UI. The page reports connection state, registered tool count, and tool names;
+every service remains disabled until explicitly enabled.
 
 ## Screenshots
 
@@ -133,7 +139,7 @@ npm run build
 The Windows NSIS installer is generated at:
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.3_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.4_x64-setup.exe
 ```
 
 `src-tauri/target/`, `dist/bundle/`, portable Node binaries, and installer

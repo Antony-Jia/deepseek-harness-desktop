@@ -412,6 +412,7 @@ button.titlebar-brand {
 .market-operation-details .install-log { max-height: 150px; margin-top: 10px; }
 .market-readonly-note { margin: 18px 0 0; padding: 14px 16px; border-radius: 12px; color: #ffe0a1; background: rgba(248, 180, 76, .10); font-size: 13px; }
 .mcp-shell code { color: var(--accent-strong); font-family: Consolas, monospace; }
+.mcp-hero-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
 .mcp-server-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
 .mcp-server-card { display: flex; min-width: 0; flex-direction: column; }
 .mcp-server-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; }
@@ -419,6 +420,7 @@ button.titlebar-brand {
 .mcp-server-heading code { font-size: 12px; }
 .mcp-server-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 16px; color: #091128; background: linear-gradient(135deg, #a6b2ff, #7de2bc); font-size: 21px; font-weight: 900; box-shadow: 0 10px 26px rgba(126, 150, 255, .20); }
 .mcp-server-icon.firecrawl { color: #28120a; background: linear-gradient(135deg, #ffbd8a, #ff735f); }
+.mcp-server-icon.custom { color: #081a20; background: linear-gradient(135deg, #7de2bc, #75c7f6); }
 .mcp-switch { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid rgba(165, 180, 252, .16); border-radius: 999px; color: #d7def4; background: rgba(139, 156, 246, .08); cursor: pointer; font-size: 12px; font-weight: 700; }
 .mcp-switch input { accent-color: var(--accent); }
 .mcp-server-description { min-height: 48px; margin: 18px 0; color: #d6dcf4; font-size: 13px; line-height: 1.7; }
@@ -429,6 +431,9 @@ button.titlebar-brand {
 .mcp-server-status.good { color: var(--success); }
 .mcp-server-status.warn { color: #ffe0a1; }
 .mcp-server-status.bad { color: var(--danger); }
+.mcp-server-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
+.mcp-server-meta span { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: rgba(139, 156, 246, .08); font-size: 11px; overflow-wrap: anywhere; }
+.mcp-server-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .mcp-note { margin-top: 18px; }
 .mcp-note p:last-child { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.75; }
 .app-loading-overlay,
@@ -472,6 +477,7 @@ button.titlebar-brand {
 @keyframes dsh-loading-spin { to { transform: rotate(360deg); } }
 .market-confirm-modal {
   background: rgba(3, 7, 18, .58);
+  background: color-mix(in srgb, var(--skin-background-base, #030712) 58%, transparent);
   backdrop-filter: blur(5px);
 }
 .market-confirm-backdrop { position: absolute; inset: 0; }
@@ -480,21 +486,35 @@ button.titlebar-brand {
   z-index: 1;
   width: min(480px, calc(100vw - 48px));
   padding: 27px 29px 24px;
-  border: 1px solid rgba(165, 180, 252, .28);
-  border-radius: 20px;
-  background: linear-gradient(135deg, rgba(28, 38, 72, .99), rgba(13, 21, 45, .99));
-  box-shadow: 0 28px 90px rgba(0, 0, 0, .46), inset 0 1px 0 rgba(255, 255, 255, .09);
+  border: 1px solid var(--skin-border, rgba(165, 180, 252, .28));
+  border-radius: var(--skin-panel-radius, 20px);
+  color: var(--skin-text-primary, #eef2ff);
+  background: var(--skin-surface-primary, linear-gradient(135deg, rgba(28, 38, 72, .99), rgba(13, 21, 45, .99)));
+  box-shadow: var(--skin-panel-shadow, 0 28px 90px rgba(0, 0, 0, .46), inset 0 1px 0 rgba(255, 255, 255, .09));
+  backdrop-filter: blur(var(--skin-panel-blur, 0px));
 }
 .market-confirm-dialog h2 { margin-bottom: 12px; }
-.market-confirm-message { margin-bottom: 13px; color: #eef2ff; line-height: 1.65; overflow-wrap: anywhere; }
+.market-confirm-message { margin-bottom: 13px; color: var(--skin-text-primary, #eef2ff); line-height: 1.65; overflow-wrap: anywhere; }
 .market-confirm-note { margin-bottom: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .market-confirm-note code { color: var(--accent-strong); font-family: Consolas, monospace; }
 .market-confirm-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+.mcp-editor-dialog { width: min(680px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+.mcp-editor-form { display: grid; gap: 14px; margin-top: 18px; }
+.mcp-editor-form label { display: grid; gap: 7px; color: var(--accent-strong); font-size: 12px; font-weight: 700; }
+.mcp-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mcp-textarea { min-height: 76px; resize: vertical; font-family: Consolas, monospace; line-height: 1.5; }
+.mcp-editor-enabled { display: flex !important; grid-template-columns: auto 1fr; align-items: center; }
+.mcp-editor-enabled input { accent-color: var(--accent); }
+.mcp-editor-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; }
+.button.danger { color: #ffe5e8; background: rgba(201, 79, 107, .72); }
+.button.danger:hover { background: rgba(201, 79, 107, .90); }
 body.modal-open { overflow: hidden; }
 
 @media (max-width: 820px) {
   .mcp-server-list { grid-template-columns: 1fr; }
   .mcp-key-row { flex-direction: column; }
+  .mcp-hero-actions { justify-content: flex-start; }
+  .mcp-form-grid { grid-template-columns: 1fr; }
 }
 
 .market-detail-panel {
@@ -650,7 +670,8 @@ h2 { margin-bottom: 8px; font-size: 19px; letter-spacing: -.02em; }
 }
 .theme-option:hover { color: #f5f7ff; background: rgba(139, 156, 246, .18); transform: translateY(-1px); }
 .theme-option.active { color: #111832; border-color: transparent; background: linear-gradient(135deg, #c8d0ff, #a6b2ff); box-shadow: 0 6px 16px rgba(139, 156, 246, .18); }
-.update-actions { flex-shrink: 0; }
+.update-actions { flex-shrink: 0; flex-direction: column; align-items: stretch; }
+.update-action-buttons { display: flex; flex-direction: column; gap: 10px; }
 select { min-width: 190px; padding: 10px 12px; border: 0; border-radius: 11px; outline: 0; color: #eef2ff; background: #202b52; box-shadow: inset 0 1px 0 rgba(191, 202, 255, .08); cursor: pointer; }
 select:focus { box-shadow: 0 0 0 3px rgba(139, 156, 246, .22), inset 0 1px 0 rgba(191, 202, 255, .08); }
 select:disabled { cursor: not-allowed; opacity: .56; }
@@ -721,6 +742,14 @@ select:disabled { cursor: not-allowed; opacity: .56; }
 :root[data-theme="light"] .market-detail-description { color: #45516d; }
 :root[data-theme="light"] .market-detail-actions { border-top-color: rgba(92, 111, 163, .14); }
 :root[data-theme="light"] .error-detail { background: rgba(201, 79, 107, .08); box-shadow: inset 0 1px 0 rgba(255, 127, 145, .16); }
+:root[data-theme="light"] .market-confirm-modal { background: rgba(219, 225, 239, .72); }
+:root[data-theme="light"] .market-confirm-dialog {
+  border-color: rgba(92, 111, 163, .20);
+  color: #18233f;
+  background: linear-gradient(135deg, rgba(255, 255, 255, .98), rgba(237, 242, 255, .96));
+  box-shadow: 0 28px 90px rgba(72, 91, 137, .20), inset 0 1px 0 rgba(255, 255, 255, .90);
+}
+:root[data-theme="light"] .market-confirm-message { color: #243253; }
 :root[data-theme="light"] .setup-sidebar { border-right-color: rgba(92, 111, 163, .14); background: linear-gradient(180deg, rgba(255, 255, 255, .92), rgba(244, 247, 255, .88)); }
 :root[data-theme="light"] .sidebar-brand { border-bottom-color: rgba(92, 111, 163, .12); }
 :root[data-theme="light"] .sidebar-brand-text strong { color: #18233f; }
@@ -759,7 +788,7 @@ select:disabled { cursor: not-allowed; opacity: .56; }
   .runtime-source-actions { justify-content: stretch; }
   .runtime-source-actions .button { flex: 1; }
   .update-actions { width: 100%; }
-  select, .update-actions .button { flex: 1; }
+  .update-actions select, .update-actions .button { width: 100%; }
   .theme-options { width: 100%; }
   .theme-option { flex: 1; padding: 0 8px; }
   .dashboard > .card.runtime-source-card,
@@ -870,6 +899,19 @@ select:disabled { cursor: not-allowed; opacity: .56; }
 /* The same host mapping is used for installed packs; only the token values differ. */
 :root[data-skin]:not([data-skin="builtin.default"]) body { background: var(--skin-background-base, #0b1020); }
 :root[data-skin]:not([data-skin="builtin.default"]) .titlebar { color: var(--skin-text-primary, inherit); background: var(--skin-titlebar-background, var(--panel)); border-bottom: 1px solid var(--skin-border, var(--border)); }
+:root[data-skin]:not([data-skin="builtin.default"]) .market-confirm-modal {
+  background: rgba(3, 7, 18, .58);
+  background: color-mix(in srgb, var(--skin-background-base, #030712) 58%, transparent);
+}
+:root[data-skin]:not([data-skin="builtin.default"]) .market-confirm-dialog {
+  border-color: var(--skin-border, var(--border));
+  border-radius: var(--skin-panel-radius, 20px);
+  color: var(--skin-text-primary, inherit);
+  background: var(--skin-surface-primary, var(--panel));
+  box-shadow: var(--skin-panel-shadow, 0 18px 50px rgba(0, 0, 0, .18));
+  backdrop-filter: blur(var(--skin-panel-blur, 0px));
+}
+:root[data-skin]:not([data-skin="builtin.default"]) .market-confirm-message { color: var(--skin-text-primary, inherit); }
 :root[data-skin]:not([data-skin="builtin.default"]) .card,
 :root[data-skin]:not([data-skin="builtin.default"]) .market-plugin-card { border: 1px solid var(--skin-border, var(--border)); background: var(--skin-surface-primary, var(--panel)); box-shadow: var(--skin-panel-shadow, 0 18px 50px rgba(0, 0, 0, .18)); backdrop-filter: blur(var(--skin-panel-blur, 0px)); }
 :root[data-skin]:not([data-skin="builtin.default"]) .market-plugin-card { background: var(--skin-surface-secondary, var(--skin-surface-primary, var(--panel))); }

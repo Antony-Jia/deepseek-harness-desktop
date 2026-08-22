@@ -183,7 +183,10 @@
           </div>
           <div class="update-actions">
             <select id="version-select" aria-label="选择运行时版本"></select>
-            <button id="install-version" class="button secondary">安装并切换到托管版</button>
+            <div class="update-action-buttons">
+              <button id="install-version" class="button secondary" type="button">安装并切换到托管版</button>
+              <button id="delete-version" class="button danger-button" type="button">删除当前版本</button>
+            </div>
           </div>
         </section>
 
@@ -300,7 +303,11 @@
             <h1>MCP 管理</h1>
             <p class="subtitle">配置外部工具并注册到 DeepSeek Harness。服务默认关闭，由你决定是否启用。</p>
           </div>
-          <button id="mcp-back-home" class="button ghost" type="button">返回首页</button>
+          <div class="mcp-hero-actions">
+            <button id="mcp-open-logs" class="button secondary" type="button">查看日志</button>
+            <button id="mcp-add-server" class="button primary" type="button">添加 MCP</button>
+            <button id="mcp-back-home" class="button ghost" type="button">返回首页</button>
+          </div>
         </section>
 
         <section class="card market-runtime-card" aria-live="polite">
@@ -357,10 +364,66 @@
 
         <section class="card mcp-note">
           <p class="eyebrow">工作方式</p>
-          <p>桌面端通过 DSH 官方 <code>@deepseek-ai/dsh-mcp-client</code> 注册工具；启用后工具名称使用 <code>mcp__tavily__*</code> 与 <code>mcp__firecrawl__*</code> 命名空间。首次启动会由桌面托管的 Node/npm 下载固定版本 MCP 包。</p>
+          <p>桌面端通过 DSH 官方 <code>@deepseek-ai/dsh-mcp-client</code> 注册工具；启用后工具名称使用 <code>mcp__&lt;serverName&gt;__*</code> 命名空间。npm 类型会在首次启用并启动 DSH 时由桌面托管的 Node/npm 自动安装；命令与 HTTP 类型直接连接你配置的服务。</p>
         </section>
       </div>
     </main>
+    <div id="mcp-editor-modal" class="market-confirm-modal" hidden aria-hidden="true">
+      <div class="market-confirm-backdrop" data-mcp-editor-cancel="true"></div>
+      <section class="market-confirm-dialog mcp-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-editor-title">
+        <p class="eyebrow">自定义 MCP</p>
+        <h2 id="mcp-editor-title">添加 MCP 服务</h2>
+        <p class="market-confirm-note">服务默认关闭。环境变量和请求头会使用当前 Windows 用户的 DPAPI 加密，保存后不再回显。</p>
+        <form id="mcp-editor-form" class="mcp-editor-form">
+          <div class="mcp-form-grid">
+            <label><span>显示名称</span><input id="mcp-custom-name" class="market-query" maxlength="80" required placeholder="例如 GitHub MCP" /></label>
+            <label><span>serverName</span><input id="mcp-custom-server-name" class="market-query" maxlength="48" required pattern="[A-Za-z][A-Za-z0-9_-]*" placeholder="例如 github" /></label>
+          </div>
+          <label><span>说明（可选）</span><input id="mcp-custom-description" class="market-query" maxlength="240" placeholder="这个 MCP 能为模型提供什么能力" /></label>
+          <label><span>传输方式</span>
+            <select id="mcp-custom-transport" class="market-query">
+              <option value="stdio">stdio（本地进程）</option>
+              <option value="streamable-http">Streamable HTTP</option>
+            </select>
+          </label>
+          <div id="mcp-custom-stdio-fields">
+            <label><span>启动方式</span>
+              <select id="mcp-custom-launch" class="market-query">
+                <option value="npm">npm 包（npx 自动安装）</option>
+                <option value="command">本地命令</option>
+              </select>
+            </label>
+            <label id="mcp-custom-package-field"><span>npm package spec</span><input id="mcp-custom-package" class="market-query" maxlength="200" placeholder="例如 @modelcontextprotocol/server-github@1.0.0" /></label>
+            <label id="mcp-custom-command-field" hidden><span>可执行命令</span><input id="mcp-custom-command" class="market-query" maxlength="260" placeholder="例如 C:\\Tools\\my-mcp.exe" /></label>
+            <label><span>启动参数（每行一个）</span><textarea id="mcp-custom-args" class="market-query mcp-textarea" rows="3" placeholder="--mode&#10;readonly"></textarea></label>
+            <label><span>环境变量（每行 NAME=value）</span><textarea id="mcp-custom-env" class="market-query mcp-textarea" rows="3" placeholder="GITHUB_TOKEN=...&#10;READ_ONLY=true"></textarea></label>
+          </div>
+          <div id="mcp-custom-http-fields" hidden>
+            <label><span>服务 URL</span><input id="mcp-custom-url" class="market-query" maxlength="2048" placeholder="https://example.com/mcp" /></label>
+            <label><span>请求头（每行 Header=value）</span><textarea id="mcp-custom-headers" class="market-query mcp-textarea" rows="3" placeholder="Authorization=Bearer ..."></textarea></label>
+          </div>
+          <label class="mcp-editor-enabled"><input id="mcp-custom-enabled" type="checkbox" /><span>保存后立即启用（DSH 运行中时需要重启）</span></label>
+          <p id="mcp-editor-error" class="mcp-editor-error" role="alert"></p>
+          <div class="market-confirm-actions">
+            <button id="mcp-editor-cancel" class="button secondary" type="button">取消</button>
+            <button id="mcp-editor-submit" class="button primary" type="submit">保存 MCP</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div id="mcp-delete-modal" class="market-confirm-modal" hidden aria-hidden="true">
+      <div class="market-confirm-backdrop" data-mcp-delete-cancel="true"></div>
+      <section class="market-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-delete-title">
+        <p class="eyebrow">自定义 MCP</p>
+        <h2 id="mcp-delete-title">删除 MCP 服务</h2>
+        <p id="mcp-delete-message" class="market-confirm-message"></p>
+        <p class="market-confirm-note">加密保存的环境变量和请求头也会一并移除；DSH 运行中时需要重启才会卸载工具。</p>
+        <div class="market-confirm-actions">
+          <button id="mcp-delete-cancel" class="button secondary" type="button">取消</button>
+          <button id="mcp-delete-accept" class="button danger" type="button">删除</button>
+        </div>
+      </section>
+    </div>
     <div id="app-loading-overlay" class="app-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
       <div class="app-loading-panel">
         <span class="loading-spinner" aria-hidden="true"></span>
@@ -378,6 +441,19 @@
         <div class="market-confirm-actions">
           <button id="market-confirm-cancel" class="button secondary" type="button">取消</button>
           <button id="market-confirm-accept" class="button primary" type="button">确认</button>
+        </div>
+      </section>
+    </div>
+    <div id="runtime-confirm-modal" class="market-confirm-modal" hidden aria-hidden="true">
+      <div class="market-confirm-backdrop" data-runtime-confirm-cancel="true"></div>
+      <section class="market-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-confirm-title" aria-describedby="runtime-confirm-message">
+        <p class="eyebrow">运行时操作</p>
+        <h2 id="runtime-confirm-title">确认删除运行时</h2>
+        <p id="runtime-confirm-message" class="market-confirm-message"></p>
+        <p id="runtime-confirm-note" class="market-confirm-note"></p>
+        <div class="market-confirm-actions">
+          <button id="runtime-confirm-cancel" class="button secondary" type="button">取消</button>
+          <button id="runtime-confirm-accept" class="button danger-button" type="button">删除</button>
         </div>
       </section>
     </div>

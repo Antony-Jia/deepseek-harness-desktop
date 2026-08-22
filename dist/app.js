@@ -22,6 +22,8 @@
   var marketBusy = false
   var marketConfirming = false
   var marketConfirmResolver = null
+  var runtimeConfirming = false
+  var runtimeConfirmResolver = null
   var marketError = ''
   var marketOperation = null
   var marketCategory = 'all'
@@ -33,6 +35,7 @@
   var mcpRuntimeResult = null
   var mcpRuntimeRequest = null
   var mcpRuntimeCheckedAt = 0
+  var mcpDeleteId = ''
   var appLoadingMessage = ''
   var appLoadingDetail = ''
   var pendingRestartNames = []
@@ -277,7 +280,7 @@
   }
   function setBusy(busy) {
     desktopActionsBusy = !!busy
-    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'delete-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
@@ -839,6 +842,39 @@
     renderMarket()
     resolver(confirmed === true)
   }
+  function confirmRuntimeDeletion(version) {
+    if (runtimeConfirming || runtimeConfirmResolver) return Promise.resolve(false)
+    setText('runtime-confirm-title', '确认删除运行时')
+    setText('runtime-confirm-message', '确认删除托管运行时 ' + version + '？')
+    setText('runtime-confirm-note', '删除后将释放该版本占用的磁盘空间，且不会影响其他已安装版本。')
+    runtimeConfirming = true
+    var modal = el('runtime-confirm-modal')
+    if (modal) {
+      modal.hidden = false
+      modal.setAttribute('aria-hidden', 'false')
+    }
+    document.body.classList.add('modal-open')
+    return new Promise(function (resolve) {
+      runtimeConfirmResolver = resolve
+      window.setTimeout(function () {
+        var accept = el('runtime-confirm-accept')
+        if (accept) accept.focus()
+      }, 0)
+    })
+  }
+  function resolveRuntimeDeletion(confirmed) {
+    var resolver = runtimeConfirmResolver
+    if (!resolver) return
+    runtimeConfirmResolver = null
+    runtimeConfirming = false
+    var modal = el('runtime-confirm-modal')
+    if (modal) {
+      modal.hidden = true
+      modal.setAttribute('aria-hidden', 'true')
+    }
+    document.body.classList.remove('modal-open')
+    resolver(confirmed === true)
+  }
   function marketSearch(queryValue) {
     if (marketBusy || marketConfirming) return Promise.resolve()
     closeMarketDetail()
@@ -919,7 +955,61 @@
       }
     })
   }
+  function createCustomMcpCard(server) {
+    var card = makeNode('article', 'card mcp-server-card')
+    card.setAttribute('data-mcp-server', server.id)
+    card.setAttribute('data-mcp-custom', 'true')
+    var heading = makeNode('div', 'mcp-server-heading')
+    heading.appendChild(makeNode('div', 'mcp-server-icon custom', (server.displayName || 'M').slice(0, 1).toUpperCase()))
+    var title = makeNode('div')
+    title.appendChild(makeNode('p', 'eyebrow', server.transport === 'streamable-http' ? '远程 MCP' : '自定义 MCP'))
+    title.appendChild(makeNode('h2', '', server.displayName || server.serverName))
+    title.appendChild(makeNode('code', '', 'mcp__' + server.serverName + '__*'))
+    heading.appendChild(title)
+    var toggle = makeNode('label', 'mcp-switch')
+    var checkbox = makeNode('input')
+    checkbox.type = 'checkbox'
+    checkbox.id = 'mcp-' + server.id + '-enabled'
+    checkbox.addEventListener('change', function () {
+      mcpDraftEnabled[server.id] = checkbox.checked
+      saveMcpServer(server.id)
+    })
+    toggle.appendChild(checkbox)
+    toggle.appendChild(makeNode('span', '', '启用'))
+    heading.appendChild(toggle)
+    card.appendChild(heading)
+    card.appendChild(makeNode('p', 'mcp-server-description', server.description || '用户添加的 MCP 服务。'))
+    var meta = makeNode('div', 'mcp-server-meta')
+    meta.appendChild(makeNode('span', '', server.transport === 'streamable-http' ? 'Streamable HTTP' : 'stdio'))
+    if (server.command) meta.appendChild(makeNode('span', '', server.command))
+    if (server.url) meta.appendChild(makeNode('span', '', server.url))
+    if (Array.isArray(server.secretNames) && server.secretNames.length) meta.appendChild(makeNode('span', '', '加密配置：' + server.secretNames.join('、')))
+    card.appendChild(meta)
+    var status = makeNode('p', 'mcp-server-status', '正在读取状态…')
+    status.id = 'mcp-' + server.id + '-status'
+    card.appendChild(status)
+    var actions = makeNode('div', 'mcp-server-actions')
+    var remove = makeNode('button', 'button danger', '删除')
+    remove.type = 'button'
+    remove.addEventListener('click', function () { openMcpDelete(server.id) })
+    actions.appendChild(remove)
+    card.appendChild(actions)
+    return card
+  }
+  function syncCustomMcpCards() {
+    var list = el('mcp-server-list')
+    if (!list) return
+    var servers = mcpResult && Array.isArray(mcpResult.servers) ? mcpResult.servers : []
+    var customIds = servers.filter(function (server) { return !server.builtIn }).map(function (server) { return server.id })
+    list.querySelectorAll('[data-mcp-custom="true"]').forEach(function (card) {
+      if (customIds.indexOf(card.getAttribute('data-mcp-server')) < 0) card.remove()
+    })
+    servers.forEach(function (server) {
+      if (!server.builtIn && !list.querySelector('[data-mcp-server="' + server.id + '"]')) list.appendChild(createCustomMcpCard(server))
+    })
+  }
   function renderMcp() {
+    syncCustomMcpCards()
     var running = !!(state && state.webUrl)
     var runtimeServers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
     var enabledCount = runtimeServers.filter(function (server) { return server.status !== 'disabled' }).length
@@ -930,8 +1020,9 @@
     setText('mcp-message', mcpError || (mcpRuntimeResult && mcpRuntimeResult.message) || (mcpResult && mcpResult.message) || 'API Key 使用当前 Windows 用户的 DPAPI 加密且不会回显；配置变更将在下次启动或重启 DSH 时生效。')
     var restart = el('mcp-restart-dsh')
     if (restart) restart.disabled = !running || mcpBusy || desktopActionsBusy
-    ;['tavily', 'firecrawl'].forEach(function (id) {
-      var server = mcpServerById(id)
+    var configuredServers = mcpResult && Array.isArray(mcpResult.servers) ? mcpResult.servers : []
+    configuredServers.forEach(function (server) {
+      var id = server.id
       var runtimeServer = mcpRuntimeServerById(id)
       var enabled = el('mcp-' + id + '-enabled')
       var key = el('mcp-' + id + '-key')
@@ -950,16 +1041,16 @@
       var status = el('mcp-' + id + '-status')
       if (status) {
         var toolSummary = runtimeServer && Array.isArray(runtimeServer.tools)
-          ? runtimeServer.tools.slice(0, 4).map(function (name) { return name.replace('mcp__' + id + '__', '') }).join('、')
+          ? runtimeServer.tools.slice(0, 4).map(function (name) { return name.replace('mcp__' + server.serverName + '__', '') }).join('、')
           : ''
         status.textContent = !server
           ? '正在读取配置…'
           : runtimeServer && runtimeServer.status === 'connected'
             ? runtimeServer.message + (toolSummary ? ' ' + toolSummary + (runtimeServer.toolCount > 4 ? ' 等' : '') : '')
           : server.enabled
-            ? ((runtimeServer && runtimeServer.message) || (server.apiKeyConfigured ? '已启用；重启 DSH 后注册工具。' : '缺少 API Key。'))
-            : (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。')
-        status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : server && server.enabled ? 'warn' : server && server.apiKeyConfigured ? '' : 'warn')
+            ? ((runtimeServer && runtimeServer.message) || (server.builtIn && !server.apiKeyConfigured ? '缺少 API Key。' : '已启用；重启 DSH 后注册工具。'))
+            : (server.builtIn ? (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。') : '配置已保存，服务当前关闭。')
+        status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : server.enabled ? 'warn' : server.builtIn && !server.apiKeyConfigured ? 'warn' : '')
       }
     })
   }
@@ -1017,6 +1108,112 @@
     }).catch(function (error) {
       mcpError = '保存失败：' + messageOf(error)
       syncMcpDrafts(mcpResult, true)
+    }).finally(function () {
+      mcpBusy = false
+      clearAppLoading()
+      renderMcp()
+      refreshMcpRuntimeStatus(true)
+    })
+  }
+  function setMcpEditorOpen(open) {
+    var modal = el('mcp-editor-modal')
+    if (!modal) return
+    modal.hidden = !open
+    modal.setAttribute('aria-hidden', open ? 'false' : 'true')
+    document.body.classList.toggle('modal-open', open)
+    if (!open) setText('mcp-editor-error', '')
+  }
+  function updateMcpEditorFields() {
+    var http = el('mcp-custom-transport').value === 'streamable-http'
+    var command = el('mcp-custom-launch').value === 'command'
+    setHidden('mcp-custom-stdio-fields', http)
+    setHidden('mcp-custom-http-fields', !http)
+    setHidden('mcp-custom-package-field', command)
+    setHidden('mcp-custom-command-field', !command)
+  }
+  function openMcpEditor() {
+    el('mcp-editor-form').reset()
+    el('mcp-custom-transport').value = 'stdio'
+    el('mcp-custom-launch').value = 'npm'
+    updateMcpEditorFields()
+    setMcpEditorOpen(true)
+    window.setTimeout(function () { el('mcp-custom-name').focus() }, 0)
+  }
+  function parseMcpPairs(value, label) {
+    return String(value || '').split(/\r?\n/).map(function (line) { return line.trim() }).filter(Boolean).map(function (line) {
+      var separator = line.indexOf('=')
+      if (separator < 1) throw new Error(label + '必须使用 NAME=value 格式：' + line)
+      return { name: line.slice(0, separator).trim(), value: line.slice(separator + 1) }
+    })
+  }
+  function submitCustomMcp(event) {
+    event.preventDefault()
+    if (mcpBusy) return
+    var transport = el('mcp-custom-transport').value
+    var launch = el('mcp-custom-launch').value
+    var input
+    try {
+      input = {
+        displayName: el('mcp-custom-name').value.trim(),
+        description: el('mcp-custom-description').value.trim(),
+        serverName: el('mcp-custom-server-name').value.trim(),
+        transport: transport,
+        package: transport === 'stdio' && launch === 'npm' ? el('mcp-custom-package').value.trim() : '',
+        command: transport === 'stdio' && launch === 'command' ? el('mcp-custom-command').value.trim() : '',
+        args: transport === 'stdio' ? el('mcp-custom-args').value.split(/\r?\n/).map(function (line) { return line.trim() }).filter(Boolean) : [],
+        url: transport === 'streamable-http' ? el('mcp-custom-url').value.trim() : '',
+        env: transport === 'stdio' ? parseMcpPairs(el('mcp-custom-env').value, '环境变量') : [],
+        headers: transport === 'streamable-http' ? parseMcpPairs(el('mcp-custom-headers').value, '请求头') : [],
+        enabled: el('mcp-custom-enabled').checked
+      }
+    } catch (error) {
+      setText('mcp-editor-error', messageOf(error))
+      return
+    }
+    mcpBusy = true
+    setText('mcp-editor-error', '')
+    setAppLoading('正在保存自定义 MCP', input.package ? 'npm 包会在首次启用并启动 DSH 时自动安装。' : '正在加密配置并写入 DSH web profile。')
+    invokeOrThrow('add_custom_mcp_server', { input: input }).then(function (result) {
+      mcpResult = result || mcpResult
+      syncMcpDrafts(mcpResult, true)
+      setMcpEditorOpen(false)
+    }).catch(function (error) {
+      setText('mcp-editor-error', '保存失败：' + messageOf(error))
+    }).finally(function () {
+      mcpBusy = false
+      clearAppLoading()
+      renderMcp()
+      refreshMcpRuntimeStatus(true)
+    })
+  }
+  function openMcpDelete(id) {
+    var server = mcpServerById(id)
+    if (!server || server.builtIn || mcpBusy) return
+    mcpDeleteId = id
+    setText('mcp-delete-message', '确认删除 ' + (server.displayName || server.serverName) + '（mcp__' + server.serverName + '__*）？')
+    var modal = el('mcp-delete-modal')
+    modal.hidden = false
+    modal.setAttribute('aria-hidden', 'false')
+    document.body.classList.add('modal-open')
+  }
+  function closeMcpDelete() {
+    mcpDeleteId = ''
+    var modal = el('mcp-delete-modal')
+    modal.hidden = true
+    modal.setAttribute('aria-hidden', 'true')
+    document.body.classList.remove('modal-open')
+  }
+  function deleteCustomMcp() {
+    var id = mcpDeleteId
+    if (!id || mcpBusy) return
+    closeMcpDelete()
+    mcpBusy = true
+    setAppLoading('正在删除 MCP 服务', '正在移除加密配置与 DSH web profile 注册。')
+    invokeOrThrow('delete_custom_mcp_server', { id: id }).then(function (result) {
+      mcpResult = result || mcpResult
+      syncMcpDrafts(mcpResult, true)
+    }).catch(function (error) {
+      mcpError = '删除失败：' + messageOf(error)
     }).finally(function () {
       mcpBusy = false
       clearAppLoading()
@@ -1160,6 +1357,20 @@
         if (version.version === current || (!current && version.version === state.available)) option.selected = true
         select.appendChild(option)
       })
+    }
+    var selectedVersion = select && select.value ? versions.find(function (version) { return version.version === select.value }) : null
+    var deleteButton = el('delete-version')
+    if (deleteButton) {
+      var selectedIsPinned = !!(selectedVersion && state.runtimeSource !== 'local' && selectedVersion.version === state.pinned)
+      var canDelete = !!(selectedVersion && selectedVersion.installed && !selectedIsPinned)
+      deleteButton.disabled = !canDelete || desktopActionsBusy
+      deleteButton.title = !selectedVersion
+        ? '请选择一个运行时版本'
+        : !selectedVersion.installed
+          ? '当前版本尚未安装，不能删除'
+          : selectedIsPinned
+            ? '不能删除当前固定版本，请先切换到其他托管版本'
+            : '删除已安装的托管运行时 ' + selectedVersion.version
     }
     var primary = el('primary-action')
     if (primary) primary.textContent = state.status === 'needs_workspace' ? '选择工作区' : '重启'
@@ -1337,6 +1548,20 @@
   })
   el('market-back-home').addEventListener('click', function () { showHome() })
   el('mcp-back-home').addEventListener('click', function () { showHome() })
+  el('mcp-open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })
+  el('mcp-add-server').addEventListener('click', openMcpEditor)
+  el('mcp-editor-cancel').addEventListener('click', function () { setMcpEditorOpen(false) })
+  el('mcp-editor-modal').addEventListener('click', function (event) {
+    if (event.target && event.target.getAttribute('data-mcp-editor-cancel') === 'true') setMcpEditorOpen(false)
+  })
+  el('mcp-editor-form').addEventListener('submit', submitCustomMcp)
+  el('mcp-custom-transport').addEventListener('change', updateMcpEditorFields)
+  el('mcp-custom-launch').addEventListener('change', updateMcpEditorFields)
+  el('mcp-delete-cancel').addEventListener('click', closeMcpDelete)
+  el('mcp-delete-accept').addEventListener('click', deleteCustomMcp)
+  el('mcp-delete-modal').addEventListener('click', function (event) {
+    if (event.target && event.target.getAttribute('data-mcp-delete-cancel') === 'true') closeMcpDelete()
+  })
   document.querySelectorAll('[data-mcp-save]').forEach(function (button) {
     button.addEventListener('click', function () { saveMcpServer(button.getAttribute('data-mcp-save')) })
   })
@@ -1359,6 +1584,11 @@
   el('market-confirm-modal').addEventListener('click', function (event) {
     if (event.target && event.target.getAttribute('data-market-confirm-cancel') === 'true') resolveMarketConfirmation(false)
   })
+  el('runtime-confirm-cancel').addEventListener('click', function () { resolveRuntimeDeletion(false) })
+  el('runtime-confirm-accept').addEventListener('click', function () { resolveRuntimeDeletion(true) })
+  el('runtime-confirm-modal').addEventListener('click', function (event) {
+    if (event.target && event.target.getAttribute('data-runtime-confirm-cancel') === 'true') resolveRuntimeDeletion(false)
+  })
   document.querySelectorAll('[data-category]').forEach(function (tab) {
     tab.addEventListener('click', function () {
       if (marketBusy || marketConfirming) return
@@ -1373,9 +1603,24 @@
     })
   }
   document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && el('mcp-editor-modal') && !el('mcp-editor-modal').hidden) {
+      event.preventDefault()
+      setMcpEditorOpen(false)
+      return
+    }
+    if (event.key === 'Escape' && mcpDeleteId) {
+      event.preventDefault()
+      closeMcpDelete()
+      return
+    }
     if (event.key === 'Escape' && marketConfirming) {
       event.preventDefault()
       resolveMarketConfirmation(false)
+      return
+    }
+    if (event.key === 'Escape' && runtimeConfirming) {
+      event.preventDefault()
+      resolveRuntimeDeletion(false)
       return
     }
     if (event.key === 'Escape' && marketSelectedPlugin) {
@@ -1446,6 +1691,24 @@
       return
     }
     action(function () { return invokeOrThrow('install_and_switch', { version: version }) })
+  })
+  el('delete-version').addEventListener('click', function () {
+    var select = el('version-select')
+    var version = select && select.value
+    var selected = state && versionsOf(state).find(function (item) { return item.version === version })
+    if (!selected || !selected.installed) {
+      versionHint = '请选择一个已安装的运行时版本。'
+      render(state)
+      return
+    }
+    if (state.runtimeSource !== 'local' && version === state.pinned) {
+      versionHint = '当前固定版本不能删除，请先切换到其他托管版本。'
+      render(state)
+      return
+    }
+    confirmRuntimeDeletion(version).then(function (confirmed) {
+      if (confirmed) action(function () { return invokeOrThrow('delete_runtime', { version: version }) }, '正在删除运行时…', '正在删除托管版本 ' + version + '，请稍候。')
+    })
   })
   el('open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })
   el('quit').addEventListener('click', function () { action(function () { return invokeOrThrow('quit_app') }) })

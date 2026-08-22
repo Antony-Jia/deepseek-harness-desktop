@@ -371,6 +371,15 @@ impl RuntimeManager {
         Ok(removed)
     }
 
+    pub fn remove(&self, version: &str) -> Result<(), String> {
+        validate_version(version)?;
+        let path = self.runtime_path(version)?;
+        if !path.is_dir() {
+            return Err(format!("运行时 {version} 未安装。"));
+        }
+        fs::remove_dir_all(path).map_err(io_error)
+    }
+
     fn is_ready_in(&self, root: &Path) -> bool {
         root.join("node_modules")
             .join("@deepseek-ai")

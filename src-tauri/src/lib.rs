@@ -14,7 +14,7 @@ use control::ControlServer;
 use market::{
     DesktopContributionsResult, MarketManager, MarketOperationResult, MarketSearchResult,
 };
-use mcp::{McpConfigResult, McpManager, McpRuntimeResult};
+use mcp::{McpConfigResult, McpCustomServerInput, McpManager, McpRuntimeResult};
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
@@ -130,6 +130,7 @@ pub fn run() {
             set_runtime_source,
             check_for_updates,
             install_and_switch,
+            delete_runtime,
             rollback_to_last_good,
             cleanup_runtimes,
             open_logs,
@@ -143,6 +144,8 @@ pub fn run() {
             list_mcp_servers,
             save_mcp_server,
             get_mcp_runtime_status,
+            add_custom_mcp_server,
+            delete_custom_mcp_server,
             set_theme,
             list_theme_packs,
             get_active_theme_pack,
@@ -502,6 +505,27 @@ fn install_and_switch(
 }
 
 #[tauri::command]
+fn delete_runtime(
+    context: tauri::State<'_, DesktopContext>,
+    version: String,
+) -> Result<(), String> {
+    validate_version(&version)?;
+    let mut state = context.store.load().map_err(io_error)?;
+    if state.runtime_source == RUNTIME_SOURCE_MANAGED && state.pinned == version {
+        return Err(format!(
+            "不能删除当前固定版本 {version}，请先切换到其他托管版本。"
+        ));
+    }
+    context.manager.remove(&version)?;
+    if state.last_good.as_deref() == Some(version.as_str()) {
+        state.last_good = None;
+        context.store.save(&state).map_err(io_error)?;
+    }
+    refresh_common(&context);
+    Ok(())
+}
+
+#[tauri::command]
 fn rollback_to_last_good(
     app: AppHandle,
     context: tauri::State<'_, DesktopContext>,
@@ -831,6 +855,40 @@ fn save_mcp_server(
         &context,
         format!("MCP 配置已更新: id={id} enabled={enabled} apiKeyChanged={api_key_changed}"),
     );
+    Ok(result)
+}
+
+#[tauri::command]
+fn add_custom_mcp_server(
+    context: tauri::State<'_, DesktopContext>,
+    input: McpCustomServerInput,
+) -> Result<McpConfigResult, String> {
+    let running = is_dsh_running(&context);
+    let (mcp_command, mcp_command_args) = context.manager.mcp_npx_command();
+    let mut result =
+        context
+            .mcp
+            .add_custom_server(&context.dsh_home, &mcp_command, &mcp_command_args, input)?;
+    result.restart_required = running;
+    add_log(&context, "已添加自定义 MCP 服务。".to_string());
+    Ok(result)
+}
+
+#[tauri::command]
+fn delete_custom_mcp_server(
+    context: tauri::State<'_, DesktopContext>,
+    id: String,
+) -> Result<McpConfigResult, String> {
+    let running = is_dsh_running(&context);
+    let (mcp_command, mcp_command_args) = context.manager.mcp_npx_command();
+    let mut result = context.mcp.delete_custom_server(
+        &context.dsh_home,
+        &mcp_command,
+        &mcp_command_args,
+        &id,
+    )?;
+    result.restart_required = running;
+    add_log(&context, format!("已删除自定义 MCP 服务: {id}"));
     Ok(result)
 }
 
