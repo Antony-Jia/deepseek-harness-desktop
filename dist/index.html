@@ -16,18 +16,22 @@
           <span>DSH Desktop</span>
         </button>
         <span class="titlebar-caption">DeepSeek Harness</span>
-        <div class="titlebar-tools" aria-label="工作区工具">
-          <div id="titlebar-plugin-actions" class="titlebar-plugin-actions" aria-label="插件工作区操作"></div>
+        <div class="titlebar-tools" aria-label="DSH 导航">
           <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
           <button id="titlebar-mcp" class="titlebar-market" type="button" title="打开 MCP 管理" aria-label="打开 MCP 管理" aria-pressed="false">MCP</button>
+          <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作">
+            <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>
+            <button id="app-restart" class="app-action" type="button" title="DSH 当前未运行，无法重启" disabled>重启</button>
+          </nav>
+        </div>
+        <div id="titlebar-plugin-actions" class="titlebar-plugin-actions" aria-label="插件工作区操作">
+          <div id="titlebar-plugin-actions-list" class="titlebar-plugin-actions-list"></div>
+          <details id="titlebar-plugin-overflow" class="titlebar-plugin-overflow" hidden>
+            <summary class="titlebar-tool" aria-label="展开更多插件操作">更多</summary>
+            <div id="titlebar-plugin-overflow-menu" class="titlebar-plugin-overflow-menu" role="menu"></div>
+          </details>
         </div>
       </div>
-      <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作" hidden>
-        <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>
-        <button id="app-update" class="app-action" type="button" title="检查上游更新">更新</button>
-        <button id="app-upgrade" class="app-action accent" type="button" title="打开升级页面">升级</button>
-        <button id="app-stop" class="app-action danger" type="button" title="关闭 DSH 服务">关闭 DSH</button>
-      </nav>
       <div class="window-controls" aria-label="窗口控制">
         <button id="window-minimize" class="window-control" type="button" title="最小化" aria-label="最小化">−</button>
         <button id="window-maximize" class="window-control" type="button" title="最大化" aria-label="最大化">□</button>

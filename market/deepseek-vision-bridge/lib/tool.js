@@ -7,6 +7,7 @@ export const TOOL_NAME = 'deepseek_vision_analyze'
 const PLUGIN_ID = '@p-dsh-market/deepseek-vision-bridge'
 const MAX_IMAGES = 8
 const MAX_QUERY_LENGTH = 12000
+const BRIDGE_SECTION = 'deepseek-vision-bridge:protocol'
 
 function imageRef(block) {
   const ref = block?.type === 'image' ? block.attachment : null
@@ -92,13 +93,25 @@ export async function hideVisionToolForCapableModel(llm, assembly, context) {
   const provider = typeof variables.provider === 'string' && variables.provider ? variables.provider : fallback?.provider
   const model = typeof variables.model === 'string' && variables.model ? variables.model : fallback?.model
   if (!provider || !model || !Array.isArray(assembly?.tools)) return assembly
+  let supportsImages
   try {
     const modelInfo = await llm.resolveModelInfo(provider, model, context?.signal)
-    if (!modelInfo?.inputModalities?.includes('image')) return assembly
+    supportsImages = modelInfo?.inputModalities?.includes('image') === true
   } catch {
     return assembly
   }
-  return { ...assembly, tools: assembly.tools.filter((tool) => tool?.name !== TOOL_NAME) }
+  if (supportsImages) return { ...assembly, tools: assembly.tools.filter((tool) => tool?.name !== TOOL_NAME) }
+  if (!assembly.tools.some((tool) => tool?.name === TOOL_NAME) || assembly.sections?.some((section) => section?.name === BRIDGE_SECTION)) return assembly
+  return {
+    ...assembly,
+    sections: [
+      ...(Array.isArray(assembly.sections) ? assembly.sections : []),
+      {
+        name: BRIDGE_SECTION,
+        text: '当用户消息包含模型无法直接读取的图片占位符时，必须调用 deepseek_vision_analyze 分析图片后再回答。分析最近一条图片消息时省略 attachmentIds，以处理该消息中的全部图片。'
+      }
+    ]
+  }
 }
 
 async function ensureTextOnlyCaller(llm, agent, signal) {
@@ -188,12 +201,9 @@ export function createVisionCommandDefinition() {
         role: 'user',
         content: [
           ...attachments,
-          {
-            type: 'text',
-            text: `${query}\n\n这是视觉桥接输入。如果你是非视觉模型，图片会显示为占位符，请调用 deepseek_vision_analyze 且省略 attachmentIds，它会分析本次附加的全部图片。如果你能直接读取图片，请直接回答且不要调用该工具。`
-          }
+          { type: 'text', text: query }
         ],
-        source: { kind: 'plugin', plugin: PLUGIN_ID, form: 'relay' }
+        source: { kind: 'user' }
       }
       invocation.agent.followup(message)
       return { kind: 'success', text: '图片已提交到视觉桥接。' }

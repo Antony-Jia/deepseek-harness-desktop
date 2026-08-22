@@ -280,7 +280,7 @@
   }
   function setBusy(busy) {
     desktopActionsBusy = !!busy
-    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'delete-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-update', 'app-upgrade', 'app-stop', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'delete-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-restart', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
@@ -308,7 +308,6 @@
     setHidden('dsh-view', !showingDsh)
     setHidden('market-view', !showingMarket)
     setHidden('mcp-view', !showingMcp)
-    setHidden('app-actions', !showingDsh)
     var titlebarHome = el('titlebar-home')
     if (titlebarHome) {
       titlebarHome.disabled = !url && !showingMarket && !showingMcp
@@ -346,11 +345,6 @@
     viewMode = 'home'
     updateView()
     if (focusId) focusHomeElement(focusId)
-  }
-  function openUpdateCard(checkFirst) {
-    showHome('update-card')
-    if (!checkFirst) return Promise.resolve()
-    return action(function () { return invokeOrThrow('check_for_updates') }).then(function () { focusHomeElement('update-card') })
   }
   function openMarket() {
     viewMode = 'market'
@@ -461,10 +455,34 @@
     // pluginRpc 只接受当前外框已经登记的有限方法，不能把任意 Tauri invoke 暴露给插件。
     return
   }
-  function renderDesktopActions() {
+  function layoutDesktopActions() {
     var container = el('titlebar-plugin-actions')
-    if (!container) return
-    container.replaceChildren()
+    var list = el('titlebar-plugin-actions-list')
+    var overflow = el('titlebar-plugin-overflow')
+    var menu = el('titlebar-plugin-overflow-menu')
+    if (!container || !list || !overflow || !menu) return
+    Array.from(menu.children).forEach(function (button) { list.appendChild(button) })
+    overflow.hidden = true
+    overflow.open = false
+    var drag = el('titlebar-drag')
+    var maxWidth = Math.max(0, Math.floor(((drag && drag.clientWidth) || window.innerWidth) / 2))
+    container.style.maxWidth = maxWidth + 'px'
+    var availableWidth = Math.min(maxWidth, container.clientWidth || maxWidth)
+    if (!list.children.length || list.scrollWidth <= availableWidth) return
+    overflow.hidden = false
+    var available = Math.max(0, availableWidth - overflow.offsetWidth - 4)
+    while (list.lastElementChild && list.scrollWidth > available) {
+      menu.insertBefore(list.lastElementChild, menu.firstElementChild)
+    }
+  }
+  function renderDesktopActions() {
+    var list = el('titlebar-plugin-actions-list')
+    var menu = el('titlebar-plugin-overflow-menu')
+    var overflow = el('titlebar-plugin-overflow')
+    if (!list || !menu || !overflow) return
+    list.replaceChildren()
+    menu.replaceChildren()
+    overflow.hidden = true
     var showingDsh = !!(state && state.webUrl && viewMode === 'dsh')
     var actions = []
     desktopContributions.forEach(function (contribution) {
@@ -501,9 +519,13 @@
       button.dataset.plugin = item.contribution.packageName || ''
       button.dataset.contribution = action.id || ''
       button.addEventListener('mousedown', function (event) { event.stopPropagation() })
-      button.addEventListener('click', function () { runDesktopAction(action, item.contribution) })
-      container.appendChild(button)
+      button.addEventListener('click', function () {
+        overflow.open = false
+        runDesktopAction(action, item.contribution)
+      })
+      list.appendChild(button)
     })
+    layoutDesktopActions()
   }
   function openWorkspacePanel() {
     if (!state || !state.workspace || viewMode !== 'dsh') return
@@ -1383,13 +1405,14 @@
       toggleDsh.disabled = !running && ['starting', 'installing', 'updating'].includes(state.status)
       toggleDsh.title = running ? '停止 DSH 服务' : '启动 DSH 服务'
     }
-    var restartButton = el('restart-dsh')
-    if (restartButton) {
+    ;['restart-dsh', 'app-restart'].forEach(function (id) {
+      var restartButton = el(id)
+      if (!restartButton) return
       var restartBlocked = ['starting', 'installing', 'updating'].includes(state.status)
       restartButton.disabled = !running || restartBlocked || desktopActionsBusy
       restartButton.title = running ? '停止并重新启动当前 DSH 工作区' : 'DSH 当前未运行，无法重启'
       restartButton.setAttribute('aria-label', restartButton.title)
-    }
+    })
     if (enterDshButton) {
       enterDshButton.disabled = !running
       enterDshButton.title = running ? '进入已启动的 DSH 页面' : 'DSH 未启动，暂时无法进入页面'
@@ -1483,6 +1506,8 @@
     event.preventDefault()
     invokeOrThrow('start_window_dragging').catch(showWindowError)
   })
+  el('titlebar-plugin-overflow').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  window.addEventListener('resize', layoutDesktopActions)
   el('titlebar-home').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-home').addEventListener('click', function () {
     if (viewMode === 'market' || viewMode === 'mcp') {
@@ -1540,12 +1565,7 @@
   })
   el('window-close').addEventListener('click', closeWindow)
   el('app-home').addEventListener('click', function () { showHome() })
-  el('app-update').addEventListener('click', function () { openUpdateCard(true) })
-  el('app-upgrade').addEventListener('click', function () { openUpdateCard(true) })
-  el('app-stop').addEventListener('click', function () {
-    showHome()
-    action(function () { return invokeOrThrow('stop_dsh') })
-  })
+  el('app-restart').addEventListener('click', restartDsh)
   el('market-back-home').addEventListener('click', function () { showHome() })
   el('mcp-back-home').addEventListener('click', function () { showHome() })
   el('mcp-open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })

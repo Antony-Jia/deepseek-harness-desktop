@@ -12,9 +12,9 @@ code.
 ## Download and install
 
 The current Windows x64 installer is available from the
-[v0.1.5 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.5):
+[v0.1.6 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.6):
 
-[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.5/DSH.Desktop_0.1.5_x64-setup.exe)
+[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.6/DSH.Desktop_0.1.6_x64-setup.exe)
 
 The installer includes a checksum-verified Node.js v24.19.0 x64 runtime, so
 the target machine does not need Node.js, npm, or npx installed. The first
@@ -37,6 +37,8 @@ its embedded WebView; no manual browser URL copy is required.
   plugins and theme packs, with installed/enabled/protocol compatibility gates.
 - Adds the DeepSeek Vision Bridge plugin for non-vision models, with a `/vision`
   command and a guarded `deepseek_vision_analyze` tool for persisted session images.
+- Keeps desktop plugin actions responsive with an overflow menu and exposes the
+  standard home and restart actions in the title bar.
 - Adds MCP management beside the marketplace and registers tools through DSH's
   official MCP client. It includes opt-in Tavily Search and Firecrawl presets and
   user-managed stdio/npm, local-command, and Streamable HTTP servers.
@@ -70,7 +72,9 @@ DSH, attach images and run `/vision your question`; the plugin uses the official
 `deepseek_vision_analyze` tool. It only reads persisted DSH session attachments,
 supports up to eight explicitly selected images, and never reads arbitrary local
 paths or remote URLs. Native vision models bypass the bridge and keep the tool
-hidden.
+hidden. The command records the original question and images as a normal user
+message, while bridge guidance stays in the system prompt so the conversation
+shows the expected user bubble and image gallery.
 
 ## Screenshots
 
@@ -152,7 +156,7 @@ npm run build
 The Windows NSIS installer is generated at:
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.5_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.6_x64-setup.exe
 ```
 
 `src-tauri/target/`, `dist/bundle/`, portable Node binaries, and installer

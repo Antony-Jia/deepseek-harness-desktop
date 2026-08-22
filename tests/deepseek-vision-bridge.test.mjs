@@ -135,7 +135,22 @@ test('vision command admits image blocks and asks the current agent to use the b
   assert.equal(message.content[0].type, 'image')
   assert.equal(message.content[0].attachment, ref)
   assert.match(message.content[1].text, /读取截图中的错误/)
-  assert.match(message.content[1].text, /非视觉模型/)
+  assert.doesNotMatch(message.content[1].text, /非视觉模型/)
+  assert.equal(message.source.kind, 'user')
+})
+
+test('text-only model receives bridge tool guidance outside the visible user message', async () => {
+  const llm = {
+    async resolveModelInfo(provider, model) {
+      return { provider, id: model, name: model, inputModalities: ['text'] }
+    }
+  }
+  const bridge = { name: TOOL_NAME, description: 'bridge', parameters: {} }
+  const assembly = { sections: [], contexts: [], variables: { provider: 'text', model: 'text-model' }, tools: [bridge] }
+  const adapted = await hideVisionToolForCapableModel(llm, assembly, {})
+
+  assert.deepEqual(adapted.tools, [bridge])
+  assert.match(adapted.sections[0].text, /deepseek_vision_analyze/)
 })
 
 test('vision-capable model does not receive the bridge tool schema', async () => {
