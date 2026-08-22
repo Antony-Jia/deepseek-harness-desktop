@@ -1,11 +1,12 @@
 # DeepSeek 视觉桥接
 
-为 DeepSeek Harness 中不支持图片输入的模型注册 `deepseek_vision_analyze` 工具。工具使用内建的 `deepseek-official/deepseek-v4-flash-vision-exp` 分析当前会话已上传的图片，可用于图片描述、OCR、图表解读、截图检查和多图比较。
+为 DeepSeek Harness 中不支持图片输入的模型注册 `/vision` 图片命令和 `deepseek_vision_analyze` 工具。工具使用内建的 `deepseek-official/deepseek-v4-flash-vision-exp` 分析当前会话图片，可用于图片描述、OCR、图表解读、截图检查和多图比较。支持图片的模型会直接看图，并禁止调用桥接工具。
 
 ## 工作方式
 
 - 只接受当前 DSH 会话中已经持久化的图片引用，不读取任意本地路径或远程 URL。
-- 未传 `attachmentIds` 时分析当前会话最新一张图片；显式传入时最多分析 8 张。
+- 非视觉模型附加图片后，使用 `/vision 你的问题` 提交；原生发送按钮仍会执行 Harness 的模型模态准入。
+- 未传 `attachmentIds` 时分析最近一条含图片消息中的全部图片；显式传入时最多分析 8 张。
 - 图片继续由 DSH 附件服务完成校验、缩放与请求投影。
 - 当前 `deepseek-official` 配置必须公布 `deepseek-v4-flash-vision-exp`，且模型元数据包含 `image` 输入能力。
 
@@ -15,7 +16,7 @@
 dsh plugin --profile web add @p-dsh-market/deepseek-vision-bridge
 ```
 
-安装后重启 DSH。插件的 `cordis.patch.yml` 会挂载 `llm`、`skills` 和 `tools` 三项宿主服务。
+安装后重启 DSH。插件的 `cordis.patch.yml` 会挂载 `commands`、`llm`、`skills`、`systemPrompt` 和 `tools` 五项宿主服务。
 
 ## 工具参数
 

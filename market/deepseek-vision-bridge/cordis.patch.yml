@@ -1,4 +1,4 @@
 - insert:
     - id: p-dsh-market-deepseek-vision-bridge
       name: '@p-dsh-market/deepseek-vision-bridge'
-      inject: [llm, skills, tools]
+      inject: [commands, llm, skills, systemPrompt, tools]

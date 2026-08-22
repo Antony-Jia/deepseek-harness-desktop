@@ -14,14 +14,24 @@ function imageRef(block) {
   return ref
 }
 
-function sessionImageRefs(session) {
+function sessionMessages(session) {
   if (!session || typeof session.deriveMessages !== 'function') throw new Error('视觉工具只能从正在运行的 DSH 会话调用。')
+  return session.deriveMessages()
+}
+
+function messageImageRefs(message) {
   const refs = new Map()
-  for (const message of session.deriveMessages()) {
-    for (const block of Array.isArray(message?.content) ? message.content : []) {
-      const ref = imageRef(block)
-      if (ref) refs.set(ref.attachmentId, ref)
-    }
+  for (const block of Array.isArray(message?.content) ? message.content : []) {
+    const ref = imageRef(block)
+    if (ref) refs.set(ref.attachmentId, ref)
+  }
+  return [...refs.values()]
+}
+
+function sessionImageRefs(messages) {
+  const refs = new Map()
+  for (const message of messages) {
+    for (const ref of messageImageRefs(message)) refs.set(ref.attachmentId, ref)
   }
   return [...refs.values()]
 }
@@ -39,10 +49,17 @@ function normalizedIds(value) {
 }
 
 export function selectSessionImages(session, attachmentIds) {
-  const available = sessionImageRefs(session)
+  const messages = sessionMessages(session)
+  const available = sessionImageRefs(messages)
   if (available.length === 0) throw new Error('当前会话中没有可分析的图片附件，请先上传图片。')
   const ids = normalizedIds(attachmentIds)
-  if (ids.length === 0) return [available.at(-1)]
+  if (ids.length === 0) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const refs = messageImageRefs(messages[index])
+      if (refs.length) return refs.slice(0, MAX_IMAGES)
+    }
+    return [available.at(-1)]
+  }
   const byId = new Map(available.map((ref) => [ref.attachmentId, ref]))
   const missing = ids.filter((id) => !byId.has(id))
   if (missing.length) throw new Error(`当前会话中找不到图片附件：${missing.join(', ')}`)
@@ -56,6 +73,42 @@ function textFromBlocks(blocks) {
     .filter(Boolean)
     .join('\n\n')
     .trim()
+}
+
+function callerTarget(agent) {
+  const events = Array.isArray(agent?.session?.events) ? agent.session.events : []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const config = events[index]?.type === 'request/header' ? events[index]?.data?.header?.config : null
+    if (typeof config?.provider === 'string' && typeof config?.model === 'string') return config
+  }
+  const options = agent?.options
+  if (typeof options?.provider === 'string' && typeof options?.model === 'string') return options
+  return null
+}
+
+export async function hideVisionToolForCapableModel(llm, assembly, context) {
+  const variables = assembly?.variables || {}
+  const fallback = callerTarget(context?.agent)
+  const provider = typeof variables.provider === 'string' && variables.provider ? variables.provider : fallback?.provider
+  const model = typeof variables.model === 'string' && variables.model ? variables.model : fallback?.model
+  if (!provider || !model || !Array.isArray(assembly?.tools)) return assembly
+  try {
+    const modelInfo = await llm.resolveModelInfo(provider, model, context?.signal)
+    if (!modelInfo?.inputModalities?.includes('image')) return assembly
+  } catch {
+    return assembly
+  }
+  return { ...assembly, tools: assembly.tools.filter((tool) => tool?.name !== TOOL_NAME) }
+}
+
+async function ensureTextOnlyCaller(llm, agent, signal) {
+  if (!llm || typeof llm.resolveModelInfo !== 'function') throw new Error('当前 DSH 运行时未提供完整的 llm 服务。')
+  const target = callerTarget(agent)
+  if (!target) return
+  const modelInfo = await llm.resolveModelInfo(target.provider, target.model, signal)
+  if (modelInfo?.inputModalities?.includes('image')) {
+    throw new Error('当前模型已经支持图片，请直接分析图片，不要调用视觉桥接工具。')
+  }
 }
 
 async function generateAnswer(llm, refs, query, signal) {
@@ -103,6 +156,7 @@ export async function analyzeSessionImages(llm, args, exec) {
   const query = typeof args?.query === 'string' ? args.query.trim() : ''
   if (!query) throw new Error('query 不能为空。')
   if (query.length > MAX_QUERY_LENGTH) throw new Error(`query 不能超过 ${MAX_QUERY_LENGTH} 个字符。`)
+  await ensureTextOnlyCaller(llm, exec?.agent, exec?.signal)
   const refs = selectSessionImages(exec?.agent?.session, args?.attachmentIds)
   const generated = await generateAnswer(llm, refs, query, exec?.signal)
   return {
@@ -115,6 +169,35 @@ export async function analyzeSessionImages(llm, args, exec) {
     })),
     provider: PROVIDER,
     model: MODEL
+  }
+}
+
+export function createVisionCommandDefinition() {
+  return {
+    name: 'vision',
+    description: '在非视觉模型会话中提交图片，并通过 DeepSeek 视觉桥接继续处理',
+    input: { hint: '输入希望针对图片完成的任务', images: true },
+    async handler(invocation) {
+      const attachments = Array.isArray(invocation?.attachments) ? invocation.attachments.filter((block) => imageRef(block)) : []
+      if (attachments.length === 0) return { kind: 'error', text: '/vision 需要至少附加一张图片。' }
+      const query = typeof invocation?.rawInput === 'string' && invocation.rawInput.trim()
+        ? invocation.rawInput.trim()
+        : '请详细描述图片中的内容，并指出重要文字、对象、结构和异常。'
+      const message = {
+        id: `deepseek-vision-command-${randomUUID()}`,
+        role: 'user',
+        content: [
+          ...attachments,
+          {
+            type: 'text',
+            text: `${query}\n\n这是视觉桥接输入。如果你是非视觉模型，图片会显示为占位符，请调用 deepseek_vision_analyze 且省略 attachmentIds，它会分析本次附加的全部图片。如果你能直接读取图片，请直接回答且不要调用该工具。`
+          }
+        ],
+        source: { kind: 'plugin', plugin: PLUGIN_ID, form: 'relay' }
+      }
+      invocation.agent.followup(message)
+      return { kind: 'success', text: '图片已提交到视觉桥接。' }
+    }
   }
 }
 
@@ -148,7 +231,7 @@ export function createVisionToolDefinition(analyze) {
   if (typeof analyze !== 'function') throw new TypeError('analyze 必须是函数。')
   return {
     name: TOOL_NAME,
-    description: '使用 DeepSeek-V4-Flash-Vision-Exp 分析当前会话中的图片，让不支持视觉输入的模型获得图片描述、OCR、图表解读、界面检查和视觉问答能力。仅分析当前会话已上传的图片；未指定 attachmentIds 时分析最新一张。',
+    description: '仅供不支持图片输入的模型调用：使用 DeepSeek-V4-Flash-Vision-Exp 分析当前会话中的图片，提供图片描述、OCR、图表解读、界面检查和视觉问答。支持图片的模型禁止调用。未指定 attachmentIds 时分析最近一条含图片消息中的全部图片。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -160,7 +243,7 @@ export function createVisionToolDefinition(analyze) {
           maxItems: MAX_IMAGES,
           uniqueItems: true,
           items: { type: 'string', maxLength: 512 },
-          description: '可选的当前会话图片附件 ID；省略时分析最新一张图片。'
+          description: '可选的当前会话图片附件 ID；省略时分析最近一条含图片消息中的全部图片。'
         }
       }
     },

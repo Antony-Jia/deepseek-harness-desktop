@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { analyzeSessionImages, createVisionToolDefinition } from './tool.js'
+import { analyzeSessionImages, createVisionCommandDefinition, createVisionToolDefinition, hideVisionToolForCapableModel } from './tool.js'
 
 const SKILL_PATH = fileURLToPath(new URL('../skills/deepseek-vision-bridge/SKILL.md', import.meta.url))
 
@@ -10,12 +10,20 @@ function service(ctx, name) {
 }
 
 export default {
-  inject: ['llm', 'skills', 'tools'],
+  inject: ['commands', 'llm', 'skills', 'systemPrompt', 'tools'],
 
   apply(ctx) {
+    const commands = service(ctx, 'commands')
     const llm = service(ctx, 'llm')
     const skills = service(ctx, 'skills')
     const tools = service(ctx, 'tools')
+
+    ctx.effect(() => commands.register(createVisionCommandDefinition()))
+
+    ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+      const assembly = await next()
+      return hideVisionToolForCapableModel(llm, assembly, context)
+    })
 
     ctx.effect(() => skills.register({
       name: 'deepseek-vision-bridge',

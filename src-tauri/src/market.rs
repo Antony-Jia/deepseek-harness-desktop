@@ -1904,7 +1904,7 @@ mod tests {
             &manifest,
         )
         .expect("vision bridge manifest should satisfy the market contract");
-        assert_eq!(result.version, "0.1.1");
+        assert_eq!(result.version, "0.1.2");
         assert_eq!(result.display_name, "DeepSeek 视觉桥接");
         assert!(result.desktop.is_none());
     }
