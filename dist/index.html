@@ -19,6 +19,7 @@
         <div class="titlebar-tools" aria-label="DSH 导航">
           <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
           <button id="titlebar-mcp" class="titlebar-market" type="button" title="打开 MCP 管理" aria-label="打开 MCP 管理" aria-pressed="false">MCP</button>
+          <button id="titlebar-skills" class="titlebar-market" type="button" title="DSH 未启动，无法管理 Skills" aria-label="管理 Skills" disabled>Skills</button>
           <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作">
             <button id="app-home" class="app-action" type="button" title="返回配置首页">首页</button>
             <button id="app-restart" class="app-action" type="button" title="DSH 当前未运行，无法重启" disabled>重启</button>
@@ -326,6 +327,23 @@
           </div>
         </section>
 
+        <section class="card mcp-readiness-card" aria-live="polite">
+          <div class="mcp-readiness-heading">
+            <div>
+              <p class="eyebrow">启动诊断</p>
+              <h2 id="mcp-readiness-title">正在检查能否下载与启动</h2>
+              <p id="mcp-readiness-message" class="muted">依次检查本地运行环境、npm 下载、包缓存和 Profile 注入。</p>
+            </div>
+            <button id="mcp-check-readiness" class="button secondary" type="button">重新检查</button>
+          </div>
+          <div class="mcp-readiness-grid">
+            <div class="mcp-readiness-item"><span>本地运行环境</span><strong id="mcp-check-runtime">检查中</strong><small id="mcp-check-runtime-detail"></small></div>
+            <div class="mcp-readiness-item"><span>npm 下载</span><strong id="mcp-check-download">检查中</strong><small id="mcp-check-download-detail"></small></div>
+            <div class="mcp-readiness-item"><span>包缓存</span><strong id="mcp-check-cache">检查中</strong><small id="mcp-check-cache-detail"></small></div>
+            <div class="mcp-readiness-item"><span>Profile 注入</span><strong id="mcp-check-profile">检查中</strong><small id="mcp-check-profile-detail"></small></div>
+          </div>
+        </section>
+
         <div id="mcp-server-list" class="mcp-server-list" aria-live="polite">
           <article class="card mcp-server-card" data-mcp-server="tavily">
             <div class="mcp-server-heading">
@@ -344,6 +362,7 @@
               <button class="button primary" type="button" data-mcp-save="tavily">保存</button>
             </div>
             <p id="mcp-tavily-status" class="mcp-server-status">尚未配置。</p>
+            <div id="mcp-tavily-pipeline" class="mcp-server-pipeline"></div>
           </article>
 
           <article class="card mcp-server-card" data-mcp-server="firecrawl">
@@ -363,6 +382,31 @@
               <button class="button primary" type="button" data-mcp-save="firecrawl">保存</button>
             </div>
             <p id="mcp-firecrawl-status" class="mcp-server-status">尚未配置。</p>
+            <div id="mcp-firecrawl-pipeline" class="mcp-server-pipeline"></div>
+          </article>
+
+          <article class="card mcp-server-card" data-mcp-server="chrome">
+            <div class="mcp-server-heading">
+              <div class="mcp-server-icon chrome">C</div>
+              <div>
+                <p class="eyebrow">默认浏览器</p>
+                <h2>Chrome DevTools</h2>
+                <code>chrome-devtools-mcp@1.7.0</code>
+              </div>
+              <label class="mcp-switch"><input id="mcp-chrome-enabled" type="checkbox" /><span>启用</span></label>
+            </div>
+            <p class="mcp-server-description">仅通过本机 stdio 启动隔离的 Chrome，提供页面操作、调试、网络与性能分析工具；不连接远程 Chrome。</p>
+            <div class="mcp-server-meta">
+              <span>本地 stdio</span>
+              <span id="mcp-chrome-mode-meta">隔离浏览器</span>
+              <span>无需 API Key</span>
+            </div>
+            <label class="mcp-browser-option" for="mcp-chrome-auto-connect">
+              <input id="mcp-chrome-auto-connect" type="checkbox" />
+              <span><strong>连接当前浏览器（autoConnect）</strong><small>开启后控制当前本地 Chrome；关闭时启动独立的隔离浏览器。需要 Chrome 144+ 并在 chrome://inspect/#remote-debugging 中允许远程调试。</small></span>
+            </label>
+            <p id="mcp-chrome-status" class="mcp-server-status">服务当前关闭。</p>
+            <div id="mcp-chrome-pipeline" class="mcp-server-pipeline"></div>
           </article>
         </div>
 

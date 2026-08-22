@@ -11,7 +11,7 @@ It provides:
 - /dsh-desktop-bridge/pick-folder, a DSH-side proxy for the native folder picker;
 - tray busy/idle updates around turn/start and turn/end;
 - background turn-completion and approval notifications;
-- a small browser-side button in the sidebar footer.
+- a centralized Skill provider controlled from the desktop titlebar for market packages, user-level `~/.dsh/skills` and `~/.agents/skills`, and the current workspace's `.dsh/skills` and `.agents/skills`, without per-plugin integration.
 
 The plugin intentionally uses feature detection for session events and
 workspace methods. Upstream changes should degrade to a no-op rather than

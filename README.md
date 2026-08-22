@@ -12,9 +12,9 @@ code.
 ## Download and install
 
 The current Windows x64 installer is available from the
-[v0.1.6 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.6):
+[v0.1.7 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.7):
 
-[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.6/DSH.Desktop_0.1.6_x64-setup.exe)
+[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.7/DSH.Desktop_0.1.7_x64-setup.exe)
 
 The installer includes a checksum-verified Node.js v24.19.0 x64 runtime, so
 the target machine does not need Node.js, npm, or npx installed. The first
@@ -39,8 +39,11 @@ its embedded WebView; no manual browser URL copy is required.
   command and a guarded `deepseek_vision_analyze` tool for persisted session images.
 - Keeps desktop plugin actions responsive with an overflow menu and exposes the
   standard home and restart actions in the title bar.
+- Provides a centralized title-bar Skills control for market packages, user-level
+  Skills, and the current workspace's `.dsh/skills` or `.agents/skills`.
 - Adds MCP management beside the marketplace and registers tools through DSH's
-  official MCP client. It includes opt-in Tavily Search and Firecrawl presets and
+  official MCP client. It includes opt-in Tavily Search, Firecrawl, and local-only
+  Chrome DevTools presets and
   user-managed stdio/npm, local-command, and Streamable HTTP servers.
 - Keeps the custom MCP editor aligned with light, dark, system, and installed
   Theme Pack appearances.
@@ -54,14 +57,29 @@ its embedded WebView; no manual browser URL copy is required.
 
 ### MCP management
 
-The MCP view beside the marketplace manages opt-in Tavily Search and Firecrawl
-presets and user-added stdio npm packages, local commands, or Streamable HTTP
-servers. npm packages are installed by the desktop-managed Node/npm on first
+The MCP view beside the marketplace manages opt-in Tavily Search, Firecrawl, and
+local-only Chrome DevTools presets, plus user-added stdio npm packages, local
+commands, or Streamable HTTP servers. npm packages are installed by the
+desktop-managed Node/npm on first
 enabled startup. DSH registers each service through the official
 `@deepseek-ai/dsh-mcp-client` as `mcp__<serverName>__*`. API keys, environment
 variables, and HTTP headers are protected with Windows DPAPI and never shown in
 the UI. The page reports connection state, registered tool count, and tool names;
 every service remains disabled until explicitly enabled.
+The Chrome preset uses local stdio to launch an isolated local Chrome and does not
+accept a remote browser URL.
+An optional `autoConnect` toggle connects to the current local Chrome; when it is
+off, the preset continues to launch a separate isolated browser.
+The readiness panel separately reports local Node/npm availability, npm registry
+reachability, exact-version cache state, Web-profile insertion, and live tool
+registration so download failures are distinguishable from MCP process failures.
+
+### Skills management
+
+The title-bar Skills control combines Skills from installed market packages,
+`~/.dsh/skills`, `~/.agents/skills`, and the current workspace's `.dsh/skills` or
+`.agents/skills`. It exposes managed enable/disable state through the DSH Skills
+provider while keeping unmanaged upstream Skills visible and read-only.
 
 ### DeepSeek Vision Bridge
 
@@ -156,7 +174,7 @@ npm run build
 The Windows NSIS installer is generated at:
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.6_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.7_x64-setup.exe
 ```
 
 `src-tauri/target/`, `dist/bundle/`, portable Node binaries, and installer

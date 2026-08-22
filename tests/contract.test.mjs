@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import vm from 'node:vm'
+
+import { createMarketSkillControl } from '../plugins/dsh-desktop-bridge/lib/index.js'
 
 const root = new URL('..', import.meta.url)
 const file = (path) => fileURLToPath(new URL(path, root))
@@ -57,13 +61,86 @@ test('desktop shell contract is represented in the project', () => {
 test('bridge plugin is inert without desktop environment variables', () => {
   const host = text('plugins/dsh-desktop-bridge/lib/index.js')
   const client = text('plugins/dsh-desktop-bridge/lib/client.js')
+  const html = text('dist/index.html')
+  const app = text('dist/app.js')
   assert.match(host, /DSH_DESKTOP_CTRL/)
   assert.match(host, /DSH_DESKTOP_TOKEN/)
   assert.match(host, /if \(!CONTROL \|\| !TOKEN\) return/)
   assert.match(host, /turn\/end/)
+  assert.match(host, /marketSkillControl/)
+  assert.match(host, /dsh-desktop-bridge\/market-skills/)
+  assert.equal(host.match(/'\/dsh-desktop-bridge\/market-skills'/g)?.length, 1)
+  assert.match(host, /registerJsonMethodsRoute/)
+  assert.match(client, /shell\.overlay/)
+  assert.match(client, /MarketSkillSelector/)
+  assert.match(client, /max-height:min\(720px/)
+  assert.match(client, /snapshot\.skills\.length > 10/)
+  assert.match(client, /data-group/)
+  assert.match(client, /市场插件 Skills/)
+  assert.match(client, /用户级 Skills/)
+  assert.match(client, /当前工作区 Skills/)
+  assert.match(client, /不可禁用/)
+  assert.match(html, /id="titlebar-skills"/)
+  assert.match(app, /postDshMessage\('dsh-market-skills-open'\)/)
+  assert.doesNotMatch(client, /conversation\.input\.left/)
   assert.doesNotMatch(client, /dsh-desktop-folder/)
   assert.doesNotMatch(client, /sidebar\.footer\.action/)
   assert.doesNotMatch(client, /pick-folder/)
+})
+
+test('desktop bridge centrally discovers, masks and persists managed skills', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-market-skills-'))
+  const path = join(directory, 'market-skills.json')
+  const packageRoot = join(directory, 'profile', 'node_modules', '@p-dsh-market', 'example')
+  const skillRoot = join(packageRoot, 'skills', 'example-skill')
+  try {
+    mkdirSync(skillRoot, { recursive: true })
+    writeFileSync(join(directory, 'profile', 'package.json'), JSON.stringify({
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@p-dsh-market/example'] } },
+    }))
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@p-dsh-market/example',
+      description: 'Example market skill',
+      dsh: { market: { capabilities: ['skills', 'host', 'client'] } },
+    }))
+    writeFileSync(join(skillRoot, 'SKILL.md'), '# Example\n\nUse the example tool.')
+    const userSkill = join(directory, 'dsh-home', 'skills', 'user-skill')
+    const workspaceSkill = join(directory, 'workspace', '.dsh', 'skills', 'workspace-skill')
+    mkdirSync(userSkill, { recursive: true })
+    mkdirSync(workspaceSkill, { recursive: true })
+    writeFileSync(join(userSkill, 'SKILL.md'), '---\nname: user-skill\ndescription: User skill\n---\n\nUser instructions.')
+    writeFileSync(join(workspaceSkill, 'SKILL.md'), '---\nname: workspace-skill\ndescription: Workspace skill\n---\n\nWorkspace instructions.')
+
+    let invalidations = 0
+    const control = createMarketSkillControl({ path, profilePath: join(directory, 'profile'), dshHome: join(directory, 'dsh-home'), agentsHome: join(directory, 'agents-home') })
+    const provider = control.provider({
+      signal: new AbortController().signal,
+      invalidate() { invalidations += 1 },
+    })
+    const cwd = join(directory, 'workspace')
+    const enabled = await provider.list({ cwd })
+    assert.deepEqual(enabled.map((skill) => skill.name).sort(), ['example-skill', 'user-skill', 'workspace-skill'])
+    assert.equal(enabled.every((skill) => skill.rank < 250), true)
+    assert.deepEqual(enabled[0].invocation, { modelInvocable: true, userInvocable: true })
+    assert.match((await provider.get(enabled.find((skill) => skill.name === 'example-skill'), { cwd })).content, /Use the example tool/)
+    const view = control.snapshot(cwd, [{ name: 'system-skill', description: 'System', provider: 'system', invocation: { modelInvocable: true, userInvocable: true } }])
+    assert.deepEqual(view.skills.map((skill) => skill.group), ['market', 'user', 'workspace', 'other'])
+    assert.equal(view.skills.at(-1).canDisable, false)
+
+    control.setEnabled('example-skill', false, cwd)
+    control.setEnabled('workspace-skill', false, cwd)
+    assert.equal(invalidations, 2)
+    const masked = await provider.list({ cwd })
+    assert.deepEqual(masked.find((skill) => skill.name === 'example-skill').invocation, { modelInvocable: false, userInvocable: false })
+    assert.deepEqual((await provider.get(masked.find((skill) => skill.name === 'workspace-skill'), { cwd })).invocation, { modelInvocable: false, userInvocable: false })
+
+    const restored = createMarketSkillControl({ path, profilePath: join(directory, 'profile'), dshHome: join(directory, 'dsh-home'), agentsHome: join(directory, 'agents-home') })
+    const restoredView = restored.snapshot(cwd)
+    assert.equal(restoredView.skills.find((skill) => skill.name === 'example-skill').enabled, false)
+    assert.equal(restoredView.skills.find((skill) => skill.name === 'workspace-skill').enabled, false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('plugin market contract is represented in the Rust, UI and fixture layers', () => {
@@ -142,10 +219,12 @@ test('MCP management registers built-in and user-managed servers through DSH', (
   assert.match(mainRust, /add_custom_mcp_server/)
   assert.match(mainRust, /delete_custom_mcp_server/)
   assert.match(mainRust, /get_mcp_runtime_status/)
+  assert.match(mainRust, /check_mcp_readiness/)
   assert.match(mainRust, /sync_profile/)
   assert.match(rust, /@deepseek-ai\/dsh-mcp-client/)
   assert.match(rust, /tavily-mcp@0\.2\.22/)
   assert.match(rust, /firecrawl-mcp@3\.24\.0/)
+  assert.match(rust, /chrome-devtools-mcp@1\.7\.0/)
   assert.match(rust, /TAVILY_API_KEY/)
   assert.match(rust, /FIRECRAWL_API_KEY/)
   assert.match(rust, /streamable-http/)
@@ -157,8 +236,16 @@ test('MCP management registers built-in and user-managed servers through DSH', (
   assert.match(html, /id="mcp-view"/)
   assert.match(html, /mcp-tavily-key/)
   assert.match(html, /mcp-firecrawl-key/)
+  assert.match(html, /id="mcp-chrome-enabled"/)
+  assert.match(html, /id="mcp-chrome-auto-connect"/)
+  assert.match(html, /chrome:\/\/inspect\/#remote-debugging/)
+  assert.match(html, /仅通过本机 stdio/)
   assert.match(html, /id="mcp-add-server"/)
   assert.match(html, /id="mcp-editor-modal"/)
+  assert.match(html, /id="mcp-readiness-title"/)
+  assert.match(html, /id="mcp-check-download"/)
+  assert.ok(html.indexOf('id="mcp-view"') < html.indexOf('id="mcp-readiness-title"'))
+  assert.ok(html.indexOf('id="mcp-readiness-title"') < html.indexOf('id="mcp-server-list"'))
   assert.match(styles, /\.market-confirm-dialog \{[\s\S]*var\(--skin-surface-primary/)
   assert.match(styles, /:root\[data-theme="light"\] \.market-confirm-dialog/)
   assert.match(styles, /data-skin\]:not\(\[data-skin="builtin\.default"\]\) \.market-confirm-dialog/)
@@ -173,6 +260,11 @@ test('MCP management registers built-in and user-managed servers through DSH', (
   assert.match(javascript, /mcpDraftEnabled/)
   assert.match(javascript, /syncMcpDrafts/)
   assert.match(javascript, /refreshMcpRuntimeStatus/)
+  assert.match(javascript, /refreshMcpReadiness/)
+  assert.match(javascript, /packageCached/)
+  assert.match(javascript, /mcpDraftAutoConnect/)
+  assert.match(javascript, /autoConnect:/)
+  assert.match(rust, /--autoConnect/)
   assert.match(bridge, /dsh-desktop-bridge\/mcp-status/)
   assert.match(bridge, /toolService\.schemas\(\)/)
 })
@@ -451,17 +543,25 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
   }
   // The bundle registers itself through the module loader so the test can
   // exercise the real exported client rather than a copied helper.
+  const document = {
+    body: { style: bodyStyle },
+    head: { appendChild() {} },
+    getElementById: () => null,
+    createElement: () => ({ id: '', textContent: '' }),
+  }
   vm.runInNewContext(source, {
     Symbol,
+    document,
+    fetch: () => Promise.reject(new Error('not used')),
+    AbortController,
     window: {
       ...browserWindow,
       __ModuleLoader__: {
         load: (entry) => {
-          moduleExports = entry.factory(() => ({}))
+          moduleExports = entry.factory((name) => name === 'react' ? {} : {})
         },
       },
     },
-    document: { body: { style: bodyStyle } },
   })
 
   const registered = [{ id: 'neon-agent', colorScheme: 'dark', tokens: {} }]
@@ -475,7 +575,11 @@ test('desktop bridge projects theme packs through the DSH Web ThemeService', () 
     setTheme: (id) => { current = id },
   }
   const client = moduleExports
-  const cleanup = client.apply({ get: (name) => name === 'theme' ? service : undefined })
+  const slots = {
+    inject(_name, register) { register() },
+    register() { return () => {} },
+  }
+  const cleanup = client.apply({ get: (name) => name === 'theme' ? service : undefined, slots })
   const listener = listeners.get('message')
   assert.equal(typeof listener, 'function')
   listener({

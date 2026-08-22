@@ -14,7 +14,9 @@ use control::ControlServer;
 use market::{
     DesktopContributionsResult, MarketManager, MarketOperationResult, MarketSearchResult,
 };
-use mcp::{McpConfigResult, McpCustomServerInput, McpManager, McpRuntimeResult};
+use mcp::{
+    McpConfigResult, McpCustomServerInput, McpManager, McpReadinessResult, McpRuntimeResult,
+};
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
 use runtime::{validate_version, LocalRuntime, RegistryInfo, RuntimeManager};
@@ -144,6 +146,7 @@ pub fn run() {
             list_mcp_servers,
             save_mcp_server,
             get_mcp_runtime_status,
+            check_mcp_readiness,
             add_custom_mcp_server,
             delete_custom_mcp_server,
             set_theme,
@@ -827,6 +830,7 @@ fn save_mcp_server(
     context: tauri::State<'_, DesktopContext>,
     id: String,
     enabled: bool,
+    auto_connect: Option<bool>,
     api_key: Option<String>,
     clear_api_key: bool,
 ) -> Result<McpConfigResult, String> {
@@ -842,6 +846,7 @@ fn save_mcp_server(
         &mcp_command_args,
         &id,
         enabled,
+        auto_connect,
         api_key,
         clear_api_key,
     )?;
@@ -890,6 +895,20 @@ fn delete_custom_mcp_server(
     result.restart_required = running;
     add_log(&context, format!("已删除自定义 MCP 服务: {id}"));
     Ok(result)
+}
+
+#[tauri::command]
+async fn check_mcp_readiness(
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<McpReadinessResult, String> {
+    let manager = context.mcp.clone();
+    let dsh_home = context.dsh_home.clone();
+    let (command, command_args) = context.manager.mcp_npx_command();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.readiness(&dsh_home, &command, &command_args)
+    })
+    .await
+    .map_err(|error| format!("MCP 启动条件检查失败: {error}"))?
 }
 
 #[tauri::command]

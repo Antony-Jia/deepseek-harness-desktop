@@ -32,9 +32,13 @@
   var mcpBusy = false
   var mcpError = ''
   var mcpDraftEnabled = {}
+  var mcpDraftAutoConnect = {}
   var mcpRuntimeResult = null
   var mcpRuntimeRequest = null
   var mcpRuntimeCheckedAt = 0
+  var mcpReadinessResult = null
+  var mcpReadinessRequest = null
+  var mcpReadinessCheckedAt = 0
   var mcpDeleteId = ''
   var appLoadingMessage = ''
   var appLoadingDetail = ''
@@ -280,7 +284,7 @@
   }
   function setBusy(busy) {
     desktopActionsBusy = !!busy
-    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'delete-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'app-home', 'app-restart', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
+    ;['primary-action', 'toggle-dsh', 'restart-dsh', 'enter-dsh', 'market-restart-dsh', 'mcp-restart-dsh', 'check-updates', 'install-version', 'delete-version', 'version-select', 'detect-local', 'use-local', 'use-managed', 'titlebar-home', 'titlebar-market', 'titlebar-mcp', 'titlebar-skills', 'app-home', 'app-restart', 'background-intensity', 'reduce-effects', 'reset-theme', 'confirm-theme-preview', 'cancel-theme-preview'].forEach(function (id) {
       var node = el(id)
       if (node) node.disabled = !!busy
     })
@@ -325,6 +329,11 @@
     if (mcpButton) {
       mcpButton.classList.toggle('active', showingMcp)
       mcpButton.setAttribute('aria-pressed', showingMcp ? 'true' : 'false')
+    }
+    var skillsButton = el('titlebar-skills')
+    if (skillsButton) {
+      skillsButton.disabled = !showingDsh || desktopActionsBusy
+      skillsButton.title = showingDsh ? '管理当前会话可用的 Skills' : '进入 DSH 页面后管理 Skills'
     }
     if (!showingMarket) closeMarketDetail()
     renderDesktopActions()
@@ -968,12 +977,19 @@
     var servers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
     return servers.find(function (server) { return server.id === id }) || null
   }
+  function mcpReadinessServerById(id) {
+    var servers = mcpReadinessResult && Array.isArray(mcpReadinessResult.servers) ? mcpReadinessResult.servers : []
+    return servers.find(function (server) { return server.id === id }) || null
+  }
   function syncMcpDrafts(result, force) {
     var servers = result && Array.isArray(result.servers) ? result.servers : []
     servers.forEach(function (server) {
       if (!server || !server.id) return
       if (force || !Object.prototype.hasOwnProperty.call(mcpDraftEnabled, server.id)) {
         mcpDraftEnabled[server.id] = !!server.enabled
+      }
+      if (server.supportsAutoConnect && (force || !Object.prototype.hasOwnProperty.call(mcpDraftAutoConnect, server.id))) {
+        mcpDraftAutoConnect[server.id] = !!server.autoConnect
       }
     })
   }
@@ -1010,6 +1026,9 @@
     var status = makeNode('p', 'mcp-server-status', '正在读取状态…')
     status.id = 'mcp-' + server.id + '-status'
     card.appendChild(status)
+    var pipeline = makeNode('div', 'mcp-server-pipeline')
+    pipeline.id = 'mcp-' + server.id + '-pipeline'
+    card.appendChild(pipeline)
     var actions = makeNode('div', 'mcp-server-actions')
     var remove = makeNode('button', 'button danger', '删除')
     remove.type = 'button'
@@ -1030,8 +1049,67 @@
       if (!server.builtIn && !list.querySelector('[data-mcp-server="' + server.id + '"]')) list.appendChild(createCustomMcpCard(server))
     })
   }
+  function setMcpCheck(id, title, detail, tone) {
+    setText(id, title)
+    setText(id + '-detail', detail)
+    var node = el(id)
+    if (node) node.className = tone || ''
+  }
+  function renderMcpReadiness() {
+    var checking = !!mcpReadinessRequest
+    var result = mcpReadinessResult
+    var enabled = result && Array.isArray(result.servers)
+      ? result.servers.filter(function (server) { return server.enabled })
+      : []
+    var runtimeServers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
+    var disconnected = runtimeServers.filter(function (server) { return server.status === 'not_connected' || server.status === 'unavailable' }).length
+    setText('mcp-readiness-title', checking
+      ? '正在检查能否下载与启动'
+      : result && result.canStart && disconnected
+        ? '下载与配置正常，但有 MCP 未连接'
+        : result && result.canStart
+          ? '启用的 MCP 已具备启动条件'
+          : result ? '部分启动条件尚未满足' : '尚未检查启动条件')
+    setText('mcp-readiness-message', checking
+      ? '正在检查本地环境、npm Registry、缓存和 Profile。'
+      : result && result.canStart && disconnected
+        ? '问题已经缩小到 MCP 子进程启动或连接阶段；请查看对应卡片和 DSH 日志。'
+        : result ? result.message : '点击“重新检查”读取实际状态。')
+    var refresh = el('mcp-check-readiness')
+    if (refresh) refresh.disabled = checking || mcpBusy
+    if (!result) {
+      ;['mcp-check-runtime', 'mcp-check-download', 'mcp-check-cache', 'mcp-check-profile'].forEach(function (id) { setMcpCheck(id, checking ? '检查中' : '未检查', '', '') })
+      return
+    }
+    setMcpCheck('mcp-check-runtime', result.runtimeReady ? '可以启动' : '不可启动', result.runtimeMessage, result.runtimeReady ? 'good' : 'bad')
+    setMcpCheck('mcp-check-download', result.registryReachable ? '可以下载' : '无法下载', result.registryMessage, result.registryReachable ? 'good' : 'bad')
+    var cached = enabled.filter(function (server) { return server.packageCached }).length
+    setMcpCheck('mcp-check-cache', cached + '/' + enabled.length + ' 已缓存', enabled.length ? '未缓存的包会在启动时通过 npm 下载。' : '当前没有启用的 MCP。', cached === enabled.length ? 'good' : result.registryReachable ? '' : 'bad')
+    var registered = enabled.filter(function (server) { return server.profileRegistered }).length
+    setMcpCheck('mcp-check-profile', registered + '/' + enabled.length + ' 已注入', registered === enabled.length ? '当前 web profile 已包含全部启用服务。' : '需要重新保存配置或重启 DSH。', registered === enabled.length ? 'good' : 'bad')
+  }
+  function renderMcpPipeline(server, runtimeServer) {
+    var container = el('mcp-' + server.id + '-pipeline')
+    if (!container) return
+    container.replaceChildren()
+    var readiness = mcpReadinessServerById(server.id)
+    function step(label, tone) { container.appendChild(makeNode('span', 'mcp-stage ' + (tone || ''), label)) }
+    if (!server.enabled) {
+      step('① 服务未启用', '')
+      return
+    }
+    if (!readiness) {
+      step('① 正在检查环境', 'warn')
+      return
+    }
+    step('① 运行环境' + (readiness.localDependencyReady ? '可用' : '缺失'), readiness.localDependencyReady ? 'good' : 'bad')
+    step('② ' + (readiness.packageCached ? '包已缓存' : mcpReadinessResult.registryReachable ? '启动时下载' : '无法下载'), readiness.packageCached ? 'good' : mcpReadinessResult.registryReachable ? 'warn' : 'bad')
+    step('③ Profile ' + (readiness.profileRegistered ? '已注入' : '未注入'), readiness.profileRegistered ? 'good' : 'bad')
+    step('④ ' + (runtimeServer && runtimeServer.status === 'connected' ? '工具已注册' : runtimeServer && runtimeServer.status === 'not_connected' ? '启动后未连接' : state && state.webUrl ? '等待连接' : '等待 DSH 启动'), runtimeServer && runtimeServer.status === 'connected' ? 'good' : runtimeServer && runtimeServer.status === 'not_connected' ? 'bad' : 'warn')
+  }
   function renderMcp() {
     syncCustomMcpCards()
+    renderMcpReadiness()
     var running = !!(state && state.webUrl)
     var runtimeServers = mcpRuntimeResult && Array.isArray(mcpRuntimeResult.servers) ? mcpRuntimeResult.servers : []
     var enabledCount = runtimeServers.filter(function (server) { return server.status !== 'disabled' }).length
@@ -1048,6 +1126,7 @@
       var runtimeServer = mcpRuntimeServerById(id)
       var enabled = el('mcp-' + id + '-enabled')
       var key = el('mcp-' + id + '-key')
+      var autoConnect = el('mcp-' + id + '-auto-connect')
       var save = document.querySelector('[data-mcp-save="' + id + '"]')
       if (enabled && server) {
         enabled.checked = Object.prototype.hasOwnProperty.call(mcpDraftEnabled, id)
@@ -1055,6 +1134,13 @@
           : !!server.enabled
       }
       if (enabled) enabled.disabled = mcpBusy || desktopActionsBusy
+      if (autoConnect && server.supportsAutoConnect) {
+        autoConnect.checked = Object.prototype.hasOwnProperty.call(mcpDraftAutoConnect, id)
+          ? !!mcpDraftAutoConnect[id]
+          : !!server.autoConnect
+        autoConnect.disabled = mcpBusy || desktopActionsBusy
+        setText('mcp-chrome-mode-meta', autoConnect.checked ? '当前浏览器' : '隔离浏览器')
+      }
       if (key) {
         key.disabled = mcpBusy || desktopActionsBusy
         key.placeholder = server && server.apiKeyConfigured ? '已配置；留空会保留当前 Key' : '填写 API Key 后即可启用'
@@ -1065,15 +1151,19 @@
         var toolSummary = runtimeServer && Array.isArray(runtimeServer.tools)
           ? runtimeServer.tools.slice(0, 4).map(function (name) { return name.replace('mcp__' + server.serverName + '__', '') }).join('、')
           : ''
+        var readiness = mcpReadinessServerById(id)
         status.textContent = !server
           ? '正在读取配置…'
           : runtimeServer && runtimeServer.status === 'connected'
             ? runtimeServer.message + (toolSummary ? ' ' + toolSummary + (runtimeServer.toolCount > 4 ? ' 等' : '') : '')
+          : runtimeServer && runtimeServer.status === 'not_connected' && readiness && readiness.canStart
+            ? '下载、缓存和 Profile 均正常，但 DSH 未发现注册工具；MCP 进程可能已退出，请查看日志。'
           : server.enabled
-            ? ((runtimeServer && runtimeServer.message) || (server.builtIn && !server.apiKeyConfigured ? '缺少 API Key。' : '已启用；重启 DSH 后注册工具。'))
-            : (server.builtIn ? (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。') : '配置已保存，服务当前关闭。')
-        status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : server.enabled ? 'warn' : server.builtIn && !server.apiKeyConfigured ? 'warn' : '')
+            ? ((runtimeServer && runtimeServer.message) || (server.requiresApiKey && !server.apiKeyConfigured ? '缺少 API Key。' : '已启用；重启 DSH 后注册工具。'))
+            : (server.requiresApiKey ? (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。') : '服务当前关闭。')
+        status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : runtimeServer && runtimeServer.status === 'not_connected' && readiness && readiness.canStart ? 'bad' : server.enabled ? 'warn' : server.requiresApiKey && !server.apiKeyConfigured ? 'warn' : '')
       }
+      renderMcpPipeline(server, runtimeServer)
     })
   }
   function refreshMcpRuntimeStatus(force) {
@@ -1093,6 +1183,25 @@
     })
     return mcpRuntimeRequest
   }
+  function refreshMcpReadiness(force) {
+    if (!invoke || mcpReadinessRequest) return mcpReadinessRequest || Promise.resolve(mcpReadinessResult)
+    if (!force && Date.now() - mcpReadinessCheckedAt < 30000) return Promise.resolve(mcpReadinessResult)
+    mcpReadinessCheckedAt = Date.now()
+    mcpReadinessRequest = invokeOrThrow('check_mcp_readiness').then(function (result) {
+      mcpReadinessResult = result || null
+      renderMcp()
+      return mcpReadinessResult
+    }).catch(function (error) {
+      mcpError = '检查 MCP 下载与启动条件失败：' + messageOf(error)
+      renderMcp()
+      return null
+    }).finally(function () {
+      mcpReadinessRequest = null
+      renderMcp()
+    })
+    renderMcp()
+    return mcpReadinessRequest
+  }
   function loadMcpServers() {
     if (mcpBusy) return Promise.resolve()
     mcpBusy = true
@@ -1107,12 +1216,14 @@
       mcpBusy = false
       renderMcp()
       refreshMcpRuntimeStatus(true)
+      refreshMcpReadiness(true)
     })
   }
   function saveMcpServer(id) {
     if (mcpBusy || desktopActionsBusy) return
     var enabled = el('mcp-' + id + '-enabled')
     var key = el('mcp-' + id + '-key')
+    var autoConnect = el('mcp-' + id + '-auto-connect')
     var apiKey = key ? key.value.trim() : ''
     mcpBusy = true
     mcpError = ''
@@ -1121,6 +1232,7 @@
     invokeOrThrow('save_mcp_server', {
       id: id,
       enabled: !!(enabled && enabled.checked),
+      autoConnect: autoConnect ? !!autoConnect.checked : null,
       apiKey: apiKey || null,
       clearApiKey: false
     }).then(function (result) {
@@ -1135,6 +1247,7 @@
       clearAppLoading()
       renderMcp()
       refreshMcpRuntimeStatus(true)
+      refreshMcpReadiness(true)
     })
   }
   function setMcpEditorOpen(open) {
@@ -1206,6 +1319,7 @@
       clearAppLoading()
       renderMcp()
       refreshMcpRuntimeStatus(true)
+      refreshMcpReadiness(true)
     })
   }
   function openMcpDelete(id) {
@@ -1241,6 +1355,7 @@
       clearAppLoading()
       renderMcp()
       refreshMcpRuntimeStatus(true)
+      refreshMcpReadiness(true)
     })
   }
   function loadThemePacks(force) {
@@ -1522,6 +1637,8 @@
   el('titlebar-market').addEventListener('click', openMarket)
   el('titlebar-mcp').addEventListener('mousedown', function (event) { event.stopPropagation() })
   el('titlebar-mcp').addEventListener('click', openMcp)
+  el('titlebar-skills').addEventListener('mousedown', function (event) { event.stopPropagation() })
+  el('titlebar-skills').addEventListener('click', function () { postDshMessage('dsh-market-skills-open') })
   window.addEventListener('message', function (event) {
     var frame = el('dsh-frame')
     if (!frame || event.source !== frame.contentWindow) return
@@ -1570,6 +1687,7 @@
   el('mcp-back-home').addEventListener('click', function () { showHome() })
   el('mcp-open-logs').addEventListener('click', function () { action(function () { return invokeOrThrow('open_logs') }) })
   el('mcp-add-server').addEventListener('click', openMcpEditor)
+  el('mcp-check-readiness').addEventListener('click', function () { refreshMcpReadiness(true) })
   el('mcp-editor-cancel').addEventListener('click', function () { setMcpEditorOpen(false) })
   el('mcp-editor-modal').addEventListener('click', function (event) {
     if (event.target && event.target.getAttribute('data-mcp-editor-cancel') === 'true') setMcpEditorOpen(false)
@@ -1585,7 +1703,7 @@
   document.querySelectorAll('[data-mcp-save]').forEach(function (button) {
     button.addEventListener('click', function () { saveMcpServer(button.getAttribute('data-mcp-save')) })
   })
-  document.querySelectorAll('[data-mcp-server] input[type="checkbox"]').forEach(function (checkbox) {
+  document.querySelectorAll('[data-mcp-server] input[id$="-enabled"]').forEach(function (checkbox) {
     checkbox.addEventListener('change', function () {
       var card = checkbox.closest('[data-mcp-server]')
       var id = card && card.getAttribute('data-mcp-server')
@@ -1594,6 +1712,10 @@
         saveMcpServer(id)
       }
     })
+  })
+  el('mcp-chrome-auto-connect').addEventListener('change', function () {
+    mcpDraftAutoConnect.chrome = el('mcp-chrome-auto-connect').checked
+    saveMcpServer('chrome')
   })
   el('market-search-form').addEventListener('submit', function (event) {
     event.preventDefault()
