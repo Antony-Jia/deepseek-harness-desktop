@@ -41,6 +41,7 @@ test('vision bridge package is market-installable and registered in the catalog'
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.deepEqual(manifest.dsh.market.capabilities.sort(), ['client', 'host', 'skills'])
+  assert.equal(manifest.dsh.desktop, undefined)
   assert.match(patch, /inject: \[llm, skills, tools\]/)
   assert.ok(catalog.packages.includes(manifest.name))
 })

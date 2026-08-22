@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/deepseek-vision-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "为 DSH 非视觉模型提供基于 DeepSeek V4 Flash Vision Exp 的会话图片分析工具",
   "keywords": [
     "dsh",
@@ -44,11 +44,6 @@
     "market": {
       "displayName": "DeepSeek 视觉桥接",
       "capabilities": ["skills", "host", "client"]
-    },
-    "desktop": {
-      "permissions": [],
-      "contributes": {},
-      "storage": []
     }
   }
 }

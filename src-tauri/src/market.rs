@@ -1792,6 +1792,7 @@ mod tests {
             packages,
             vec![
                 "@p-dsh-market/akshare-market-analysis".to_string(),
+                "@p-dsh-market/deepseek-vision-bridge".to_string(),
                 "@p-dsh-market/dsh-open-workspace".to_string(),
                 "@p-dsh-market/multi-agent-roundtable".to_string(),
                 "@p-dsh-market/neon-agent-theme".to_string(),
@@ -1890,6 +1891,22 @@ mod tests {
         let mut broken = manifest;
         broken["dsh"]["market"]["capabilities"] = serde_json::json!(["host", "client"]);
         assert!(validate_market_manifest("@p-dsh-market/example", &broken).is_err());
+    }
+
+    #[test]
+    fn accepts_deepseek_vision_bridge_market_manifest() {
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../market/deepseek-vision-bridge/package.json"
+        ))
+        .expect("vision bridge manifest should be valid JSON");
+        let result = validate_market_manifest(
+            "@p-dsh-market/deepseek-vision-bridge",
+            &manifest,
+        )
+        .expect("vision bridge manifest should satisfy the market contract");
+        assert_eq!(result.version, "0.1.1");
+        assert_eq!(result.display_name, "DeepSeek 视觉桥接");
+        assert!(result.desktop.is_none());
     }
 
     #[test]
