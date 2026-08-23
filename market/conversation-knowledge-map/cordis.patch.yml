@@ -1,4 +1,4 @@
 - insert:
     - id: p-dsh-market-conversation-knowledge-map
       name: '@p-dsh-market/conversation-knowledge-map'
-      inject: [agentDefaultModel, agents, sessionQuery, sessions, skills, webServer]
+      inject: [agentDefaultModel, agents, llm, sessionQuery, sessions, skills, webServer]

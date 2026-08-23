@@ -2,10 +2,21 @@ import { randomUUID } from 'node:crypto'
 
 import { validateKnowledgeGraph } from './knowledge-graph-schema.js'
 import { validateMindMap } from './mind-map-schema.js'
-import { clone, errorMessage, makeUserMessage, shortText } from './protocol.js'
+import { clone, diagnosticSummary, errorMessage, logMessage, makeUserMessage, shortText } from './protocol.js'
 import { chunkSourceText, readSelectedSurfaces } from './session-source.js'
 
 const MAX_SUMMARY_CHARS = 2400
+
+function modelLabel(selection) {
+  const provider = String(selection?.provider || '').trim()
+  const model = String(selection?.model || '').trim()
+  return provider && model ? `${provider}/${model}` : 'default'
+}
+
+function logId(value) {
+  const text = String(value || '')
+  return text.length > 96 ? `${text.slice(0, 40)}…${text.slice(-40)}` : text
+}
 
 function phaseMessage(status) {
   return {
@@ -23,10 +34,77 @@ function phaseMessage(status) {
 }
 
 function asObject(value) {
-  if (value && typeof value === 'object') {
-    if (value.result && typeof value.result === 'object') return value.result
-    if (value.value && typeof value.value === 'object') return value.value
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const wrapperKeys = ['result', 'value', 'output', 'data', 'message', 'content', 'text']
+    for (const key of wrapperKeys) {
+      if (value[key] && typeof value[key] === 'object' && !Array.isArray(value[key])) return asObject(value[key])
+    }
+    if (wrapperKeys.some((key) => typeof value[key] === 'string')) return null
     return value
+  }
+  return null
+}
+
+function textFromContent(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value.map((block) => {
+      if (!block || typeof block !== 'object' || block.type === 'reasoning') return ''
+      if (typeof block.text === 'string') return block.text
+      if (typeof block.value === 'string') return block.value
+      if (block.type === 'tool-result') return textFromContent(block.content)
+      return ''
+    }).filter(Boolean).join('\n\n')
+  }
+  if (value && typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text
+    if (typeof value.value === 'string') return value.value
+    for (const key of ['content', 'result', 'output', 'data', 'message']) {
+      if (value[key] !== undefined) return textFromContent(value[key])
+    }
+  }
+  return ''
+}
+
+function findJsonObject(text) {
+  const candidates = []
+  const fenced = String(text || '').match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenced) candidates.push(fenced[1])
+  candidates.push(String(text || ''))
+  for (const candidate of candidates) {
+    for (let start = 0; start < candidate.length; start += 1) {
+      if (candidate[start] !== '{') continue
+      let depth = 0
+      let inString = false
+      let escaped = false
+      for (let index = start; index < candidate.length; index += 1) {
+        const char = candidate[index]
+        if (inString) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === '"') inString = false
+          continue
+        }
+        if (char === '"') {
+          inString = true
+          continue
+        }
+        if (char === '{') depth += 1
+        else if (char === '}') {
+          depth -= 1
+          if (depth === 0) {
+            const fragment = candidate.slice(start, index + 1)
+            try {
+              const parsed = JSON.parse(fragment)
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+            } catch {
+              // Try the next opening brace in case prose contained an example.
+            }
+            break
+          }
+        }
+      }
+    }
   }
   return null
 }
@@ -34,15 +112,11 @@ function asObject(value) {
 export function parseStructuredOutput(value) {
   const object = asObject(value)
   if (object) return object
-  const text = String(value || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('模型没有返回 JSON 对象。')
-  try {
-    return JSON.parse(text.slice(start, end + 1))
-  } catch (error) {
-    throw new Error(`模型 JSON 无法解析：${error.message}`)
-  }
+  const text = textFromContent(value).replace(/^\uFEFF/, '').trim()
+  const parsed = findJsonObject(text)
+  if (parsed) return parsed
+  if (!text) throw new Error('模型没有返回 JSON 对象。')
+  throw new Error('模型返回了文本，但其中没有可解析的 JSON 对象。')
 }
 
 function sourceRefsFromChunk(source, chunk) {
@@ -139,18 +213,65 @@ function followUpPrompt(node, source, targetSessionId, strict) {
   ].join('\n\n')
 }
 
+function messageText(message) {
+  if (!message || typeof message !== 'object') return ''
+  return textFromContent(message.content) || textFromContent(message.text) || textFromContent(message.value) || textFromContent(message.message)
+}
+
 function extractAgentText(surface) {
   const events = Array.isArray(surface?.events) ? surface.events : []
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event?.type === 'assistant/message') {
-      const message = event.data?.message || event.data || {}
-      const content = message.content
-      if (Array.isArray(content)) return content.filter((block) => block?.type !== 'reasoning').map((block) => block?.text || block?.value || '').join('')
-      if (typeof content === 'string') return content
+      const data = event.data && typeof event.data === 'object' ? event.data : {}
+      const text = messageText(data.message || data) || messageText(data)
+      if (text) return text
     }
   }
+  const chunks = events.filter((event) => event?.type === 'assistant/chunk').map((event) => {
+    const data = event.data && typeof event.data === 'object' ? event.data : {}
+    return textFromContent(data.chunk || data.text || data.content)
+  }).filter(Boolean)
+  return chunks.join('')
+}
+
+async function readAgentText(sessionQuery, sessionId, signal, { logger, diagnostics } = {}) {
+  const stats = diagnostics || { surfaceReads: 0, sessionReads: 0 }
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (signal?.aborted) throw signal.reason || new Error('生成已取消。')
+    stats.surfaceReads += 1
+    const surface = await sessionQuery?.readSurface?.(sessionId)
+    const text = extractAgentText(surface)
+    const eventCount = Array.isArray(surface?.events) ? surface.events.length : 0
+    stats.lastSurfaceEventCount = eventCount
+    stats.lastSurfaceShape = diagnosticSummary(surface)
+    stats.lastSurfaceTextLength = text.length
+    logMessage(logger, 'info', 'agent surface read session=%s attempt=%d events=%d extractedTextLength=%d shape=%s', logId(sessionId), attempt + 1, eventCount, text.length, stats.lastSurfaceShape)
+    if (text.trim()) return text
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)))
+  }
+  if (typeof sessionQuery?.readSession === 'function') {
+    stats.sessionReads += 1
+    const log = await sessionQuery.readSession(sessionId)
+    const text = extractAgentText(log)
+    const eventCount = Array.isArray(log?.events) ? log.events.length : 0
+    stats.lastSessionEventCount = eventCount
+    stats.lastSessionShape = diagnosticSummary(log)
+    stats.lastSessionTextLength = text.length
+    logMessage(logger, 'info', 'agent session read session=%s events=%d extractedTextLength=%d shape=%s', logId(sessionId), eventCount, text.length, stats.lastSessionShape)
+    if (text.trim()) return text
+  }
   return ''
+}
+
+function normalizeModelSelection(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型选择必须是包含 Provider 和 Model 的对象。')
+  const provider = String(value.provider || '').trim()
+  const model = String(value.model || '').trim()
+  if (!provider && !model) return null
+  if (!provider || !model) throw new Error('Provider 和 Model 必须同时填写。')
+  return { provider, model }
 }
 
 export class KnowledgeGenerationOrchestrator {
@@ -161,6 +282,8 @@ export class KnowledgeGenerationOrchestrator {
     agentDefaultModel,
     storage,
     modelRunner,
+    sessionEventSource,
+    logger,
     sourceReader = readSelectedSurfaces,
     now = () => Date.now(),
     idFactory = () => randomUUID()
@@ -171,6 +294,8 @@ export class KnowledgeGenerationOrchestrator {
     this.agentDefaultModel = agentDefaultModel
     this.storage = storage
     this.modelRunner = modelRunner
+    this.sessionEventSource = sessionEventSource
+    this.logger = logger
     this.sourceReader = sourceReader
     this.now = now
     this.idFactory = idFactory
@@ -239,6 +364,7 @@ export class KnowledgeGenerationOrchestrator {
     }
     this.tasks.set(task.id, task)
     this.busyByWorkspace.set(key, task.id)
+    logMessage(this.logger, 'info', 'generation start id=%s cwd=%s outputMode=%s selectedSessions=%d strict=%s model=%s', logId(task.id), shortText(request.cwd, 180), request.outputMode, Array.isArray(request.selectedSessionIds) ? request.selectedSessionIds.length : 0, request.strict === true, modelLabel(request.model))
     this.update(task, 'created', { request: { ...request, prompt: shortText(request.prompt, 500) } })
     task.promise = this.run(task, request).finally(() => {
       if (this.busyByWorkspace.get(key) === task.id) this.busyByWorkspace.delete(key)
@@ -267,6 +393,7 @@ export class KnowledgeGenerationOrchestrator {
         includeSubagents: request.includeSubagents === true
       })
       this.assertNotCancelled(task)
+      logMessage(this.logger, 'info', 'generation sources loaded id=%s sources=%d events=%d', logId(task.id), sources.length, sources.reduce((total, source) => total + (Array.isArray(source.events) ? source.events.length : 0), 0))
       this.update(task, 'summarizing', { sourceCount: sources.length })
       const summaries = []
       for (const source of sources) {
@@ -278,6 +405,7 @@ export class KnowledgeGenerationOrchestrator {
             cwd: request.cwd,
             strict: request.strict === true,
             selectedSessionIds: request.selectedSessionIds,
+            model: request.model,
             signal: task.controller.signal
           })
           summaries.push(normalizeSummary(value, source, chunk))
@@ -294,6 +422,7 @@ export class KnowledgeGenerationOrchestrator {
           cwd: request.cwd,
           strict: request.strict === true,
           selectedSessionIds: request.selectedSessionIds,
+          model: request.model,
           signal: task.controller.signal
         })
         mindMap = validateMindMap(value, { selectedSessionIds: request.selectedSessionIds, strict: request.strict === true })
@@ -306,6 +435,7 @@ export class KnowledgeGenerationOrchestrator {
           cwd: request.cwd,
           strict: request.strict === true,
           selectedSessionIds: request.selectedSessionIds,
+          model: request.model,
           signal: task.controller.signal
         })
         knowledgeGraph = validateKnowledgeGraph(value, { selectedSessionIds: request.selectedSessionIds, strict: request.strict === true })
@@ -328,11 +458,13 @@ export class KnowledgeGenerationOrchestrator {
       })
       task.revision = saved.revision
       task.result = { revision: saved.revision, manifest: saved.manifest, mindMap, knowledgeGraph }
+      logMessage(this.logger, 'info', 'generation completed id=%s revision=%d elapsedMs=%d', logId(task.id), saved.revision, this.now() - task.createdAt)
       this.update(task, 'completed', { revision: saved.revision, result: task.result })
     } catch (error) {
       if (task.controller.signal.aborted || /取消|cancel/i.test(errorMessage(error))) {
         this.update(task, 'cancelled', { error: '' })
       } else {
+        logMessage(this.logger, 'error', 'generation failed id=%s status=%s error=%s', logId(task.id), task.status, errorMessage(error))
         this.update(task, 'failed', { error: errorMessage(error) })
       }
     }
@@ -340,41 +472,105 @@ export class KnowledgeGenerationOrchestrator {
   }
 
   async runModel(input) {
-    if (typeof this.modelRunner === 'function') return parseStructuredOutput(await this.modelRunner(input))
-    if (!this.agents?.create) throw new Error('当前 DSH Runtime 未提供 agents.create，无法生成知识视图。')
-    let selection = {}
-    try { selection = this.agentDefaultModel?.currentSelection?.() || {} } catch { selection = {} }
-    const provider = String(selection.provider || '').trim()
-    const model = String(selection.model || '').trim()
-    if (!provider || !model) throw new Error('当前没有可用的默认 Provider/Model。')
-    const sessionId = `knowledge-map-${this.idFactory()}`
-    const handle = await this.agents.create({
-      sessionId,
-      meta: { cwd: input.cwd, origin: 'subagent' },
-      agentOptions: { provider, model, maxTokens: input.kind === 'summary' ? 2500 : 6000 },
-      signal: input.signal,
-      setup: async (agentCtx) => {
-        agentCtx?.systemPrompt?.section?.({
-          name: 'knowledge-map:protocol',
-          order: 0,
-          text: '你是 DSH 知识视图生成器。只输出调用方要求的 JSON；不要调用外部网络、文件写入或其他 Agent 工具。'
-        })
-        try {
-          agentCtx?.tools?.restrict?.({ deny: ['multi_agent_discuss', 'shell', 'filesystem', 'web_search', 'browser'] })
-        } catch { /* older runtimes may not expose tool restriction */ }
+    const parseModelOutput = (value, source, diagnostics = {}) => {
+      try {
+        const result = parseStructuredOutput(value)
+        logMessage(this.logger, 'info', 'agent output parsed kind=%s source=%s value=%s result=%s', input.kind, source, diagnosticSummary(value), diagnosticSummary(result))
+        return result
+      } catch (error) {
+        logMessage(this.logger, 'error', 'agent output parse failed kind=%s source=%s value=%s diagnostics=%s error=%s', input.kind, source, diagnosticSummary(value), JSON.stringify(diagnostics), errorMessage(error))
+        throw error
       }
-    })
+    }
+    if (typeof this.modelRunner === 'function') {
+      logMessage(this.logger, 'info', 'model runner start kind=%s model=%s promptLength=%d', input.kind, modelLabel(input.model), String(input.prompt || '').length)
+      const value = await this.modelRunner(input)
+      return parseModelOutput(value, 'model-runner')
+    }
+    if (!this.agents?.create) throw new Error('当前 DSH Runtime 未提供 agents.create，无法生成知识视图。')
+    let selection = normalizeModelSelection(input.model)
+    if (!selection) {
+      try {
+        selection = normalizeModelSelection(this.agentDefaultModel?.currentSelection?.())
+      } catch (error) {
+        logMessage(this.logger, 'warn', 'default model selection failed kind=%s error=%s', input.kind, shortText(errorMessage(error), 500))
+        selection = null
+      }
+    }
+    const provider = String(selection?.provider || '').trim()
+    const model = String(selection?.model || '').trim()
+    if (!provider || !model) {
+      logMessage(this.logger, 'error', 'agent call has no usable model kind=%s requestedModel=%s defaultModel=%s', input.kind, modelLabel(input.model), modelLabel(selection))
+      throw new Error('当前没有可用的默认 Provider/Model。')
+    }
+    const sessionId = `knowledge-map-${this.idFactory()}`
+    const liveEvents = []
+    const diagnostics = {
+      liveEvents: 0,
+      liveAssistantMessages: 0,
+      liveAssistantChunks: 0,
+      liveOtherEvents: 0,
+      surfaceReads: 0,
+      sessionReads: 0,
+      lastSurfaceEventCount: 0,
+      lastSessionEventCount: 0
+    }
+    logMessage(this.logger, 'info', 'agent call start kind=%s session=%s provider=%s model=%s promptLength=%d', input.kind, logId(sessionId), provider, model, String(input.prompt || '').length)
+    let unsubscribe
+    if (typeof this.sessionEventSource === 'function') {
+      try {
+        unsubscribe = this.sessionEventSource((session, event) => {
+          const eventSessionId = String(session?.id || session?.header?.id || '')
+          if (eventSessionId !== sessionId || !event) return
+          liveEvents.push(event)
+          diagnostics.liveEvents += 1
+          if (event.type === 'assistant/message') diagnostics.liveAssistantMessages += 1
+          else if (event.type === 'assistant/chunk') diagnostics.liveAssistantChunks += 1
+          else diagnostics.liveOtherEvents += 1
+          logMessage(this.logger, 'info', 'agent event session=%s type=%s data=%s', logId(sessionId), String(event.type || 'unknown'), diagnosticSummary(event.data))
+        })
+        logMessage(this.logger, 'info', 'agent event subscription ready session=%s', logId(sessionId))
+      } catch (error) {
+        logMessage(this.logger, 'warn', 'agent event subscription failed session=%s error=%s', logId(sessionId), errorMessage(error))
+      }
+    }
+    let handle
     try {
+      handle = await this.agents.create({
+        sessionId,
+        meta: { cwd: input.cwd, origin: 'subagent' },
+        agentOptions: { provider, model, maxTokens: input.kind === 'summary' ? 2500 : 6000 },
+        signal: input.signal,
+        setup: async (agentCtx) => {
+          agentCtx?.systemPrompt?.section?.({
+            name: 'knowledge-map:protocol',
+            order: 0,
+            text: '你是 DSH 知识视图生成器。只输出调用方要求的 JSON；不要调用外部网络、文件写入或其他 Agent 工具。'
+          })
+          try {
+            agentCtx?.tools?.restrict?.({ deny: ['multi_agent_discuss', 'shell', 'filesystem', 'web_search', 'browser'] })
+          } catch { /* older runtimes may not expose tool restriction */ }
+        }
+      })
       handle.agent.followup(makeUserMessage(input.prompt, `${sessionId}-${input.kind}`))
       await handle.agent.whenIdle()
-      const surface = await this.sessionQuery?.readSurface?.(sessionId)
-      return parseStructuredOutput(extractAgentText(surface))
+      const liveText = extractAgentText({ events: liveEvents })
+      logMessage(this.logger, 'info', 'agent idle session=%s liveEvents=%d assistantMessages=%d assistantChunks=%d otherEvents=%d liveTextLength=%d', logId(sessionId), diagnostics.liveEvents, diagnostics.liveAssistantMessages, diagnostics.liveAssistantChunks, diagnostics.liveOtherEvents, liveText.length)
+      if (liveText.trim()) return parseModelOutput(liveText, 'live-events', diagnostics)
+      const persistedText = await readAgentText(this.sessionQuery, sessionId, input.signal, { logger: this.logger, diagnostics })
+      logMessage(this.logger, 'info', 'agent persisted output session=%s textLength=%d surfaceReads=%d sessionReads=%d', logId(sessionId), persistedText.length, diagnostics.surfaceReads, diagnostics.sessionReads)
+      return parseModelOutput(persistedText, 'persisted-session', diagnostics)
+    } catch (error) {
+      logMessage(this.logger, 'error', 'agent call failed kind=%s session=%s liveEvents=%d surfaceReads=%d sessionReads=%d error=%s', input.kind, logId(sessionId), diagnostics.liveEvents, diagnostics.surfaceReads, diagnostics.sessionReads, errorMessage(error))
+      throw error
     } finally {
-      await handle.dispose?.()
+      if (typeof unsubscribe === 'function') await unsubscribe()
+      await handle?.dispose?.()
+      logMessage(this.logger, 'info', 'agent call disposed kind=%s session=%s', input.kind, logId(sessionId))
     }
   }
 
-  async formFollowUp({ cwd, node, targetSessionId, strict = true, signal }) {
+  async formFollowUp({ cwd, node, targetSessionId, strict = true, model, signal }) {
     const sources = await this.sourceReader({ sessionQuery: this.sessionQuery, sessions: this.sessions }, {
       cwd,
       sessionIds: [targetSessionId],
@@ -386,6 +582,7 @@ export class KnowledgeGenerationOrchestrator {
       cwd,
       strict,
       selectedSessionIds: [targetSessionId],
+      model,
       signal
     })
     const result = parseStructuredOutput(value)

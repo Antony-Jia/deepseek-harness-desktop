@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
 import { KnowledgeGenerationOrchestrator } from './generation-orchestrator.js'
-import { errorMessage, jsonResponse, methodOf, parseUrl, readJson, safeId, sseWrite, shortText } from './protocol.js'
+import { errorMessage, jsonResponse, loggerFacade, logMessage, methodOf, parseUrl, readJson, safeId, sseWrite, shortText } from './protocol.js'
 import { listWorkspaceSessions, normalizeWorkspacePath, resolveAnchorSession } from './session-source.js'
 import { WorkspaceRevisionError, WorkspaceStorage } from './workspace-storage.js'
 
@@ -41,6 +41,25 @@ function normalizeOutputMode(value) {
   return mode
 }
 
+function normalizeModelSelection(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型选择必须是包含 Provider 和 Model 的对象。')
+  const provider = String(value.provider || '').trim()
+  const model = String(value.model || '').trim()
+  if (!provider && !model) return null
+  if (!provider || !model) throw new Error('Provider 和 Model 必须同时填写。')
+  if (provider.length > 160 || model.length > 240) throw new Error('Provider 或 Model 名称过长。')
+  return { provider, model }
+}
+
+function currentModelSelection(service) {
+  try {
+    return normalizeModelSelection(service?.currentSelection?.())
+  } catch {
+    return null
+  }
+}
+
 function normalizeGenerationInput(body = {}) {
   const selectedSessionIds = [...new Set((Array.isArray(body.selectedSessionIds) ? body.selectedSessionIds : []).map((id) => String(id || '').trim()).filter(Boolean))]
   if (!selectedSessionIds.length) throw new Error('至少选择一个对话。')
@@ -54,6 +73,7 @@ function normalizeGenerationInput(body = {}) {
     prompt,
     strict: body.strict !== false,
     includeSubagents: body.includeSubagents === true,
+    model: normalizeModelSelection(body.model),
     expectedRevision: Number.isInteger(expectedRevision) && expectedRevision >= 0 ? expectedRevision : 0
   }
 }
@@ -67,6 +87,7 @@ function canonicalPayload(value) {
     prompt: value.prompt,
     strict: value.strict === true,
     includeSubagents: value.includeSubagents === true,
+    model: value.model ? { provider: value.model.provider, model: value.model.model } : null,
     expectedRevision: Number(value.expectedRevision || 0)
   })
 }
@@ -79,26 +100,32 @@ function statusForError(error) {
 
 export function createHost(options = {}) {
   const host = {
-    inject: ['agentDefaultModel', 'agents', 'sessionQuery', 'sessions', 'skills', 'webServer'],
+    inject: ['agentDefaultModel', 'agents', 'llm', 'sessionQuery', 'sessions', 'skills', 'webServer'],
 
     apply(ctx) {
       const sessionQuery = options.sessionQuery || getService(ctx, 'sessionQuery')
       const sessions = options.sessions || getService(ctx, 'sessions')
       const agents = options.agents || getService(ctx, 'agents')
       const agentDefaultModel = options.agentDefaultModel || getService(ctx, 'agentDefaultModel')
+      const llm = options.llm || getService(ctx, 'llm')
       const skills = options.skills || getService(ctx, 'skills')
       const webServer = options.webServer || getService(ctx, 'webServer')
+      const logger = loggerFacade(options.logger || getService(ctx, 'logger') || ctx?.logger || console)
       const storage = options.storage || new WorkspaceStorage(options.storageOptions)
+      const sessionEventSource = options.sessionEventSource || (typeof ctx?.on === 'function' ? (listener) => ctx.on('session/event', listener) : null)
       const orchestrator = options.orchestrator || new KnowledgeGenerationOrchestrator({
         sessionQuery,
         sessions,
         agents,
         agentDefaultModel,
         storage,
-        modelRunner: options.modelRunner
+        modelRunner: options.modelRunner,
+        sessionEventSource,
+        logger
       })
       const confirmations = new Map()
       const sseClients = new Set()
+      logMessage(logger, 'info', 'host apply plugin=%s services sessionQuery=%s sessions=%s agents=%s llm=%s webServer=%s sessionEvents=%s', PLUGIN_ID, Boolean(sessionQuery), Boolean(sessions), Boolean(agents?.create), Boolean(llm), Boolean(webServer?.register), Boolean(sessionEventSource))
 
       async function contextFor(sessionId) {
         const anchor = await resolveAnchorSession({ sessionQuery, sessions }, sessionId)
@@ -107,6 +134,36 @@ export function createHost(options = {}) {
         const cwd = normalizeWorkspacePath(header.cwd)
         if (!cwd) return { ready: false, state: 'session-without-cwd', sessionId: String(header.id), cwd: '' }
         return { ready: true, state: 'ready', sessionId: String(header.id), cwd, origin: String(header.origin || '') }
+      }
+
+      async function modelCatalog() {
+        const defaultModel = currentModelSelection(agentDefaultModel)
+        const providers = typeof llm?.listProviders === 'function' ? llm.listProviders() : []
+        const groups = (await Promise.all(providers.map(async (provider) => {
+          const providerId = String(provider?.id || '').trim()
+          if (!providerId || typeof llm?.listModels !== 'function') return null
+          try {
+            const models = await llm.listModels(providerId)
+            const entries = (Array.isArray(models) ? models : []).map((item) => ({
+              id: String(item?.id || '').trim(),
+              name: String(item?.name || item?.id || '').trim()
+            })).filter((item) => item.id)
+            return entries.length ? {
+              id: providerId,
+              name: String(provider?.name || providerId).trim(),
+              models: entries
+            } : null
+          } catch {
+            return null
+          }
+        }))).filter(Boolean)
+        if (defaultModel) {
+          const group = groups.find((item) => item.id === defaultModel.provider)
+          if (!group) groups.unshift({ id: defaultModel.provider, name: defaultModel.provider, models: [{ id: defaultModel.model, name: defaultModel.model }] })
+          else if (!group.models.some((item) => item.id === defaultModel.model)) group.models.unshift({ id: defaultModel.model, name: defaultModel.model })
+        }
+        logMessage(logger, 'info', 'model catalog default=%s providers=%d groups=%d', defaultModel ? `${defaultModel.provider}/${defaultModel.model}` : 'none', providers.length, groups.length)
+        return { default: defaultModel, groups }
       }
 
       async function sessionsFor(body) {
@@ -122,9 +179,12 @@ export function createHost(options = {}) {
         for (const id of input.selectedSessionIds) if (!allowed.has(id)) throw new Error(`所选对话不属于当前工作路径或已不可用：${id}`)
         const state = await storage.readState(context.cwd)
         if (input.expectedRevision !== state.revision) throw new WorkspaceRevisionError(input.expectedRevision, state.revision)
-        const payload = { ...input, anchorSessionId: context.sessionId, cwd: context.cwd, expectedRevision: state.revision }
+        const model = input.model || currentModelSelection(agentDefaultModel)
+        if (!model) throw new Error('当前没有可用的 Provider/Model，请先在模型设置中配置默认模型。')
+        const payload = { ...input, model, anchorSessionId: context.sessionId, cwd: context.cwd, expectedRevision: state.revision }
         const token = randomUUID()
         confirmations.set(token, { payload, expiresAt: Date.now() + CONFIRMATION_TTL, used: false })
+        logMessage(logger, 'info', 'generation confirmed cwd=%s anchorSession=%s selectedSessions=%d outputMode=%s strict=%s model=%s expectedRevision=%d', shortText(context.cwd, 180), shortText(context.sessionId, 96), input.selectedSessionIds.length, input.outputMode, input.strict, `${model.provider}/${model.model}`, state.revision)
         return {
           token,
           expiresAt: Date.now() + CONFIRMATION_TTL,
@@ -133,6 +193,7 @@ export function createHost(options = {}) {
           selectedSessions: available.filter((item) => input.selectedSessionIds.includes(item.id)),
           outputMode: input.outputMode,
           strict: input.strict,
+          model,
           promptSummary: shortText(input.prompt, 300),
           overwrite: state.exists
         }
@@ -141,7 +202,7 @@ export function createHost(options = {}) {
       function consumeConfirmation(token, body) {
         const value = confirmations.get(String(token || ''))
         if (!value || value.used || value.expiresAt < Date.now()) throw new Error('生成确认已过期，请返回配置重新确认。')
-        const supplied = normalizeGenerationInput({ ...body, anchorSessionId: body.anchorSessionId || value.payload.anchorSessionId, selectedSessionIds: body.selectedSessionIds || value.payload.selectedSessionIds, outputMode: body.outputMode || value.payload.outputMode, prompt: body.prompt ?? value.payload.prompt, strict: body.strict ?? value.payload.strict, includeSubagents: body.includeSubagents ?? value.payload.includeSubagents, expectedRevision: body.expectedRevision ?? value.payload.expectedRevision })
+        const supplied = normalizeGenerationInput({ ...body, anchorSessionId: body.anchorSessionId || value.payload.anchorSessionId, selectedSessionIds: body.selectedSessionIds || value.payload.selectedSessionIds, outputMode: body.outputMode || value.payload.outputMode, prompt: body.prompt ?? value.payload.prompt, strict: body.strict ?? value.payload.strict, includeSubagents: body.includeSubagents ?? value.payload.includeSubagents, model: body.model ?? value.payload.model, expectedRevision: body.expectedRevision ?? value.payload.expectedRevision })
         const expected = canonicalPayload(value.payload)
         const actual = canonicalPayload({ ...supplied, cwd: value.payload.cwd })
         if (expected !== actual) throw new Error('确认内容已变化，请返回配置重新确认。')
@@ -153,6 +214,8 @@ export function createHost(options = {}) {
         const path = parsePath(req)
         const method = methodOf(req)
         if (!path) return jsonResponse(res, 404, { ok: false, error: 'Not found' })
+        const routeLabel = path.join('/') || '(root)'
+        logMessage(logger, 'info', 'route start method=%s path=%s', method, routeLabel)
         try {
           if (path.length === 0 && method === 'GET') {
             return jsonResponse(res, 200, { ok: true, plugin: PLUGIN_ID })
@@ -163,6 +226,9 @@ export function createHost(options = {}) {
           if (path[0] === 'context' && method === 'GET') {
             const sessionId = parseUrl(req).searchParams.get('sessionId') || ''
             return jsonResponse(res, 200, { ok: true, context: await contextFor(sessionId) })
+          }
+          if (path[0] === 'models' && method === 'GET') {
+            return jsonResponse(res, 200, { ok: true, catalog: await modelCatalog() })
           }
           if (path[0] === 'sessions' && method === 'GET') {
             const anchorSessionId = parseUrl(req).searchParams.get('anchorSessionId') || ''
@@ -183,6 +249,7 @@ export function createHost(options = {}) {
             const body = await readJson(req)
             const request = consumeConfirmation(body.token, body)
             const task = orchestrator.start(request)
+            logMessage(logger, 'info', 'generation accepted id=%s outputMode=%s model=%s', shortText(task.id, 96), request.outputMode, `${request.model.provider}/${request.model.model}`)
             return jsonResponse(res, 202, { ok: true, generation: task })
           }
           if (path[0] === 'generations' && path[1] && path[2] === 'events' && method === 'GET') {
@@ -204,7 +271,7 @@ export function createHost(options = {}) {
             if (!node) throw new Error('思维导图节点不存在。')
             const targetSessionId = safeId(body.targetSessionId || node.primarySourceSessionId || node.sourceRefs?.[0]?.sessionId, '目标 Session ID')
             if (!state.manifest?.sourceSessionIds?.includes(targetSessionId)) throw new Error('目标对话不是本次生成的来源对话。')
-            const result = await orchestrator.formFollowUp({ cwd: context.cwd, node, targetSessionId, strict: state.manifest.strict !== false })
+            const result = await orchestrator.formFollowUp({ cwd: context.cwd, node, targetSessionId, strict: state.manifest.strict !== false, model: state.manifest.model })
             return jsonResponse(res, 200, { ok: true, followUp: result, context, revision: state.revision })
           }
           if (path[0] === 'navigation' && path[1] === 'confirm' && method === 'POST') {
@@ -225,7 +292,9 @@ export function createHost(options = {}) {
           }
           return jsonResponse(res, 404, { ok: false, error: 'Not found' })
         } catch (error) {
-          return writeError(res, error, statusForError(error))
+          const status = statusForError(error)
+          logMessage(logger, 'error', 'route failed method=%s path=%s status=%d error=%s', method, routeLabel, status, errorMessage(error))
+          return writeError(res, error, status)
         }
       }
 
@@ -238,6 +307,7 @@ export function createHost(options = {}) {
         content: readFileSync(SKILL_PATH, 'utf8').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n?/, ''),
         resourceBase: { kind: 'directory', path: SKILL_DIR_PATH }
       })
+      logMessage(logger, 'info', 'host registrations complete plugin=%s', PLUGIN_ID)
       if (typeof ctx?.effect === 'function') {
         ctx.effect(() => () => {
           for (const client of sseClients.values()) client.close?.()

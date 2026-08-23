@@ -10,7 +10,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -30,7 +33,9 @@ const MAX_CATALOG_PACKAGES: usize = 50;
 const MAX_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024;
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
+const CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const MARKET_SCAN_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,6 +216,29 @@ impl MarketManager {
     }
 
     fn load_catalog(&self) -> Result<LoadedMarketCatalog, String> {
+        if let Ok(metadata) = fs::metadata(&self.catalog_cache) {
+            if metadata
+                .modified()
+                .ok()
+                .is_some_and(|modified| catalog_cache_is_fresh(modified, SystemTime::now()))
+            {
+                if let Ok(raw) = fs::read_to_string(&self.catalog_cache) {
+                    match parse_market_catalog(&raw).and_then(merge_market_catalog_with_embedded) {
+                        Ok(packages) => {
+                            self.debug_log("using fresh market catalog cache");
+                            return Ok(LoadedMarketCatalog {
+                                packages,
+                                source: "fresh-cache",
+                            });
+                        }
+                        Err(error) => {
+                            self.debug_log(format!("fresh catalog cache rejected: {error}"))
+                        }
+                    }
+                }
+            }
+        }
+
         match fetch_market_catalog() {
             Ok(raw) => {
                 match parse_market_catalog(&raw).and_then(merge_market_catalog_with_embedded) {
@@ -341,58 +369,30 @@ impl MarketManager {
         let mut plugins = BTreeMap::new();
         let mut rejected = 0_usize;
         let mut out_of_scope = 0_usize;
+        let mut valid_candidates = Vec::new();
         for candidate in candidates.into_iter().take(MAX_CATALOG_PACKAGES) {
             if validate_market_package_name(&candidate.name).is_err() {
                 out_of_scope += 1;
                 continue;
             }
-            let view_result = self.run_dsh(
-                &selected,
-                &pnpm,
-                dsh_home,
-                &[
-                    "view".to_string(),
-                    candidate.name.clone(),
-                    "--json".to_string(),
-                ],
-            )?;
-            if !view_result_success(&view_result) {
-                self.debug_log(format!(
-                    "candidate view failed name={} code={:?} timed_out={} log={}",
-                    candidate.name, view_result.code, view_result.timed_out, view_result.log
-                ));
-                rejected += 1;
-                continue;
-            }
-            let manifest = match parse_manifest(&combined_output(&view_result))
-                .and_then(|value| validate_market_manifest(&candidate.name, &value))
-            {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    self.debug_log(format!(
-                        "candidate rejected name={} reason={error}",
-                        candidate.name
-                    ));
-                    rejected += 1;
-                    continue;
+            valid_candidates.push(candidate);
+        }
+        self.debug_log(format!(
+            "market candidate scan concurrency={} candidates={}",
+            MARKET_SCAN_CONCURRENCY.min(valid_candidates.len()),
+            valid_candidates.len()
+        ));
+        let inspected =
+            parallel_map_bounded(&valid_candidates, MARKET_SCAN_CONCURRENCY, |candidate| {
+                self.inspect_candidate(&selected, &pnpm, dsh_home, candidate)
+            });
+        for result in inspected {
+            match result? {
+                Some(plugin) if market_plugin_matches_query(&plugin, &query) => {
+                    plugins.insert(plugin.name.clone(), plugin);
                 }
-            };
-            let plugin = MarketPlugin {
-                name: manifest.name.clone(),
-                display_name: manifest.display_name,
-                version: manifest.version,
-                description: if manifest.description.is_empty() {
-                    candidate.description
-                } else {
-                    manifest.description
-                },
-                capabilities: manifest.capabilities,
-                theme: manifest.theme,
-                installed: false,
-                installed_version: None,
-            };
-            if market_plugin_matches_query(&plugin, &query) {
-                plugins.insert(plugin.name.clone(), plugin);
+                Some(_) => {}
+                None => rejected += 1,
             }
         }
 
@@ -455,6 +455,58 @@ impl MarketManager {
             package_manager_ready: true,
             message,
         })
+    }
+
+    fn inspect_candidate(
+        &self,
+        selected: &RuntimeCommand,
+        pnpm: &PnpmTool,
+        dsh_home: &Path,
+        candidate: &MarketSearchCandidate,
+    ) -> Result<Option<MarketPlugin>, String> {
+        let view_result = self.run_dsh(
+            selected,
+            pnpm,
+            dsh_home,
+            &[
+                "view".to_string(),
+                candidate.name.clone(),
+                "--json".to_string(),
+            ],
+        )?;
+        if !view_result_success(&view_result) {
+            self.debug_log(format!(
+                "candidate view failed name={} code={:?} timed_out={} log={}",
+                candidate.name, view_result.code, view_result.timed_out, view_result.log
+            ));
+            return Ok(None);
+        }
+        let manifest = match parse_manifest(&combined_output(&view_result))
+            .and_then(|value| validate_market_manifest(&candidate.name, &value))
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.debug_log(format!(
+                    "candidate rejected name={} reason={error}",
+                    candidate.name
+                ));
+                return Ok(None);
+            }
+        };
+        Ok(Some(MarketPlugin {
+            name: manifest.name.clone(),
+            display_name: manifest.display_name,
+            version: manifest.version,
+            description: if manifest.description.is_empty() {
+                candidate.description.clone()
+            } else {
+                manifest.description
+            },
+            capabilities: manifest.capabilities,
+            theme: manifest.theme,
+            installed: false,
+            installed_version: None,
+        }))
     }
 
     pub fn desktop_contributions(
@@ -864,6 +916,47 @@ fn pnpm_version_matches(executable: &Path, cwd: &Path) -> bool {
     };
     result.code == Some(0)
         && first_version(&combined_output(&result)).as_deref() == Some(PINNED_PNPM_VERSION)
+}
+
+fn catalog_cache_is_fresh(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified)
+        .is_ok_and(|age| age <= CATALOG_CACHE_TTL)
+}
+
+fn parallel_map_bounded<T, R, F>(items: &[T], concurrency: usize, operation: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let worker_count = concurrency.max(1).min(items.len());
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(items.len()));
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(index) else {
+                    break;
+                };
+                let value = operation(item);
+                let mut output = match results.lock() {
+                    Ok(output) => output,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                output.push((index, value));
+            });
+        }
+    });
+    let mut results = match results.into_inner() {
+        Ok(results) => results,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, value)| value).collect()
 }
 
 fn run_command(
@@ -1753,6 +1846,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn bounded_parallel_map_preserves_order_and_limits_workers() {
+        let items = (0..12).collect::<Vec<_>>();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let output = parallel_map_bounded(&items, 4, |value| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(current, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(5));
+            active.fetch_sub(1, Ordering::SeqCst);
+            value * value
+        });
+
+        assert_eq!(
+            output,
+            items.iter().map(|value| value * value).collect::<Vec<_>>()
+        );
+        assert!(peak.load(Ordering::SeqCst) > 1);
+        assert!(peak.load(Ordering::SeqCst) <= 4);
+    }
+
+    #[test]
+    fn catalog_cache_freshness_has_a_bounded_ttl() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        assert!(catalog_cache_is_fresh(now - CATALOG_CACHE_TTL, now));
+        assert!(!catalog_cache_is_fresh(
+            now - CATALOG_CACHE_TTL - Duration::from_secs(1),
+            now
+        ));
+        assert!(!catalog_cache_is_fresh(now + Duration::from_secs(1), now));
+    }
+
     fn valid_manifest(name: &str) -> Value {
         serde_json::json!({
             "name": name,
@@ -1792,6 +1917,7 @@ mod tests {
             packages,
             vec![
                 "@p-dsh-market/akshare-market-analysis".to_string(),
+                "@p-dsh-market/conversation-knowledge-map".to_string(),
                 "@p-dsh-market/deepseek-vision-bridge".to_string(),
                 "@p-dsh-market/dsh-open-workspace".to_string(),
                 "@p-dsh-market/multi-agent-roundtable".to_string(),

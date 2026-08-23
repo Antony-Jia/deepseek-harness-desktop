@@ -119,10 +119,12 @@ test('knowledge-map package exposes the host/client contract and safety boundari
   assert.deepEqual(manifest.dsh.market.capabilities.sort(), ['client', 'desktop-shell', 'host', 'skills'])
   assert.deepEqual(manifest.dsh.desktop.permissions.sort(), ['shell:page', 'shell:titlebar', 'workspace:read', 'workspace:write-plugin-data'])
   assert.equal(manifest.dsh.desktop.contributes.titlebarActions[0].action.method, 'conversationKnowledgeMap.open')
-  assert.match(patch, /inject: \[agentDefaultModel, agents, sessionQuery, sessions, skills, webServer\]/)
+  assert.match(patch, /inject: \[agentDefaultModel, agents, llm, sessionQuery, sessions, skills, webServer\]/)
   assert.match(host, /POST.*confirm|path\[0\] === 'confirm'/s)
   assert.match(host, /listWorkspaceSessions/)
   assert.match(host, /WorkspaceRevisionError/)
+  assert.match(host, /loggerFacade/)
+  assert.match(host, /route failed/)
   assert.match(client, /name: 'conversation\.view', id: 'conversation-knowledge-map'/)
   assert.match(client, /name: 'conversation\.session\.header\.actions', id: 'conversation-knowledge-map'/)
   assert.match(client, /name: 'shell\.overlay', id: 'conversation-knowledge-map'/)
@@ -282,6 +284,7 @@ test('orchestrator does not write before generation, validates model output, and
   try {
     const storage = new WorkspaceStorage({ now: () => 1700000000100 })
     const calls = []
+    const modelSelections = []
     const orchestrator = new KnowledgeGenerationOrchestrator({
       storage,
       sourceReader: async () => [{
@@ -292,6 +295,7 @@ test('orchestrator does not write before generation, validates model output, and
       }],
       modelRunner: async (input) => {
         calls.push(input.kind)
+        modelSelections.push(input.model)
         if (input.kind === 'summary') return { summary: '这是一个带有背景和下一步的完整对话摘要。', keyPoints: ['保留来源'], sourceRefs: sourceRefs() }
         if (input.kind === 'mind-map') return validMindMap()
         if (input.kind === 'knowledge-graph') return validGraph()
@@ -308,17 +312,147 @@ test('orchestrator does not write before generation, validates model output, and
       prompt: '请保留来源。',
       strict: true,
       includeSubagents: false,
-      expectedRevision: 0
+      expectedRevision: 0,
+      model: { provider: 'test-provider', model: 'test-model' }
     })
     const completed = await waitForGeneration(orchestrator, started.id)
     assert.equal(completed.status, 'completed')
     assert.deepEqual(calls, ['summary', 'mind-map', 'knowledge-graph'])
+    assert.deepEqual(modelSelections, [
+      { provider: 'test-provider', model: 'test-model' },
+      { provider: 'test-provider', model: 'test-model' },
+      { provider: 'test-provider', model: 'test-model' }
+    ])
     const state = await storage.readState(cwd)
     assert.equal(state.revision, 1)
     assert.equal(state.manifest.generationId, 'generation-both')
+    assert.deepEqual(state.manifest.model, { provider: 'test-provider', model: 'test-model' })
   } finally {
     await rm(cwd, { recursive: true, force: true })
   }
+})
+
+test('agent runner waits for the assistant surface and extracts structured text from runtime message variants', async () => {
+  let reads = 0
+  let createOptions
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'agent-output',
+    agentDefaultModel: { currentSelection() { return { provider: 'default-provider', model: 'default-model' } } },
+    agents: {
+      async create(options) {
+        createOptions = options
+        return {
+          agent: { followup() {}, async whenIdle() {} },
+          async dispose() {}
+        }
+      }
+    },
+    sessionQuery: {
+      async readSurface() {
+        reads += 1
+        if (reads === 1) return { events: [] }
+        return {
+          events: [{
+            type: 'assistant/message',
+            data: { message: { text: `结果如下：\n\n\`\`\`JSON\n${JSON.stringify({ ok: true, nested: { value: 1 } })}\n\`\`\`` } }
+          }]
+        }
+      }
+    }
+  })
+  const result = await orchestrator.runModel({
+    kind: 'summary',
+    prompt: '输出 JSON',
+    cwd: 'D:\\Code\\knowledge-workspace',
+    model: { provider: 'chosen-provider', model: 'chosen-model' }
+  })
+  assert.deepEqual(result, { ok: true, nested: { value: 1 } })
+  assert.equal(reads, 2)
+  assert.deepEqual(createOptions.agentOptions, { provider: 'chosen-provider', model: 'chosen-model', maxTokens: 2500 })
+})
+
+test('agent runner consumes live session events before querying the persisted surface', async () => {
+  let publish
+  let surfaceReads = 0
+  const logs = []
+  const logger = {
+    info(format, ...params) { logs.push(['info', format, ...params]) },
+    warn(format, ...params) { logs.push(['warn', format, ...params]) },
+    error(format, ...params) { logs.push(['error', format, ...params]) }
+  }
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'live-output',
+    logger,
+    sessionEventSource(listener) {
+      publish = listener
+      return () => {}
+    },
+    agents: {
+      async create() {
+        return {
+          agent: {
+            followup() {
+              publish({ id: 'knowledge-map-live-output' }, {
+                type: 'assistant/message',
+                data: { message: { content: [{ type: 'text', text: '{"ok":true}' }] } }
+              })
+            },
+            async whenIdle() {}
+          },
+          async dispose() {}
+        }
+      }
+    },
+    sessionQuery: {
+      async readSurface() {
+        surfaceReads += 1
+        return { events: [] }
+      }
+    }
+  })
+  const result = await orchestrator.runModel({
+    kind: 'mind-map',
+    prompt: '输出 JSON',
+    cwd: 'D:\\Code\\knowledge-workspace',
+    model: { provider: 'chosen-provider', model: 'chosen-model' }
+  })
+  assert.deepEqual(result, { ok: true })
+  assert.equal(surfaceReads, 0)
+  const serializedLogs = JSON.stringify(logs)
+  assert.match(serializedLogs, /agent event/)
+  assert.match(serializedLogs, /agent idle/)
+  assert.doesNotMatch(serializedLogs, /\{"ok":true\}/)
+})
+
+test('agent runner logs empty output diagnostics without logging model content', async () => {
+  const logs = []
+  const logger = {
+    info(format, ...params) { logs.push(['info', format, ...params]) },
+    warn(format, ...params) { logs.push(['warn', format, ...params]) },
+    error(format, ...params) { logs.push(['error', format, ...params]) }
+  }
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'empty-output',
+    logger,
+    agents: {
+      async create() {
+        return { agent: { followup() {}, async whenIdle() {} }, async dispose() {} }
+      }
+    },
+    sessionQuery: {
+      async readSurface() { return { events: [] } },
+      async readSession() { return { events: [] } }
+    }
+  })
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'summary', prompt: '输出 JSON', cwd: 'D:\\Code\\knowledge-workspace', model: { provider: 'test-provider', model: 'test-model' } }),
+    /没有返回 JSON/
+  )
+  const serializedLogs = JSON.stringify(logs)
+  assert.match(serializedLogs, /agent surface read/)
+  assert.match(serializedLogs, /agent output parse failed/)
+  assert.match(serializedLogs, /extractedTextLength/)
+  assert.doesNotMatch(serializedLogs, /输出 JSON/)
 })
 
 test('orchestrator leaves workspace untouched when structured output fails validation', async () => {
@@ -377,6 +511,7 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     const records = [record('session-1', cwd, 20), record('session-2', otherCwd, 10)]
     let surfaceReads = 0
     const modelCalls = []
+    const modelSelections = []
     const sessionQuery = {
       async filterSessions(filters) {
         const filter = filters[0]
@@ -392,11 +527,17 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
       storage,
       modelRunner: async (input) => {
         modelCalls.push(input.kind)
+        modelSelections.push(input.model)
         if (input.kind === 'summary') return { summary: '这是一个带有来源和下一步的完整摘要。', sourceRefs: sourceRefs() }
         return validMindMap()
       }
     })
-    const host = createHost({ sessionQuery, storage, orchestrator })
+    const llm = {
+      listProviders() { return [{ id: 'test-provider', name: '测试 Provider' }] },
+      async listModels(provider) { return provider === 'test-provider' ? [{ id: 'test-model', name: '测试模型' }] : [] }
+    }
+    const agentDefaultModel = { currentSelection() { return { provider: 'default-provider', model: 'default-model' } } }
+    const host = createHost({ sessionQuery, storage, orchestrator, llm, agentDefaultModel, logger: { info() {}, warn() {}, error() {} } })
     const routes = []
     const cleanups = []
     const skills = []
@@ -431,6 +572,14 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     assert.equal(result.body.context.cwd, cwd)
     assert.equal(surfaceReads, 0)
 
+    result = await call('GET', '/conversation-knowledge-map/models')
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body.catalog.default, { provider: 'default-provider', model: 'default-model' })
+    assert.deepEqual(result.body.catalog.groups, [
+      { id: 'default-provider', name: 'default-provider', models: [{ id: 'default-model', name: 'default-model' }] },
+      { id: 'test-provider', name: '测试 Provider', models: [{ id: 'test-model', name: '测试模型' }] }
+    ])
+
     result = await call('GET', '/conversation-knowledge-map/sessions?anchorSessionId=session-1')
     assert.equal(result.status, 200)
     assert.deepEqual(result.body.sessions.map((item) => item.id), ['session-1'])
@@ -440,12 +589,15 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     assert.equal(result.status, 400)
     assert.equal(surfaceReads, 0)
 
-    result = await call('POST', '/conversation-knowledge-map/confirm', { anchorSessionId: 'session-1', selectedSessionIds: ['session-1'], outputMode: 'mind-map', prompt: '保留来源', strict: true, expectedRevision: 0 })
+    result = await call('POST', '/conversation-knowledge-map/confirm', { anchorSessionId: 'session-1', selectedSessionIds: ['session-1'], outputMode: 'mind-map', prompt: '保留来源', strict: true, model: { provider: 'chosen-provider', model: 'chosen-model' }, expectedRevision: 0 })
     assert.equal(result.status, 200)
     assert.ok(result.body.confirmation.token)
+    assert.deepEqual(result.body.confirmation.model, { provider: 'chosen-provider', model: 'chosen-model' })
     assert.equal(surfaceReads, 0)
 
     const token = result.body.confirmation.token
+    result = await call('POST', '/conversation-knowledge-map/generations', { token, model: { provider: 'other-provider', model: 'other-model' } })
+    assert.equal(result.status, 400)
     result = await call('POST', '/conversation-knowledge-map/generations', { token })
     assert.equal(result.status, 202)
     const generationId = result.body.generation.id
@@ -459,6 +611,10 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     }
     assert.equal(surfaceReads, 1)
     assert.deepEqual(modelCalls, ['summary', 'mind-map'])
+    assert.deepEqual(modelSelections, [
+      { provider: 'chosen-provider', model: 'chosen-model' },
+      { provider: 'chosen-provider', model: 'chosen-model' }
+    ])
     await orchestrator.tasks.get(generationId).promise
     const hostState = await storage.readState(cwd)
     assert.equal(hostState.revision, 1, JSON.stringify({ hostState, generationId }))
@@ -468,6 +624,7 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     result = await call('GET', '/conversation-knowledge-map/state?anchorSessionId=session-1')
     assert.equal(result.status, 200)
     assert.equal(result.body.state.revision, 1)
+    assert.deepEqual(result.body.state.manifest.model, { provider: 'chosen-provider', model: 'chosen-model' })
     for (const cleanup of cleanups) cleanup()
   } finally {
     await rm(cwd, { recursive: true, force: true })
@@ -492,9 +649,14 @@ test('client bundle loads through the DSH module loader and exports the expected
   assert.equal(client.currentSessionId({ list: { getSnapshot() { return { current: { id: 'session-2' } } } } }), 'session-2')
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /EventSource/)
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /navigator\.clipboard/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /request\('\/models'/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /confirmation\.model/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /setOverlayOpen\(false\)/)
 })
 
 test('structured model output accepts fenced JSON but never treats plain prose as valid data', () => {
   assert.deepEqual(parseStructuredOutput('```json\n{"ok":true}\n```'), { ok: true })
-  assert.throws(() => parseStructuredOutput('没有 JSON'), /没有返回 JSON/)
+  assert.deepEqual(parseStructuredOutput('模型说明：```JSON\n{"ok":true,"nested":{"value":1}}\n```'), { ok: true, nested: { value: 1 } })
+  assert.deepEqual(parseStructuredOutput({ result: '前缀 {"ok":true} 后缀' }), { ok: true })
+  assert.throws(() => parseStructuredOutput('没有 JSON'), /没有可解析的 JSON/)
 })

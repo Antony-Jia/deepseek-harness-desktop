@@ -23,6 +23,36 @@ export function shortText(value, max = 8000) {
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text
 }
 
+export function loggerFacade(service, name = 'conversation-knowledge-map') {
+  if (!service) return null
+  try {
+    const logger = typeof service === 'function' ? service(name) : service
+    return logger && typeof logger === 'object' ? logger : null
+  } catch {
+    return null
+  }
+}
+
+export function logMessage(logger, level, format, ...params) {
+  try { logger?.[level]?.(`[conversation-knowledge-map] ${format}`, ...params) } catch { /* logging must not affect the plugin */ }
+}
+
+function diagnosticShape(value, depth = 0) {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') return `string(${value.length})`
+  if (typeof value !== 'object') return typeof value
+  if (depth >= 2) return Array.isArray(value) ? `array(${value.length})` : 'object'
+  if (Array.isArray(value)) return `array(${value.length})[${value.slice(0, 6).map((item) => diagnosticShape(item, depth + 1)).join(',')}]`
+  const keys = Object.keys(value).sort()
+  const suffix = keys.length > 12 ? ',…' : ''
+  return `object{${keys.slice(0, 12).join(',')}${suffix}}`
+}
+
+export function diagnosticSummary(value) {
+  return diagnosticShape(value)
+}
+
 export function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 }

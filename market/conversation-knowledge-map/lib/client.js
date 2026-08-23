@@ -92,6 +92,7 @@ window.__ModuleLoader__.load({
           context: null,
           state: null,
           sessions: [],
+          modelCatalog: null,
           generation: null,
           loading: false,
           loaded: false,
@@ -450,6 +451,15 @@ window.__ModuleLoader__.load({
       var includePair = React.useState(false)
       var includeSubagents = includePair[0]
       var setIncludeSubagents = includePair[1]
+      var modelCatalogPair = React.useState(null)
+      var modelCatalog = modelCatalogPair[0]
+      var setModelCatalog = modelCatalogPair[1]
+      var providerPair = React.useState('')
+      var modelProvider = providerPair[0]
+      var setModelProvider = providerPair[1]
+      var modelIdPair = React.useState('')
+      var modelId = modelIdPair[0]
+      var setModelId = modelIdPair[1]
       var confirmationPair = React.useState(null)
       var confirmation = confirmationPair[0]
       var setConfirmation = confirmationPair[1]
@@ -466,17 +476,30 @@ window.__ModuleLoader__.load({
           setSelected(function (old) { return old.length ? old.filter(function (id) { return (body.sessions || []).some(function (item) { return item.id === id }) }) : [store.sessionId] })
         }).catch(function (error) { setMessage(error.message || String(error)) })
       }, [store.context && store.context.cwd, includeSubagents])
+      React.useEffect(function () {
+        if (!store.context || !store.context.ready) return
+        request('/models').then(function (body) {
+          var catalog = body.catalog || { default: null, groups: [] }
+          setModelCatalog(catalog)
+          var defaultModel = catalog.default || {}
+          var firstGroup = catalog.groups && catalog.groups[0] ? catalog.groups[0] : {}
+          var firstModel = firstGroup.models && firstGroup.models[0] ? firstGroup.models[0].id : ''
+          setModelProvider(function (old) { return old || defaultModel.provider || firstGroup.id || '' })
+          setModelId(function (old) { return old || defaultModel.model || firstModel || '' })
+        }).catch(function (error) { setMessage(error.message || String(error)) })
+      }, [store.context && store.context.cwd])
       function toggle(id) { setSelected(function (old) { return old.indexOf(id) >= 0 ? old.filter(function (item) { return item !== id }) : old.concat([id]) }) }
       function confirm() {
         if (!selected.length) { setMessage('至少选择一个对话。'); return }
         setBusy(true)
-        request('/confirm', { method: 'POST', body: { anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, expectedRevision: store.state ? store.state.revision : 0 } }).then(function (body) { setConfirmation(body.confirmation); setMessage(''); setBusy(false) }).catch(function (error) { setMessage(error.message || String(error)); setBusy(false) })
+        request('/confirm', { method: 'POST', body: { anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: { provider: modelProvider, model: modelId }, expectedRevision: store.state ? store.state.revision : 0 } }).then(function (body) { setConfirmation(body.confirmation); setMessage(''); setBusy(false) }).catch(function (error) { setMessage(error.message || String(error)); setBusy(false) })
       }
       function start() {
         setBusy(true)
-        request('/generations', { method: 'POST', body: { token: confirmation.token, anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, expectedRevision: confirmation.revision } }).then(function (body) {
+        request('/generations', { method: 'POST', body: { token: confirmation.token, anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: confirmation.model, expectedRevision: confirmation.revision } }).then(function (body) {
           setConfirmation(null)
           setBusy(false)
+          setOverlayOpen(false)
           applyGeneration(store, body.generation)
           openGenerationStream(store, body.generation.id)
         }).catch(function (error) { setMessage(error.message || String(error)); setBusy(false) })
@@ -484,7 +507,7 @@ window.__ModuleLoader__.load({
       if (!store.context || !store.context.ready) return React.createElement('div', { className: 'ckm-modal-backdrop' }, React.createElement('div', { className: 'ckm-modal' }, [React.createElement('h3', { key: 'title' }, '知识视图'), React.createElement('p', { key: 'copy' }, '请先打开一个有明确工作路径的已有对话。'), Button({ key: 'close', className: 'ckm-primary', onClick: function () { setOverlayOpen(false) } }, '关闭')]))
       return React.createElement('div', { className: 'ckm-modal-backdrop' }, React.createElement('div', { className: 'ckm-modal ckm-config-modal', role: 'dialog', 'aria-modal': 'true' }, confirmation ? [
         React.createElement('h3', { key: 'title' }, '确认生成知识视图？'),
-        React.createElement('dl', { key: 'summary', className: 'ckm-confirm-summary' }, [React.createElement('dt', { key: 'cwd-label' }, '工作路径'), React.createElement('dd', { key: 'cwd' }, store.context.cwd), React.createElement('dt', { key: 'source-label' }, '来源'), React.createElement('dd', { key: 'sources' }, confirmation.selectedSessions.length + ' 个已选择对话'), React.createElement('dt', { key: 'output-label' }, '生成'), React.createElement('dd', { key: 'output' }, mode === 'both' ? '思维导图 + 知识图谱' : mode), React.createElement('dt', { key: 'strict-label' }, '约束'), React.createElement('dd', { key: 'strict' }, strict ? '严格约束已开启' : '普通约束'), React.createElement('dt', { key: 'save-label' }, '保存'), React.createElement('dd', { key: 'save' }, '.g-dsh-market-knowledge' + (confirmation.overwrite ? '（将替换已有结果）' : ''))]),
+        React.createElement('dl', { key: 'summary', className: 'ckm-confirm-summary' }, [React.createElement('dt', { key: 'cwd-label' }, '工作路径'), React.createElement('dd', { key: 'cwd' }, store.context.cwd), React.createElement('dt', { key: 'source-label' }, '来源'), React.createElement('dd', { key: 'sources' }, confirmation.selectedSessions.length + ' 个已选择对话'), React.createElement('dt', { key: 'output-label' }, '生成'), React.createElement('dd', { key: 'output' }, mode === 'both' ? '思维导图 + 知识图谱' : mode), React.createElement('dt', { key: 'model-label' }, '模型'), React.createElement('dd', { key: 'model' }, confirmation.model.provider + ' / ' + confirmation.model.model), React.createElement('dt', { key: 'strict-label' }, '约束'), React.createElement('dd', { key: 'strict' }, strict ? '严格约束已开启' : '普通约束'), React.createElement('dt', { key: 'save-label' }, '保存'), React.createElement('dd', { key: 'save' }, '.g-dsh-market-knowledge' + (confirmation.overwrite ? '（将替换已有结果）' : ''))]),
         React.createElement('p', { key: 'note', className: 'ckm-warning' }, '确认后才会读取所选对话正文、调用模型并写入工作区；不会自动发送消息。'),
         React.createElement('div', { key: 'actions', className: 'ckm-modal-actions' }, [Button({ key: 'back', className: 'ckm-secondary', onClick: function () { setConfirmation(null) }, disabled: busy }, '返回修改'), Button({ key: 'ok', className: 'ckm-primary', onClick: start, disabled: busy }, busy ? '生成中…' : '确认并生成')])
       ] : [
@@ -507,6 +530,17 @@ window.__ModuleLoader__.load({
           ])
         ]),
         React.createElement('label', { key: 'mode', className: 'ckm-field' }, ['生成内容', React.createElement('select', { key: 'select', value: mode, onChange: function (event) { setMode(event.target.value) } }, [React.createElement('option', { key: 'both', value: 'both' }, '思维导图 + 知识图谱'), React.createElement('option', { key: 'mind', value: 'mind-map' }, '仅思维导图'), React.createElement('option', { key: 'graph', value: 'knowledge-graph' }, '仅知识图谱')])]),
+        React.createElement('label', { key: 'model', className: 'ckm-field' }, [
+          '生成模型',
+          React.createElement('span', { key: 'hint', className: 'ckm-panel-hint' }, '默认带入 DSH 默认模型；可以为本次知识视图单独选择 Provider / Model。'),
+          modelCatalog && modelCatalog.groups && modelCatalog.groups.length ? React.createElement('div', { key: 'selectors', className: 'ckm-model-selectors' }, [
+            React.createElement('select', { key: 'provider', value: modelProvider, onChange: function (event) { var next = event.target.value; var group = modelCatalog.groups.filter(function (item) { return item.id === next })[0]; setModelProvider(next); setModelId(group && group.models && group.models[0] ? group.models[0].id : '') } }, modelCatalog.groups.map(function (group) { return React.createElement('option', { key: group.id, value: group.id }, group.name + '（' + group.id + '）') })),
+            React.createElement('select', { key: 'model', value: modelId, onChange: function (event) { setModelId(event.target.value) } }, ((modelCatalog.groups.filter(function (item) { return item.id === modelProvider })[0] || {}).models || []).map(function (item) { return React.createElement('option', { key: item.id, value: item.id }, item.name + '（' + item.id + '）') }))
+          ]) : React.createElement('div', { key: 'inputs', className: 'ckm-model-selectors' }, [
+            React.createElement('input', { key: 'provider', value: modelProvider, placeholder: 'Provider', onChange: function (event) { setModelProvider(event.target.value) } }),
+            React.createElement('input', { key: 'model', value: modelId, placeholder: 'Model', onChange: function (event) { setModelId(event.target.value) } })
+          ])
+        ]),
         React.createElement('label', { key: 'prompt', className: 'ckm-field' }, ['额外要求', React.createElement('textarea', { key: 'textarea', rows: 4, maxLength: 4000, value: prompt, placeholder: '请输入形成思维导图或知识图谱时需要遵守的 Prompt…', onChange: function (event) { setPrompt(event.target.value) } })]),
         React.createElement('label', { key: 'strict', className: 'ckm-inline-field' }, [React.createElement('input', { key: 'check', type: 'checkbox', checked: strict, onChange: function (event) { setStrict(event.target.checked) } }), '严格约束模式（来源、路径、工具和写入均由 Host 校验）']),
         message ? React.createElement('p', { key: 'message', className: 'ckm-error' }, message) : null,
@@ -531,7 +565,7 @@ window.__ModuleLoader__.load({
       '.ckm-empty{display:flex;flex:1;min-height:260px;flex-direction:column;align-items:center;justify-content:center;padding:28px;text-align:center}.ckm-empty-icon{display:grid;place-items:center;width:44px;height:44px;margin-bottom:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;color:var(--dsw-alias-state-business-primary);font-size:24px}.ckm-empty h2{margin:0 0 8px;font-size:17px}.ckm-empty p{max-width:520px;margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.7}' +
       '.ckm-generation-strip{display:flex;align-items:center;gap:12px;padding:9px 20px;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-state-business-tertiary);font-size:12px}.ckm-generation-strip span{color:var(--dsw-alias-label-secondary)}.ckm-generation-strip .ckm-danger{margin-left:auto}' +
       '.ckm-workspace{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:0;flex:1}.ckm-mind-canvas,.ckm-graph-canvas{min-width:0;min-height:0;overflow:auto;padding:20px;background:var(--dsw-alias-bg-base)}.ckm-detail{min-width:0;min-height:0;overflow:auto;padding:20px;border-left:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}.ckm-panel-hint{margin:0 0 14px;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.6}.ckm-tree{display:flex;flex-direction:column;gap:8px;max-width:900px;margin:0 auto}.ckm-tree-node{display:flex;flex-direction:column;align-items:flex-start;gap:5px;width:calc(100% - 0px);padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer}.ckm-tree-node[data-active=true]{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-tertiary)}.ckm-tree-node:hover{background:var(--dsw-alias-interactive-bg-hover)}.ckm-tree-node strong{font-size:13px}.ckm-tree-node span:last-child{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.65}.ckm-node-type{display:inline-block;color:var(--dsw-alias-state-business-primary);font-size:10px;letter-spacing:.04em;text-transform:uppercase}.ckm-detail-head{display:flex;flex-direction:column;gap:5px}.ckm-detail h3{margin:0;font-size:16px;line-height:1.45}.ckm-narrative{font-size:13px;line-height:1.8}.ckm-source-box{margin:16px 0;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-base);font-size:11px;line-height:1.6}.ckm-source-box strong{display:block;margin-bottom:5px}.ckm-source-box ul{margin:0;padding-left:18px;color:var(--dsw-alias-label-secondary)}.ckm-detail-empty{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.7}' +
-      '.ckm-graph-layout{grid-template-columns:minmax(0,1fr) 330px}.ckm-graph-toolbar{display:flex;gap:8px}.ckm-graph-toolbar input,.ckm-graph-toolbar select,.ckm-field textarea,.ckm-field select,.ckm-field input,.ckm-modal textarea,.ckm-modal select{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 9px;background:var(--dsw-specific-input-major);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}.ckm-graph-toolbar input{flex:1}.ckm-graph-svg{display:block;width:100%;min-height:420px;margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1)}.ckm-edge{stroke:var(--dsw-alias-border-l2);stroke-width:1.5}.ckm-graph-node{cursor:pointer}.ckm-graph-node circle{fill:var(--dsw-alias-state-business-tertiary);stroke:var(--dsw-alias-state-business-primary);stroke-width:1.5}.ckm-graph-node[data-active=true] circle{fill:var(--dsw-alias-button-info-fill);stroke:var(--dsw-alias-label-primary)}.ckm-graph-node text{fill:var(--dsw-alias-label-primary);font-size:11px}' +
+      '.ckm-graph-layout{grid-template-columns:minmax(0,1fr) 330px}.ckm-graph-toolbar{display:flex;gap:8px}.ckm-model-selectors{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:8px}.ckm-graph-toolbar input,.ckm-graph-toolbar select,.ckm-field textarea,.ckm-field select,.ckm-field input,.ckm-modal textarea,.ckm-modal select{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 9px;background:var(--dsw-specific-input-major);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}.ckm-graph-toolbar input{flex:1}.ckm-graph-svg{display:block;width:100%;min-height:420px;margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1)}.ckm-edge{stroke:var(--dsw-alias-border-l2);stroke-width:1.5}.ckm-graph-node{cursor:pointer}.ckm-graph-node circle{fill:var(--dsw-alias-state-business-tertiary);stroke:var(--dsw-alias-state-business-primary);stroke-width:1.5}.ckm-graph-node[data-active=true] circle{fill:var(--dsw-alias-button-info-fill);stroke:var(--dsw-alias-label-primary)}.ckm-graph-node text{fill:var(--dsw-alias-label-primary);font-size:11px}' +
       '.ckm-modal-backdrop{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.46)}.ckm-modal{width:min(680px,calc(100vw - 40px));max-height:min(760px,calc(100vh - 40px));overflow:auto;padding:22px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;box-shadow:0 18px 56px #0008}.ckm-modal h3{margin:0;font-size:17px}.ckm-modal p{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.65}.ckm-modal-head{display:flex;align-items:center;justify-content:space-between}.ckm-icon-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-size:20px;cursor:pointer}.ckm-workspace-label{padding:9px;border-radius:8px;background:var(--dsw-alias-bg-layer-1);word-break:break-all}.ckm-field{display:flex;flex-direction:column;gap:7px;margin:14px 0;color:var(--dsw-alias-label-secondary);font-size:12px}.ckm-field textarea{resize:vertical}.ckm-session-list{display:flex;max-height:220px;flex-direction:column;gap:5px;overflow:auto}.ckm-session-option{display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid transparent;border-radius:8px;background:var(--dsw-alias-bg-layer-1);cursor:pointer}.ckm-session-option:hover{border-color:var(--dsw-alias-border-l2)}.ckm-session-option input,.ckm-inline-field input{margin-top:3px}.ckm-session-option span{display:flex;flex-direction:column;gap:3px}.ckm-session-option small{color:var(--dsw-alias-label-secondary);font-size:10px}.ckm-inline-field{display:flex;align-items:flex-start;gap:7px;margin:10px 0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.5}.ckm-confirm-summary{display:grid;grid-template-columns:100px 1fr;gap:7px 12px;margin:18px 0;font-size:12px}.ckm-confirm-summary dt{color:var(--dsw-alias-label-secondary)}.ckm-confirm-summary dd{margin:0;word-break:break-all}.ckm-warning{padding:10px;border-radius:8px;background:#d29c2518;color:var(--dsw-alias-label-secondary)}.ckm-error{color:#ff9898!important}.ckm-modal-actions{justify-content:flex-end;margin-top:18px}.ckm-header-pending{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-tertiary)}' +
       '@media(max-width:800px){.ckm-workspace,.ckm-graph-layout{display:flex;flex-direction:column}.ckm-detail{border-top:1px solid var(--dsw-alias-border-l2);border-left:0}.ckm-page-header{align-items:flex-start;flex-direction:column}.ckm-page-actions{width:100%;flex-wrap:wrap}}'
 
