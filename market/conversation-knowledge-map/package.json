@@ -1,0 +1,74 @@
+{
+  "name": "@p-dsh-market/conversation-knowledge-map",
+  "version": "0.1.0",
+  "description": "DSH 多对话思维导图与静态知识图谱",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "conversation",
+    "mind-map",
+    "knowledge-graph"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./protocol": "./lib/protocol.js",
+    "./session-source": "./lib/session-source.js",
+    "./generation-orchestrator": "./lib/generation-orchestrator.js",
+    "./mind-map-schema": "./lib/mind-map-schema.js",
+    "./knowledge-graph-schema": "./lib/knowledge-graph-schema.js",
+    "./workspace-storage": "./lib/workspace-storage.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/protocol.js",
+    "lib/session-source.js",
+    "lib/generation-orchestrator.js",
+    "lib/mind-map-schema.js",
+    "lib/knowledge-graph-schema.js",
+    "lib/workspace-storage.js",
+    "skills/conversation-knowledge-map/SKILL.md",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "知识视图",
+      "capabilities": ["skills", "host", "client", "desktop-shell"]
+    },
+    "desktop": {
+      "permissions": ["shell:titlebar", "shell:page", "workspace:read", "workspace:write-plugin-data"],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "open-conversation-knowledge-map",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "知识视图",
+            "order": 140,
+            "when": ["dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "pluginRpc",
+              "method": "conversationKnowledgeMap.open"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
