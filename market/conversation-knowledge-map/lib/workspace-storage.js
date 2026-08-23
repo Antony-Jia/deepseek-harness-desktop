@@ -151,7 +151,7 @@ export class WorkspaceStorage {
     }
   }
 
-  async saveBundle({ cwd, expectedRevision = 0, generationId, sourceSessionIds, prompt, strict, outputMode, model, mindMap, knowledgeGraph }) {
+  async saveBundle({ cwd, expectedRevision = 0, generationId, sourceSessionIds, sourceSessions, failedSources, sourceWarnings, generationTimeline, prompt, strict, outputMode, model, mindMap, knowledgeGraph }) {
     const normalizedCwd = normalizeWorkspacePath(cwd)
     const key = workspaceKey(normalizedCwd)
     const previous = this.locks.get(key) || Promise.resolve()
@@ -166,6 +166,25 @@ export class WorkspaceStorage {
         revision,
         cwd: normalizedCwd,
         sourceSessionIds: [...new Set((sourceSessionIds || []).map(String))],
+        sourceSessions: Array.isArray(sourceSessions) ? sourceSessions.map((source) => ({
+          sessionId: String(source?.sessionId || ''),
+          title: shortText(source?.title, 200)
+        })).filter((source) => source.sessionId) : [],
+        sourceWarnings: {
+          skippedRefs: Math.max(0, Number(sourceWarnings?.skippedRefs) || 0),
+          skippedItems: Math.max(0, Number(sourceWarnings?.skippedItems) || 0)
+        },
+        failedSources: Array.isArray(failedSources) ? failedSources.map((source) => ({
+          sessionId: String(source?.sessionId || ''),
+          title: shortText(source?.title, 200),
+          error: shortText(source?.error, 500)
+        })).filter((source) => source.sessionId) : [],
+        generationTimeline: Array.isArray(generationTimeline) ? generationTimeline.slice(-80).map((item, index) => ({
+          id: Number(item?.id) || index + 1,
+          at: Number(item?.at) || this.now(),
+          type: shortText(item?.type, 40) || 'info',
+          message: shortText(item?.message, 500)
+        })) : [],
         promptSummary: shortText(prompt, 500),
         strict: strict === true,
         outputMode: String(outputMode || 'both'),

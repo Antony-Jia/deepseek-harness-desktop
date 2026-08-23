@@ -112,8 +112,10 @@ function sourceSeqsOf(event) {
   return Array.isArray(value) ? value.filter((item) => Number.isInteger(item) && item >= 0) : []
 }
 
-export function surfaceEventView(event) {
+export function surfaceEventView(event, { fullSession = false } = {}) {
   const role = eventRole(String(event?.type || ''))
+  const data = event?.data?.message || event?.data || {}
+  if (fullSession && role === 'user' && data?.source?.kind !== 'user') return null
   const text = shortText(eventMessageText(event), 12000)
   if (!role || !text) return null
   return {
@@ -125,42 +127,76 @@ export function surfaceEventView(event) {
   }
 }
 
-export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, sessionIds, includeSubagents = false }) {
+export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, sessionIds, fallbackSessionId = '', includeSubagents = false }) {
   const selected = [...new Set((sessionIds || []).map((id) => String(id || '').trim()).filter(Boolean))]
   if (selected.length === 0) throw new Error('至少选择一个对话。')
   const normalizedCwd = normalizeWorkspacePath(cwd)
   if (!normalizedCwd) throw new Error('当前工作路径无效。')
+  const fallbackId = String(fallbackSessionId || '').trim()
+  const resolvedIds = [...new Set([...selected, ...(fallbackId ? [fallbackId] : [])])]
   const records = []
   if (typeof sessionQuery?.filterSessions === 'function') {
-    records.push(...await sessionQuery.filterSessions([{ kind: 'id', values: selected }]))
+    records.push(...await sessionQuery.filterSessions([{ kind: 'id', values: resolvedIds }]))
   } else if (typeof sessionQuery?.listSessions === 'function') {
     const all = await sessionQuery.listSessions()
-    records.push(...all.filter((record) => selected.includes(String(headerOf(record)?.id || ''))))
+    records.push(...all.filter((record) => resolvedIds.includes(String(headerOf(record)?.id || ''))))
   }
   const recordMap = new Map(records.map((record) => [String(headerOf(record)?.id || record?.id || ''), record]))
-  const sources = []
-  for (const id of selected) {
+  const readSource = async (id) => {
     const record = recordMap.get(id)
     const header = headerOf(record) || sessions?.get?.(id)?.header
     if (!header?.id) throw new Error(`所选对话不存在或已不可读：${id}`)
     if (!sameWorkspacePath(header.cwd, normalizedCwd)) throw new Error(`所选对话不属于当前工作路径：${id}`)
     if (!includeSubagents && header.origin === 'subagent') throw new Error(`不能选择子 Agent 对话：${id}`)
-    if (typeof sessionQuery?.readSurface !== 'function') throw new Error('当前 DSH Runtime 未提供 sessionQuery.readSurface。')
-    let surface
-    try {
-      surface = await sessionQuery.readSurface(id)
-    } catch (error) {
-      throw new Error(`读取对话“${id}”失败：${errorMessage(error)}`)
+    if (typeof sessionQuery?.readSurface !== 'function' && typeof sessionQuery?.readSession !== 'function') {
+      throw new Error('当前 DSH Runtime 未提供 sessionQuery.readSurface/readSession。')
     }
-    const events = (surface?.events || []).map(surfaceEventView).filter(Boolean)
-    sources.push({
+    let snapshot
+    let events = []
+    let surfaceError = null
+    try {
+      if (typeof sessionQuery?.readSurface === 'function') {
+        snapshot = await sessionQuery.readSurface(id)
+        events = (snapshot?.events || []).map((event) => surfaceEventView(event)).filter(Boolean)
+      }
+    } catch (error) {
+      surfaceError = error
+    }
+    if (events.length === 0 && typeof sessionQuery?.readSession === 'function') {
+      try {
+        const full = await sessionQuery.readSession(id)
+        snapshot = full || snapshot
+        events = (full?.events || []).map((event) => surfaceEventView(event, { fullSession: true })).filter(Boolean)
+      } catch (error) {
+        if (surfaceError) throw new Error(`读取对话“${id}”失败：surface=${errorMessage(surfaceError)}；session=${errorMessage(error)}`)
+        throw new Error(`读取对话“${id}”完整记录失败：${errorMessage(error)}`)
+      }
+    }
+    if (surfaceError && events.length === 0) throw new Error(`读取对话“${id}”失败：${errorMessage(surfaceError)}`)
+    return {
       sessionId: id,
       title: `对话 ${id.slice(0, 8)}`,
-      cwd: normalizeWorkspacePath(surface?.session?.cwd || header.cwd),
-      capturedThroughSeq: Number.isInteger(surface?.capturedThroughSeq) ? surface.capturedThroughSeq : null,
+      cwd: normalizeWorkspacePath(snapshot?.session?.cwd || header.cwd),
+      capturedThroughSeq: Number.isInteger(snapshot?.capturedThroughSeq) ? snapshot.capturedThroughSeq : null,
       events,
       text: events.map((event) => `${event.role === 'user' ? '用户' : '助手'}：${event.text}`).join('\n\n')
-    })
+    }
+  }
+  const sources = []
+  let needsFallback = false
+  for (const id of selected) {
+    const source = await readSource(id)
+    if (source.events.length > 0) sources.push(source)
+    else needsFallback = true
+  }
+  if (needsFallback && fallbackId && !sources.some((source) => source.sessionId === fallbackId)) {
+    const fallback = await readSource(fallbackId)
+    if (fallback.events.length > 0) sources.push(fallback)
+  }
+  if (sources.length === 0) {
+    throw new Error(fallbackId
+      ? `所选对话及当前对话都没有可读取的用户/助手消息：${selected.join(', ')}`
+      : `所选对话没有可读取的用户/助手消息：${selected.join(', ')}`)
   }
   if (typeof sessionQuery?.readTitleSnapshots === 'function' && sources.length) {
     const results = await sessionQuery.readTitleSnapshots(sources.map((source) => source.sessionId))
@@ -170,19 +206,86 @@ export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, se
   return sources
 }
 
-export function chunkSourceText(source, maxChars = 9000) {
+export const DEFAULT_SOURCE_CHUNK_CHARS = 5000
+
+function paragraphRanges(text) {
+  const ranges = []
+  const separator = /\r?\n[\t ]*\r?\n/g
+  let start = 0
+  let match
+  while ((match = separator.exec(text)) !== null) {
+    const end = match.index + match[0].length
+    ranges.push({ start, end })
+    start = end
+  }
+  if (start < text.length) ranges.push({ start, end: text.length })
+  return ranges
+}
+
+function splitOversizedRange(text, range, maxChars) {
+  const ranges = []
+  let start = range.start
+  while (start < range.end) {
+    let end = Math.min(range.end, start + maxChars)
+    if (end < range.end) {
+      const candidate = text.slice(start, end)
+      const minimumBoundary = Math.floor(maxChars * 0.6)
+      let boundary = Math.max(candidate.lastIndexOf('\n'), candidate.lastIndexOf('。'), candidate.lastIndexOf('！'), candidate.lastIndexOf('？'), candidate.lastIndexOf('；'))
+      if (boundary + 1 >= minimumBoundary) end = start + boundary + 1
+    }
+    ranges.push({ start, end })
+    start = end
+  }
+  return ranges
+}
+
+function sourceEventRanges(source, text) {
+  const ranges = []
+  let cursor = 0
+  for (const event of source.events || []) {
+    const eventText = String(event?.text || '')
+    if (!eventText) continue
+    let start = text.indexOf(eventText, cursor)
+    if (start < 0) start = text.indexOf(eventText)
+    if (start < 0) continue
+    const end = start + eventText.length
+    ranges.push({ start, end, seq: event.seq })
+    cursor = end
+  }
+  return ranges
+}
+
+export function chunkSourceText(source, maxChars = DEFAULT_SOURCE_CHUNK_CHARS) {
   const text = String(source?.text || '')
   if (!text) return [{ text: '', sourceRefs: [] }]
+  const limit = Math.max(1, Number(maxChars) || DEFAULT_SOURCE_CHUNK_CHARS)
+  const units = paragraphRanges(text).flatMap((range) => (
+    range.end - range.start > limit ? splitOversizedRange(text, range, limit) : [range]
+  ))
+  const ranges = []
+  let current = null
+  for (const unit of units) {
+    if (!current) {
+      current = { ...unit }
+      continue
+    }
+    if (unit.end - current.start <= limit) {
+      current.end = unit.end
+    } else {
+      ranges.push(current)
+      current = { ...unit }
+    }
+  }
+  if (current) ranges.push(current)
+
+  const eventRanges = sourceEventRanges(source, text)
   const chunks = []
-  let start = 0
-  while (start < text.length) {
-    const end = Math.min(text.length, start + maxChars)
+  for (const { start, end } of ranges) {
     const chunkText = text.slice(start, end)
-    const refs = (source.events || [])
-      .filter((event) => event.text && text.indexOf(event.text, start) >= start && text.indexOf(event.text, start) < end)
+    const refs = eventRanges
+      .filter((event) => event.start < end && event.end > start)
       .map((event) => ({ sessionId: source.sessionId, eventSeqs: [event.seq] }))
     chunks.push({ text: chunkText, sourceRefs: refs })
-    start = end
   }
   return chunks
 }

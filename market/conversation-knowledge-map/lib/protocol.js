@@ -129,6 +129,11 @@ export function makeUserMessage(text, messageId = `knowledge-map-${Date.now()}`)
   return {
     id: messageId,
     role: 'user',
-    content: [{ type: 'text', text: String(text || '') }]
+    content: [{ type: 'text', text: String(text || '') }],
+    source: {
+      kind: 'plugin',
+      plugin: '@p-dsh-market/conversation-knowledge-map',
+      form: 'generation'
+    }
   }
 }

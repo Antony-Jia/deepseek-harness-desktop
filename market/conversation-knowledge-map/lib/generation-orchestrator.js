@@ -6,6 +6,10 @@ import { clone, diagnosticSummary, errorMessage, logMessage, makeUserMessage, sh
 import { chunkSourceText, readSelectedSurfaces } from './session-source.js'
 
 const MAX_SUMMARY_CHARS = 2400
+const SUMMARY_MAX_TOKENS = 12000
+const VIEW_MAX_TOKENS = 24000
+const SUMMARY_CONCURRENCY = 3
+const MAX_MODEL_RETRIES = 3
 
 function modelLabel(selection) {
   const provider = String(selection?.provider || '').trim()
@@ -66,7 +70,16 @@ function textFromContent(value) {
   return ''
 }
 
-function findJsonObject(text) {
+function expectedObject(value, kind = '') {
+  if (!kind) return true
+  if (kind === 'summary') return typeof value?.summary === 'string' || typeof value?.narrative === 'string' || typeof value?.text === 'string'
+  if (kind === 'mind-map') return Array.isArray(value?.nodes)
+  if (kind === 'knowledge-graph') return Array.isArray(value?.entities) && Array.isArray(value?.relations)
+  if (kind === 'follow-up') return typeof value?.question === 'string'
+  return true
+}
+
+function findJsonObject(text, kind = '') {
   const candidates = []
   const fenced = String(text || '').match(/```(?:json)?\s*([\s\S]*?)```/i)
   if (fenced) candidates.push(fenced[1])
@@ -96,7 +109,7 @@ function findJsonObject(text) {
             const fragment = candidate.slice(start, index + 1)
             try {
               const parsed = JSON.parse(fragment)
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && expectedObject(parsed, kind)) return parsed
             } catch {
               // Try the next opening brace in case prose contained an example.
             }
@@ -109,11 +122,11 @@ function findJsonObject(text) {
   return null
 }
 
-export function parseStructuredOutput(value) {
+export function parseStructuredOutput(value, kind = '') {
   const object = asObject(value)
-  if (object) return object
+  if (object && expectedObject(object, kind)) return object
   const text = textFromContent(value).replace(/^\uFEFF/, '').trim()
-  const parsed = findJsonObject(text)
+  const parsed = findJsonObject(text, kind)
   if (parsed) return parsed
   if (!text) throw new Error('模型没有返回 JSON 对象。')
   throw new Error('模型返回了文本，但其中没有可解析的 JSON 对象。')
@@ -153,6 +166,127 @@ function normalizeSummary(value, source, chunk) {
   }
 }
 
+function mergeSourceSummaries(source, chunkSummaries) {
+  if (chunkSummaries.length === 1) return chunkSummaries[0]
+  const summary = shortText(chunkSummaries.map((item) => item.summary).filter(Boolean).join('\n'), MAX_SUMMARY_CHARS)
+  const keyPoints = [...new Set(chunkSummaries.flatMap((item) => item.keyPoints || []).map((item) => shortText(item, 500)).filter(Boolean))].slice(0, 12)
+  const eventSeqs = [...new Set(chunkSummaries.flatMap((item) => item.sourceRefs || [])
+    .filter((ref) => ref.sessionId === source.sessionId)
+    .flatMap((ref) => ref.eventSeqs || []))].slice(0, 24)
+  const sourceRefs = eventSeqs.length ? [{ sessionId: source.sessionId, eventSeqs }] : []
+  return { sessionId: source.sessionId, title: source.title, summary, keyPoints, sourceRefs }
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length)
+  let nextIndex = 0
+  let failure = null
+  const worker = async () => {
+    while (!failure) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) return
+      try {
+        results[index] = await mapper(items[index], index)
+      } catch (error) {
+        failure ||= error
+      }
+    }
+  }
+  const workerCount = Math.min(Math.max(1, limit), items.length)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+  if (failure) throw failure
+  return results
+}
+
+function filterSourceRefs(refs, sources) {
+  const allowed = new Map(sources.map((source) => [source.sessionId, new Set((source.events || []).flatMap((event) => [event.seq, ...(event.sourceEventSeqs || [])]))]))
+  let skipped = 0
+  const filtered = []
+  for (const ref of Array.isArray(refs) ? refs : []) {
+    const sessionId = String(ref?.sessionId || '')
+    const allowedSeqs = allowed.get(sessionId)
+    if (!allowedSeqs) {
+      skipped += 1
+      continue
+    }
+    const eventSeqs = [...new Set((Array.isArray(ref?.eventSeqs) ? ref.eventSeqs : []).filter((seq) => Number.isInteger(seq) && allowedSeqs.has(seq)))]
+    if (!eventSeqs.length) {
+      skipped += 1
+      continue
+    }
+    filtered.push({ sessionId, eventSeqs })
+  }
+  return { refs: filtered.slice(0, 12), skipped }
+}
+
+function sanitizeMindMapSources(value, sources, strict) {
+  const rawNodes = Array.isArray(value?.nodes) ? value.nodes : []
+  const candidates = rawNodes.map((raw, index) => ({ ...raw, id: String(raw?.id || `mind-node-${index + 1}`) }))
+  const originalById = new Map(candidates.map((node) => [node.id, node]))
+  let skippedRefs = 0
+  let skippedItems = 0
+  let nodes = candidates.map((node) => {
+    const filtered = filterSourceRefs(node.sourceRefs, sources)
+    skippedRefs += filtered.skipped
+    const primary = filtered.refs.some((ref) => ref.sessionId === node.primarySourceSessionId)
+      ? node.primarySourceSessionId
+      : (filtered.refs[0]?.sessionId || '')
+    return { ...node, sourceRefs: filtered.refs, primarySourceSessionId: primary }
+  })
+  if (strict) {
+    const before = nodes.length
+    nodes = nodes.filter((node) => node.sourceRefs.length)
+    skippedItems += before - nodes.length
+  }
+  if (!nodes.length) return { value: { ...value, nodes }, skippedRefs, skippedItems }
+  const surviving = new Set(nodes.map((node) => node.id))
+  let rootId = surviving.has(String(value?.rootId || '')) ? String(value.rootId) : nodes[0].id
+  const nearestParent = (node) => {
+    let parentId = node.parentId === null || node.parentId === undefined ? '' : String(node.parentId)
+    const visited = new Set([node.id])
+    while (parentId && !surviving.has(parentId) && !visited.has(parentId)) {
+      visited.add(parentId)
+      const parent = originalById.get(parentId)
+      parentId = parent?.parentId === null || parent?.parentId === undefined ? '' : String(parent.parentId)
+    }
+    return surviving.has(parentId) ? parentId : null
+  }
+  nodes = nodes.map((node) => {
+    if (node.id === rootId) return { ...node, parentId: null }
+    const parentId = nearestParent(node)
+    return { ...node, parentId: parentId && parentId !== node.id ? parentId : rootId }
+  })
+  return { value: { ...value, rootId, nodes }, skippedRefs, skippedItems }
+}
+
+function sanitizeKnowledgeGraphSources(value, sources, strict) {
+  let skippedRefs = 0
+  let skippedItems = 0
+  let entities = (Array.isArray(value?.entities) ? value.entities : []).map((entity) => {
+    const filtered = filterSourceRefs(entity?.sourceRefs, sources)
+    skippedRefs += filtered.skipped
+    return { ...entity, sourceRefs: filtered.refs }
+  })
+  if (strict) {
+    const before = entities.length
+    entities = entities.filter((entity) => entity.sourceRefs.length)
+    skippedItems += before - entities.length
+  }
+  const entityIds = new Set(entities.map((entity) => String(entity?.id || '')))
+  let relations = []
+  for (const relation of Array.isArray(value?.relations) ? value.relations : []) {
+    const filtered = filterSourceRefs(relation?.evidence, sources)
+    skippedRefs += filtered.skipped
+    if (!entityIds.has(String(relation?.from || '')) || !entityIds.has(String(relation?.to || '')) || (strict && !filtered.refs.length)) {
+      skippedItems += 1
+      continue
+    }
+    relations.push({ ...relation, evidence: filtered.refs })
+  }
+  return { value: { ...value, entities, relations }, skippedRefs, skippedItems }
+}
+
 function assertOutputSourceRefs(value, sources) {
   const allowed = new Map(sources.map((source) => [source.sessionId, new Set((source.events || []).flatMap((event) => [event.seq, ...(event.sourceEventSeqs || [])]))]))
   const check = (ref, label) => {
@@ -176,6 +310,7 @@ function outputPrompt(kind, summaries, prompt, strict) {
   if (kind === 'mind-map') {
     return [
       '请根据以下多个对话摘要生成阶段性思维导图。节点不是关键词，narrative 必须是至少一段完整说明，包含背景、当前认识和下一步/未决点。',
+      '最多生成 12 个节点；每个 narrative 控制在 300 字以内。不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。',
       'JSON 形状：{"rootId":"...","nodes":[{"id":"...","parentId":null,"type":"theme|stage|question|decision|solution|risk|conclusion","title":"...","narrative":"...","primarySourceSessionId":"...","sourceRefs":[{"sessionId":"...","eventSeqs":[1]}],"openQuestions":[]}]}。',
       ...rules,
       `额外要求：${shortText(prompt, 2000) || '没有额外要求。'}`,
@@ -184,6 +319,7 @@ function outputPrompt(kind, summaries, prompt, strict) {
   }
   return [
     '请根据以下多个对话摘要生成静态知识图谱。抽取实体、概念、模块、接口、决策、风险和外部系统，并只建立有依据的关系。',
+    '最多生成 20 个实体、30 条关系；实体 summary 控制在 220 字以内。不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。',
     'JSON 形状：{"entities":[{"id":"...","type":"...","name":"...","summary":"...","confidence":"confirmed|inferred|conflicted","sourceRefs":[{"sessionId":"...","eventSeqs":[1]}]}],"relations":[{"id":"...","from":"...","to":"...","type":"depends_on|calls|supports|constrains|belongs_to|derived_from","confidence":"confirmed|inferred|conflicted","evidence":[{"sessionId":"...","eventSeqs":[1]}]}]}。',
     ...rules,
     `额外要求：${shortText(prompt, 2000) || '没有额外要求。'}`,
@@ -195,6 +331,7 @@ function summaryPrompt(source, chunk, strict) {
   return [
     '请把一段 DSH 对话整理成带来源的结构化摘要。不要复述完整聊天，不要添加对话中没有的事实。',
     '只输出 JSON：{"summary":"完整阶段性说明","keyPoints":["..."],"sourceRefs":[{"sessionId":"...","eventSeqs":[1]}]}。',
+    'summary 控制在 1200 字以内；keyPoints 最多 8 条，每条不超过 160 字。不要增加其他字段。字符串中的双引号必须正确转义，确保整个输出可以被 JSON.parse 直接解析。',
     strict ? '严格模式：每个关键点都要能回指给定事件。' : '允许标记尚未确认的冲突，但不能编造事件序号。',
     `Session：${source.sessionId}`,
     `标题：${source.title}`,
@@ -235,6 +372,60 @@ function extractAgentText(surface) {
   return chunks.join('')
 }
 
+function agentTurnError(event) {
+  if (String(event?.type || '') !== 'turn/end') return null
+  const data = event?.data && typeof event.data === 'object' ? event.data : {}
+  const reason = data.reason && typeof data.reason === 'object' ? data.reason : null
+  if (reason?.kind !== 'error') return null
+  const nestedError = reason.error && typeof reason.error === 'object' ? reason.error : null
+  const code = String(nestedError?.code || reason.code || '').trim()
+  const message = String(nestedError?.message || reason.message || (typeof reason.error === 'string' ? reason.error : '')).trim()
+  const detail = shortText(message || 'Agent turn 执行失败。', 1200)
+  const error = new Error(`Agent Runtime 生成失败${code ? `（${code}）` : ''}：${detail}`)
+  error.code = code
+  error.agentTurn = true
+  error.cause = nestedError || reason
+  return error
+}
+
+function agentTurnLimit(event) {
+  if (String(event?.type || '') !== 'turn/end') return null
+  const data = event?.data && typeof event.data === 'object' ? event.data : {}
+  const reason = data.reason && typeof data.reason === 'object' ? data.reason : null
+  if (reason?.kind !== 'max-tokens') return null
+  const error = new Error('模型输出达到最大 Token 限制，JSON 尚未完成。请减少所选对话数量或内容长度后重试。')
+  error.code = 'MAX_TOKENS'
+  error.agentTurn = true
+  error.tokenLimit = true
+  error.cause = reason
+  return error
+}
+
+function findAgentTurnError(surface) {
+  const events = Array.isArray(surface?.events) ? surface.events : []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const error = agentTurnError(events[index])
+    if (error) return error
+  }
+  return null
+}
+
+function findAgentTurnLimit(surface) {
+  const events = Array.isArray(surface?.events) ? surface.events : []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const error = agentTurnLimit(events[index])
+    if (error) return error
+  }
+  return null
+}
+
+function wrapAgentRuntimeError(error) {
+  if (error?.agentTurn || /^Agent Runtime 生成失败/.test(errorMessage(error))) return error
+  const wrapped = new Error(`Agent Runtime 生成失败：${errorMessage(error)}`)
+  wrapped.cause = error
+  return wrapped
+}
+
 async function readAgentText(sessionQuery, sessionId, signal, { logger, diagnostics } = {}) {
   const stats = diagnostics || { surfaceReads: 0, sessionReads: 0 }
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -247,6 +438,20 @@ async function readAgentText(sessionQuery, sessionId, signal, { logger, diagnost
     stats.lastSurfaceShape = diagnosticSummary(surface)
     stats.lastSurfaceTextLength = text.length
     logMessage(logger, 'info', 'agent surface read session=%s attempt=%d events=%d extractedTextLength=%d shape=%s', logId(sessionId), attempt + 1, eventCount, text.length, stats.lastSurfaceShape)
+    const surfaceError = findAgentTurnError(surface)
+    if (surfaceError) {
+      stats.agentFailureSource = 'surface'
+      stats.agentFailureCode = surfaceError.code || ''
+      logMessage(logger, 'error', 'agent turn failure session=%s source=surface code=%s error=%s', logId(sessionId), surfaceError.code || '', errorMessage(surfaceError))
+      throw surfaceError
+    }
+    const surfaceLimit = findAgentTurnLimit(surface)
+    if (surfaceLimit && !stats.agentLimit) {
+      stats.agentLimit = surfaceLimit
+      stats.agentFailureSource = 'surface'
+      stats.agentFailureCode = surfaceLimit.code
+      logMessage(logger, 'warn', 'agent token limit session=%s source=surface error=%s', logId(sessionId), errorMessage(surfaceLimit))
+    }
     if (text.trim()) return text
     if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)))
   }
@@ -259,6 +464,20 @@ async function readAgentText(sessionQuery, sessionId, signal, { logger, diagnost
     stats.lastSessionShape = diagnosticSummary(log)
     stats.lastSessionTextLength = text.length
     logMessage(logger, 'info', 'agent session read session=%s events=%d extractedTextLength=%d shape=%s', logId(sessionId), eventCount, text.length, stats.lastSessionShape)
+    const sessionError = findAgentTurnError(log)
+    if (sessionError) {
+      stats.agentFailureSource = 'session'
+      stats.agentFailureCode = sessionError.code || ''
+      logMessage(logger, 'error', 'agent turn failure session=%s source=session code=%s error=%s', logId(sessionId), sessionError.code || '', errorMessage(sessionError))
+      throw sessionError
+    }
+    const sessionLimit = findAgentTurnLimit(log)
+    if (sessionLimit && !stats.agentLimit) {
+      stats.agentLimit = sessionLimit
+      stats.agentFailureSource = 'session'
+      stats.agentFailureCode = sessionLimit.code
+      logMessage(logger, 'warn', 'agent token limit session=%s source=session error=%s', logId(sessionId), errorMessage(sessionLimit))
+    }
     if (text.trim()) return text
   }
   return ''
@@ -313,7 +532,9 @@ export class KnowledgeGenerationOrchestrator {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       revision: task.revision || 0,
+      progress: task.progress ? clone(task.progress) : null,
       result: task.result ? clone(task.result) : null,
+      timeline: Array.isArray(task.timeline) ? clone(task.timeline) : [],
       events: task.events.slice(-40)
     }
   }
@@ -344,6 +565,11 @@ export class KnowledgeGenerationOrchestrator {
     }
   }
 
+  recordTimeline(task, type, message, details = {}) {
+    task.timeline.push({ id: task.nextTimelineId++, at: this.now(), type, message: shortText(message, 500), ...details })
+    if (task.timeline.length > 80) task.timeline.splice(0, task.timeline.length - 80)
+  }
+
   start(request) {
     const key = String(request.cwd || '').toLowerCase()
     if (this.busyByWorkspace.has(key)) throw new Error('当前工作路径已有生成任务在运行，请先取消或等待完成。')
@@ -353,11 +579,14 @@ export class KnowledgeGenerationOrchestrator {
       message: phaseMessage('created'),
       error: '',
       result: null,
+      progress: { percent: 0, current: 0, total: Array.isArray(request.selectedSessionIds) ? request.selectedSessionIds.length : 0, label: '准备生成' },
       revision: 0,
       createdAt: this.now(),
       updatedAt: this.now(),
       nextEventId: 1,
+      nextTimelineId: 1,
       events: [],
+      timeline: [],
       listeners: new Set(),
       controller: new AbortController(),
       promise: null
@@ -386,69 +615,187 @@ export class KnowledgeGenerationOrchestrator {
 
   async run(task, request) {
     try {
-      this.update(task, 'reading-sources')
+      this.recordTimeline(task, 'start', `开始处理 ${request.selectedSessionIds.length} 个已选对话。`)
+      this.update(task, 'reading-sources', { progress: { percent: 5, current: 0, total: request.selectedSessionIds.length, label: '读取对话记录' } })
       const sources = await this.sourceReader({ sessionQuery: this.sessionQuery, sessions: this.sessions }, {
         cwd: request.cwd,
         sessionIds: request.selectedSessionIds,
+        fallbackSessionId: request.anchorSessionId,
         includeSubagents: request.includeSubagents === true
       })
+      const loadedSessionIds = [...new Set(sources.map((source) => source.sessionId))]
       this.assertNotCancelled(task)
       logMessage(this.logger, 'info', 'generation sources loaded id=%s sources=%d events=%d', logId(task.id), sources.length, sources.reduce((total, source) => total + (Array.isArray(source.events) ? source.events.length : 0), 0))
-      this.update(task, 'summarizing', { sourceCount: sources.length })
-      const summaries = []
-      for (const source of sources) {
-        for (const chunk of chunkSourceText(source)) {
+      this.recordTimeline(task, 'read', `已读取 ${sources.length} 个对话，开始并行摘要（最多 3 个并行）。`)
+      this.update(task, 'summarizing', { sourceCount: sources.length, progress: { percent: 10, current: 0, total: sources.length, label: '准备整理对话' } })
+      let completedSources = 0
+      logMessage(this.logger, 'info', 'summary batch start id=%s sources=%d concurrency=%d', logId(task.id), sources.length, Math.min(SUMMARY_CONCURRENCY, sources.length))
+      const summaryResults = await mapWithConcurrency(sources, SUMMARY_CONCURRENCY, async (source, sourceIndex) => {
+        this.recordTimeline(task, 'summary-start', `开始摘要：${source.title}`, { sessionId: source.sessionId })
+        this.update(task, 'summarizing', {
+          sourceCount: sources.length,
+          progress: { percent: 10 + Math.floor(60 * completedSources / sources.length), current: completedSources, total: sources.length, label: `并行整理：${source.title}` }
+        })
+        const chunkSummaries = []
+        const chunks = chunkSourceText(source)
+        let finalError = null
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+          const chunk = chunks[chunkIndex]
           this.assertNotCancelled(task)
-          const value = await this.runModel({
-            kind: 'summary',
-            prompt: summaryPrompt(source, chunk, request.strict === true),
-            cwd: request.cwd,
-            strict: request.strict === true,
-            selectedSessionIds: request.selectedSessionIds,
-            model: request.model,
-            signal: task.controller.signal
+          const basePrompt = summaryPrompt(source, chunk, request.strict === true)
+          const generateSummary = async (summaryInput) => this.runModel({
+            kind: 'summary', prompt: summaryInput, cwd: request.cwd, strict: request.strict === true,
+            selectedSessionIds: loadedSessionIds, model: request.model, signal: task.controller.signal
           })
-          summaries.push(normalizeSummary(value, source, chunk))
+          for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt += 1) {
+            try {
+              const prompt = attempt === 0 ? basePrompt : `${basePrompt}\n\n第 ${attempt} 次输出未通过校验：${shortText(errorMessage(finalError), 500)}。请完全重置并从头生成，进一步缩短内容，只输出严格合法的顶层摘要 JSON。`
+              const value = await generateSummary(prompt)
+              chunkSummaries.push(normalizeSummary(value, source, chunk))
+              finalError = null
+              break
+            } catch (error) {
+              this.assertNotCancelled(task)
+              finalError = error
+              logMessage(this.logger, 'warn', 'summary attempt invalid id=%s session=%s chunk=%d attempt=%d error=%s', logId(task.id), logId(source.sessionId), chunkIndex + 1, attempt + 1, errorMessage(error))
+              if (attempt < MAX_MODEL_RETRIES) {
+                this.recordTimeline(task, 'retry', `摘要失败（${shortText(errorMessage(finalError), 160)}），重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}：${source.title}`, { sessionId: source.sessionId })
+                this.update(task, 'summarizing', {
+                  message: `对话 ${sourceIndex + 1}/${sources.length} 摘要无效，正在重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}…`,
+                  progress: { percent: 10 + Math.floor(60 * completedSources / sources.length), current: completedSources, total: sources.length, label: `重试 ${attempt + 1}/${MAX_MODEL_RETRIES}：${source.title}` }
+                })
+              }
+            }
+          }
+          if (finalError) break
         }
-      }
+        completedSources += 1
+        if (finalError) {
+          this.recordTimeline(task, 'skipped', `连续重试 ${MAX_MODEL_RETRIES} 次后仍失败，已跳过：${source.title}`, { sessionId: source.sessionId })
+          this.update(task, 'summarizing', {
+            message: `已跳过无法生成合法摘要的对话：${source.title}`,
+            sourceCount: sources.length,
+            progress: { percent: 10 + Math.floor(60 * completedSources / sources.length), current: completedSources, total: sources.length, label: `已跳过：${source.title}` }
+          })
+          return { source, error: errorMessage(finalError), summary: null }
+        }
+        this.recordTimeline(task, 'summary-complete', `摘要完成：${source.title}`, { sessionId: source.sessionId })
+        this.update(task, 'summarizing', {
+          sourceCount: sources.length,
+          progress: { percent: 10 + Math.floor(60 * completedSources / sources.length), current: completedSources, total: sources.length, label: `已完成摘要：${source.title}` }
+        })
+        return { source, error: '', summary: mergeSourceSummaries(source, chunkSummaries) }
+      })
       this.assertNotCancelled(task)
+      const successfulResults = summaryResults.filter((result) => result?.summary)
+      const failedSources = summaryResults.filter((result) => !result?.summary).map((result) => ({
+        sessionId: result.source.sessionId, title: result.source.title, error: result.error
+      }))
+      if (!successfulResults.length) throw new Error(`所选 ${sources.length} 个对话均未能生成合法摘要，已分别重试 ${MAX_MODEL_RETRIES} 次。`)
+      const summarizedSources = successfulResults.map((result) => result.source)
+      const summaries = successfulResults.map((result) => result.summary)
+      const sourceSessionIds = summarizedSources.map((source) => source.sessionId)
+      this.recordTimeline(task, 'merge', `已合并 ${summaries.length} 个对话摘要${failedSources.length ? `，跳过 ${failedSources.length} 个失败对话` : ''}，开始生成最终视图。`)
       let mindMap = null
       let knowledgeGraph = null
+      const sourceWarnings = { skippedRefs: 0, skippedItems: 0 }
       if (request.outputMode === 'mind-map' || request.outputMode === 'both') {
-        this.update(task, 'building-mind-map')
-        const value = await this.runModel({
-          kind: 'mind-map',
-          prompt: outputPrompt('mind-map', summaries, request.prompt, request.strict === true),
-          cwd: request.cwd,
-          strict: request.strict === true,
-          selectedSessionIds: request.selectedSessionIds,
-          model: request.model,
-          signal: task.controller.signal
+        this.recordTimeline(task, 'view-start', '开始生成思维导图。')
+        this.update(task, 'building-mind-map', { progress: { percent: 78, current: sources.length, total: sources.length, label: '生成思维导图' } })
+        const baseMindMapPrompt = outputPrompt('mind-map', summaries, request.prompt, request.strict === true)
+        const generateMindMap = async (prompt) => this.runModel({
+          kind: 'mind-map', prompt, cwd: request.cwd, strict: request.strict === true,
+          selectedSessionIds: sourceSessionIds, model: request.model, signal: task.controller.signal
         })
-        mindMap = validateMindMap(value, { selectedSessionIds: request.selectedSessionIds, strict: request.strict === true })
+        let mindMapError = null
+        for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt += 1) {
+          try {
+            const prompt = attempt === 0 ? baseMindMapPrompt : `${baseMindMapPrompt}\n\n第 ${attempt} 次输出未通过校验：${shortText(errorMessage(mindMapError), 500)}。请完全重置并从头生成，只输出完整、严格合法且更精简的 JSON。`
+            const value = await generateMindMap(prompt)
+            const sanitized = sanitizeMindMapSources(value, summarizedSources, request.strict === true)
+            mindMap = validateMindMap(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
+            sourceWarnings.skippedRefs += sanitized.skippedRefs
+            sourceWarnings.skippedItems += sanitized.skippedItems
+            mindMapError = null
+            this.recordTimeline(task, 'view-complete', '思维导图生成完成。')
+            break
+          } catch (error) {
+            this.assertNotCancelled(task)
+            mindMapError = error
+            logMessage(this.logger, 'warn', 'mind map attempt invalid id=%s attempt=%d error=%s', logId(task.id), attempt + 1, errorMessage(error))
+            if (attempt < MAX_MODEL_RETRIES) {
+              this.recordTimeline(task, 'retry', `思维导图生成失败（${shortText(errorMessage(mindMapError), 160)}），重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}。`)
+              this.update(task, 'building-mind-map', {
+                message: `思维导图结构无效，正在重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}…`,
+                progress: { percent: 82, current: sources.length, total: sources.length, label: `思维导图重试 ${attempt + 1}/${MAX_MODEL_RETRIES}` }
+              })
+            }
+          }
+        }
+        if (mindMapError) {
+          this.recordTimeline(task, 'view-failed', `思维导图连续重试 ${MAX_MODEL_RETRIES} 次后仍失败，已跳过该视图。`)
+          if (request.outputMode === 'mind-map') throw mindMapError
+        }
       }
       if (request.outputMode === 'knowledge-graph' || request.outputMode === 'both') {
-        this.update(task, 'building-knowledge-graph')
-        const value = await this.runModel({
-          kind: 'knowledge-graph',
-          prompt: outputPrompt('knowledge-graph', summaries, request.prompt, request.strict === true),
-          cwd: request.cwd,
-          strict: request.strict === true,
-          selectedSessionIds: request.selectedSessionIds,
-          model: request.model,
-          signal: task.controller.signal
-        })
-        knowledgeGraph = validateKnowledgeGraph(value, { selectedSessionIds: request.selectedSessionIds, strict: request.strict === true })
+        this.recordTimeline(task, 'view-start', '开始生成知识图谱。')
+        this.update(task, 'building-knowledge-graph', { progress: { percent: 86, current: sources.length, total: sources.length, label: '生成知识图谱' } })
+        const baseGraphPrompt = outputPrompt('knowledge-graph', summaries, request.prompt, request.strict === true)
+        let graphError = null
+        for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt += 1) {
+          try {
+            const prompt = attempt === 0 ? baseGraphPrompt : `${baseGraphPrompt}\n\n第 ${attempt} 次输出未通过校验：${shortText(errorMessage(graphError), 500)}。请完全重置并从头生成，只输出完整、严格合法且更精简的 JSON。`
+            const value = await this.runModel({
+              kind: 'knowledge-graph', prompt, cwd: request.cwd, strict: request.strict === true,
+              selectedSessionIds: sourceSessionIds, model: request.model, signal: task.controller.signal
+            })
+            const sanitized = sanitizeKnowledgeGraphSources(value, summarizedSources, request.strict === true)
+            knowledgeGraph = validateKnowledgeGraph(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
+            sourceWarnings.skippedRefs += sanitized.skippedRefs
+            sourceWarnings.skippedItems += sanitized.skippedItems
+            graphError = null
+            this.recordTimeline(task, 'view-complete', '知识图谱生成完成。')
+            break
+          } catch (error) {
+            this.assertNotCancelled(task)
+            graphError = error
+            logMessage(this.logger, 'warn', 'knowledge graph attempt invalid id=%s attempt=%d error=%s', logId(task.id), attempt + 1, errorMessage(error))
+            if (attempt < MAX_MODEL_RETRIES) {
+              this.recordTimeline(task, 'retry', `知识图谱生成失败（${shortText(errorMessage(graphError), 160)}），重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}。`)
+              this.update(task, 'building-knowledge-graph', {
+                message: `知识图谱结构无效，正在重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}…`,
+                progress: { percent: 88, current: sources.length, total: sources.length, label: `知识图谱重试 ${attempt + 1}/${MAX_MODEL_RETRIES}` }
+              })
+            }
+          }
+        }
+        if (graphError) {
+          this.recordTimeline(task, 'view-failed', `知识图谱连续重试 ${MAX_MODEL_RETRIES} 次后仍失败，已跳过该视图。`)
+          if (request.outputMode === 'knowledge-graph') throw graphError
+        }
       }
-      assertOutputSourceRefs({ mindMap, knowledgeGraph }, sources)
+      if (!mindMap && !knowledgeGraph) throw new Error('思维导图和知识图谱均未能生成有效结果。')
+      if (sourceWarnings.skippedRefs || sourceWarnings.skippedItems) {
+        logMessage(this.logger, 'warn', 'generation filtered invalid sources id=%s skippedRefs=%d skippedItems=%d', logId(task.id), sourceWarnings.skippedRefs, sourceWarnings.skippedItems)
+        this.update(task, 'validating', {
+          message: `已跳过 ${sourceWarnings.skippedRefs} 个无效来源引用、${sourceWarnings.skippedItems} 个无有效来源的内容项。`,
+          progress: { percent: 90, current: sources.length, total: sources.length, label: '过滤无效来源' }
+        })
+      }
+      assertOutputSourceRefs({ mindMap, knowledgeGraph }, summarizedSources)
       this.assertNotCancelled(task)
-      this.update(task, 'validating')
-      this.update(task, 'saving')
+      this.update(task, 'validating', { progress: { percent: 92, current: sources.length, total: sources.length, label: '校验结构和来源' } })
+      this.recordTimeline(task, 'save', '最终结果已通过校验，正在保存知识视图。')
+      this.update(task, 'saving', { progress: { percent: 97, current: sources.length, total: sources.length, label: '保存知识视图' } })
       const saved = await this.storage.saveBundle({
         cwd: request.cwd,
         expectedRevision: request.expectedRevision,
         generationId: task.id,
-        sourceSessionIds: request.selectedSessionIds,
+        sourceSessionIds,
+        sourceSessions: summarizedSources.map((source) => ({ sessionId: source.sessionId, title: source.title })),
+        failedSources,
+        sourceWarnings,
+        generationTimeline: task.timeline,
         prompt: request.prompt,
         strict: request.strict,
         outputMode: request.outputMode,
@@ -457,14 +804,22 @@ export class KnowledgeGenerationOrchestrator {
         knowledgeGraph
       })
       task.revision = saved.revision
-      task.result = { revision: saved.revision, manifest: saved.manifest, mindMap, knowledgeGraph }
+      task.result = { revision: saved.revision, manifest: saved.manifest, mindMap, knowledgeGraph, sourceSessions: saved.manifest.sourceSessions, failedSources, sourceWarnings }
+      this.recordTimeline(task, 'complete', '知识视图已保存，生成流程完成。')
       logMessage(this.logger, 'info', 'generation completed id=%s revision=%d elapsedMs=%d', logId(task.id), saved.revision, this.now() - task.createdAt)
-      this.update(task, 'completed', { revision: saved.revision, result: task.result })
+      this.update(task, 'completed', {
+        message: `知识视图生成完成，已总结 ${summarizedSources.length} 个对话${failedSources.length ? `，跳过 ${failedSources.length} 个失败对话` : ''}${sourceWarnings.skippedItems ? `，过滤 ${sourceWarnings.skippedItems} 个无有效来源的内容项` : ''}。`,
+        revision: saved.revision,
+        result: task.result,
+        progress: { percent: 100, current: sources.length, total: sources.length, label: '合并并生成最终报告完成' }
+      })
     } catch (error) {
       if (task.controller.signal.aborted || /取消|cancel/i.test(errorMessage(error))) {
+        this.recordTimeline(task, 'cancelled', '用户取消了知识视图生成。')
         this.update(task, 'cancelled', { error: '' })
       } else {
         logMessage(this.logger, 'error', 'generation failed id=%s status=%s error=%s', logId(task.id), task.status, errorMessage(error))
+        this.recordTimeline(task, 'failed', `生成失败：${errorMessage(error)}`)
         this.update(task, 'failed', { error: errorMessage(error) })
       }
     }
@@ -474,12 +829,13 @@ export class KnowledgeGenerationOrchestrator {
   async runModel(input) {
     const parseModelOutput = (value, source, diagnostics = {}) => {
       try {
-        const result = parseStructuredOutput(value)
+        const result = parseStructuredOutput(value, input.kind)
         logMessage(this.logger, 'info', 'agent output parsed kind=%s source=%s value=%s result=%s', input.kind, source, diagnosticSummary(value), diagnosticSummary(result))
         return result
       } catch (error) {
-        logMessage(this.logger, 'error', 'agent output parse failed kind=%s source=%s value=%s diagnostics=%s error=%s', input.kind, source, diagnosticSummary(value), JSON.stringify(diagnostics), errorMessage(error))
-        throw error
+        const surfacedError = diagnostics.agentLimit || error
+        logMessage(this.logger, 'error', 'agent output parse failed kind=%s source=%s value=%s diagnostics=%s error=%s', input.kind, source, diagnosticSummary(value), JSON.stringify(diagnostics), errorMessage(surfacedError))
+        throw surfacedError
       }
     }
     if (typeof this.modelRunner === 'function') {
@@ -513,7 +869,11 @@ export class KnowledgeGenerationOrchestrator {
       surfaceReads: 0,
       sessionReads: 0,
       lastSurfaceEventCount: 0,
-      lastSessionEventCount: 0
+      lastSessionEventCount: 0,
+      agentFailureSource: '',
+      agentFailureCode: '',
+      agentFailure: null,
+      agentLimit: null
     }
     logMessage(this.logger, 'info', 'agent call start kind=%s session=%s provider=%s model=%s promptLength=%d', input.kind, logId(sessionId), provider, model, String(input.prompt || '').length)
     let unsubscribe
@@ -528,6 +888,20 @@ export class KnowledgeGenerationOrchestrator {
           else if (event.type === 'assistant/chunk') diagnostics.liveAssistantChunks += 1
           else diagnostics.liveOtherEvents += 1
           logMessage(this.logger, 'info', 'agent event session=%s type=%s data=%s', logId(sessionId), String(event.type || 'unknown'), diagnosticSummary(event.data))
+          const failure = agentTurnError(event)
+          if (failure && !diagnostics.agentFailure) {
+            diagnostics.agentFailure = failure
+            diagnostics.agentFailureSource = 'live-event'
+            diagnostics.agentFailureCode = failure.code || ''
+            logMessage(this.logger, 'error', 'agent turn failure session=%s source=live-event code=%s error=%s', logId(sessionId), failure.code || '', errorMessage(failure))
+          }
+          const limit = agentTurnLimit(event)
+          if (limit && !diagnostics.agentLimit) {
+            diagnostics.agentLimit = limit
+            diagnostics.agentFailureSource = 'live-event'
+            diagnostics.agentFailureCode = limit.code
+            logMessage(this.logger, 'warn', 'agent token limit session=%s source=live-event error=%s', logId(sessionId), errorMessage(limit))
+          }
         })
         logMessage(this.logger, 'info', 'agent event subscription ready session=%s', logId(sessionId))
       } catch (error) {
@@ -535,11 +909,12 @@ export class KnowledgeGenerationOrchestrator {
       }
     }
     let handle
+    let stage = 'create'
     try {
       handle = await this.agents.create({
         sessionId,
         meta: { cwd: input.cwd, origin: 'subagent' },
-        agentOptions: { provider, model, maxTokens: input.kind === 'summary' ? 2500 : 6000 },
+        agentOptions: { provider, model, maxTokens: input.kind === 'summary' ? SUMMARY_MAX_TOKENS : VIEW_MAX_TOKENS },
         signal: input.signal,
         setup: async (agentCtx) => {
           agentCtx?.systemPrompt?.section?.({
@@ -552,8 +927,12 @@ export class KnowledgeGenerationOrchestrator {
           } catch { /* older runtimes may not expose tool restriction */ }
         }
       })
+      stage = 'followup'
       handle.agent.followup(makeUserMessage(input.prompt, `${sessionId}-${input.kind}`))
+      stage = 'idle'
       await handle.agent.whenIdle()
+      if (diagnostics.agentFailure) throw diagnostics.agentFailure
+      stage = 'read-output'
       const liveText = extractAgentText({ events: liveEvents })
       logMessage(this.logger, 'info', 'agent idle session=%s liveEvents=%d assistantMessages=%d assistantChunks=%d otherEvents=%d liveTextLength=%d', logId(sessionId), diagnostics.liveEvents, diagnostics.liveAssistantMessages, diagnostics.liveAssistantChunks, diagnostics.liveOtherEvents, liveText.length)
       if (liveText.trim()) return parseModelOutput(liveText, 'live-events', diagnostics)
@@ -561,8 +940,9 @@ export class KnowledgeGenerationOrchestrator {
       logMessage(this.logger, 'info', 'agent persisted output session=%s textLength=%d surfaceReads=%d sessionReads=%d', logId(sessionId), persistedText.length, diagnostics.surfaceReads, diagnostics.sessionReads)
       return parseModelOutput(persistedText, 'persisted-session', diagnostics)
     } catch (error) {
-      logMessage(this.logger, 'error', 'agent call failed kind=%s session=%s liveEvents=%d surfaceReads=%d sessionReads=%d error=%s', input.kind, logId(sessionId), diagnostics.liveEvents, diagnostics.surfaceReads, diagnostics.sessionReads, errorMessage(error))
-      throw error
+      const surfacedError = diagnostics.agentFailure || (stage === 'read-output' ? error : wrapAgentRuntimeError(error))
+      logMessage(this.logger, 'error', 'agent call failed kind=%s session=%s liveEvents=%d surfaceReads=%d sessionReads=%d error=%s', input.kind, logId(sessionId), diagnostics.liveEvents, diagnostics.surfaceReads, diagnostics.sessionReads, errorMessage(surfacedError))
+      throw surfacedError
     } finally {
       if (typeof unsubscribe === 'function') await unsubscribe()
       await handle?.dispose?.()

@@ -11,7 +11,8 @@ import { createHost } from '../market/conversation-knowledge-map/lib/index.js'
 import { KnowledgeGenerationOrchestrator, parseStructuredOutput } from '../market/conversation-knowledge-map/lib/generation-orchestrator.js'
 import { KnowledgeGraphValidationError, validateKnowledgeGraph } from '../market/conversation-knowledge-map/lib/knowledge-graph-schema.js'
 import { MindMapValidationError, validateMindMap } from '../market/conversation-knowledge-map/lib/mind-map-schema.js'
-import { listWorkspaceSessions, readSelectedSurfaces } from '../market/conversation-knowledge-map/lib/session-source.js'
+import { makeUserMessage } from '../market/conversation-knowledge-map/lib/protocol.js'
+import { chunkSourceText, listWorkspaceSessions, readSelectedSurfaces } from '../market/conversation-knowledge-map/lib/session-source.js'
 import { WorkspaceRevisionError, WorkspaceStorage } from '../market/conversation-knowledge-map/lib/workspace-storage.js'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -129,6 +130,23 @@ test('knowledge-map package exposes the host/client contract and safety boundari
   assert.match(client, /name: 'conversation\.session\.header\.actions', id: 'conversation-knowledge-map'/)
   assert.match(client, /name: 'shell\.overlay', id: 'conversation-knowledge-map'/)
   assert.match(client, /conversationKnowledgeMap\.open/)
+  assert.match(client, /role: 'progressbar'/)
+  assert.match(client, /progress\.current.*progress\.total/)
+  assert.match(client, /生成过程时间线/)
+  assert.match(client, /aria-expanded/)
+  assert.match(client, /ckm-timeline-toggle/)
+  assert.match(client, /ckm-tree-children/)
+  assert.match(client, /ckm-tree-children>\.ckm-tree-branch:after/)
+  assert.match(client, /知识图谱缩放控制/)
+  assert.match(client, /var viewBox = \[/)
+  assert.match(client, /setZoom\(1\)/)
+  assert.match(client, /function graphLayout/)
+  assert.match(client, /function graphLabelLines/)
+  assert.match(client, /markerEnd: 'url\(#ckm-arrow\)'/)
+  assert.match(client, /React\.createElement\('rect'/)
+  assert.match(client, /overflow-x:hidden/)
+  assert.doesNotMatch(client, /ckm-graph-node circle/)
+  assert.match(client, /已总结.*个对话/)
   assert.match(client, /知识图谱是静态结果/)
   assert.match(client, /不会自动发送/)
   assert.doesNotMatch(client, /dangerouslySetInnerHTML/)
@@ -191,6 +209,97 @@ test('session source lists same-workspace conversations and reads only selected 
   )
 })
 
+test('session source reads persisted events when an unopened conversation has an empty surface', async () => {
+  const cwd = 'D:\\Code\\knowledge-workspace'
+  const sessionQuery = {
+    async filterSessions() { return [record('session-old', cwd, 20)] },
+    async readSurface() { return { session: { id: 'session-old', cwd }, events: [] } },
+    async readSession() {
+      return {
+        session: { id: 'session-old', cwd },
+        events: [
+          { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '持久化的用户问题' }] } },
+          { seq: 2, type: 'user/message', data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: [{ type: 'text', text: '内部系统快照' }] } },
+          { seq: 3, type: 'assistant/message', data: { source: { kind: 'model' }, content: [{ type: 'reasoning', text: '内部推理' }, { type: 'text', text: '持久化的助手结论' }] } },
+          { seq: 4, type: 'tool/result', data: { content: [{ type: 'text', text: '内部工具结果' }] } }
+        ]
+      }
+    }
+  }
+
+  const sources = await readSelectedSurfaces({ sessionQuery }, { cwd, sessionIds: ['session-old'] })
+  assert.deepEqual(sources.map((source) => source.sessionId), ['session-old'])
+  assert.match(sources[0].text, /持久化的用户问题/)
+  assert.match(sources[0].text, /持久化的助手结论/)
+  assert.doesNotMatch(sources[0].text, /内部系统快照|内部推理|内部工具结果/)
+})
+
+test('session source falls back to the current conversation with truthful provenance', async () => {
+  const cwd = 'D:\\Code\\knowledge-workspace'
+  const records = [record('session-empty', cwd, 20), record('session-current', cwd, 30)]
+  const sessionQuery = {
+    async filterSessions(filters) {
+      return records.filter((item) => filters[0].values.includes(item.header.id))
+    },
+    async readSurface(id) {
+      if (id === 'session-empty') return { session: { id, cwd }, events: [] }
+      return makeSurface(id, cwd, '当前对话')
+    },
+    async readSession(id) { return { session: { id, cwd }, events: [] } }
+  }
+
+  const sources = await readSelectedSurfaces({ sessionQuery }, {
+    cwd,
+    sessionIds: ['session-empty'],
+    fallbackSessionId: 'session-current'
+  })
+  assert.deepEqual(sources.map((source) => source.sessionId), ['session-current'])
+  assert.match(sources[0].text, /用户提出 session-current 的问题/)
+})
+
+test('session source chunks at about 5000 characters without breaking normal paragraphs', () => {
+  const first = '甲'.repeat(3000)
+  const second = '乙'.repeat(2500)
+  const third = '丙'.repeat(100)
+  const source = {
+    sessionId: 'session-1',
+    events: [
+      { seq: 1, role: 'user', text: first },
+      { seq: 2, role: 'assistant', text: second },
+      { seq: 3, role: 'user', text: third }
+    ],
+    text: `用户：${first}\n\n助手：${second}\n\n用户：${third}`
+  }
+
+  const chunks = chunkSourceText(source)
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks.map((chunk) => chunk.text).join(''), source.text)
+  assert.ok(chunks.every((chunk) => chunk.text.length <= 5000))
+  assert.match(chunks[0].text, /^用户：甲+/)
+  assert.doesNotMatch(chunks[0].text, /助手：/)
+  assert.match(chunks[1].text, /^助手：乙+/)
+  assert.deepEqual(chunks[0].sourceRefs, sourceRefs('session-1', 1))
+  assert.deepEqual(chunks[1].sourceRefs, [...sourceRefs('session-1', 2), ...sourceRefs('session-1', 3)])
+})
+
+test('session source splits only an oversized paragraph and keeps its source on every piece', () => {
+  const body = `${'长'.repeat(4300)}。${'尾'.repeat(1900)}`
+  const source = {
+    sessionId: 'session-long',
+    events: [{ seq: 7, role: 'assistant', text: body }],
+    text: `助手：${body}`
+  }
+
+  const chunks = chunkSourceText(source)
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks.map((chunk) => chunk.text).join(''), source.text)
+  assert.ok(chunks.every((chunk) => chunk.text.length <= 5000))
+  assert.ok(chunks[0].text.endsWith('。'))
+  assert.deepEqual(chunks.map((chunk) => chunk.sourceRefs), [sourceRefs('session-long', 7), sourceRefs('session-long', 7)])
+})
+
 test('mind-map and knowledge-graph schemas reject unsupported or untraceable structures', () => {
   const mindMap = validateMindMap(validMindMap(), { selectedSessionIds: ['session-1'], strict: true })
   assert.equal(mindMap.schemaVersion, 1)
@@ -221,6 +330,8 @@ test('workspace storage atomically persists versioned results and bounded naviga
       expectedRevision: 0,
       generationId: 'generation-1',
       sourceSessionIds: ['session-1'],
+      sourceSessions: [{ sessionId: 'session-1', title: '主对话' }],
+      sourceWarnings: { skippedRefs: 2, skippedItems: 1 },
       prompt: '这是用于验证持久化的额外要求。',
       strict: true,
       outputMode: 'both',
@@ -234,6 +345,8 @@ test('workspace storage atomically persists versioned results and bounded naviga
     assert.equal(state.revision, 1)
     assert.equal(state.compatibility.supported, true)
     assert.equal(state.manifest.generationId, 'generation-1')
+    assert.deepEqual(state.manifest.sourceSessions, [{ sessionId: 'session-1', title: '主对话' }])
+    assert.deepEqual(state.manifest.sourceWarnings, { skippedRefs: 2, skippedItems: 1 })
     assert.equal(state.mindMap.nodes.length, 2)
     assert.equal(state.knowledgeGraph.entities.length, 2)
     assert.equal(state.navigationHistory.length, 0)
@@ -317,6 +430,7 @@ test('orchestrator does not write before generation, validates model output, and
     })
     const completed = await waitForGeneration(orchestrator, started.id)
     assert.equal(completed.status, 'completed')
+    assert.equal(completed.progress.percent, 100)
     assert.deepEqual(calls, ['summary', 'mind-map', 'knowledge-graph'])
     assert.deepEqual(modelSelections, [
       { provider: 'test-provider', model: 'test-model' },
@@ -327,6 +441,224 @@ test('orchestrator does not write before generation, validates model output, and
     assert.equal(state.revision, 1)
     assert.equal(state.manifest.generationId, 'generation-both')
     assert.deepEqual(state.manifest.model, { provider: 'test-provider', model: 'test-model' })
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator retries an invalid empty mind map once and reports conversation progress', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-map-retry-'))
+  try {
+    let mindMapCalls = 0
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-retry-mind-map',
+      sourceReader: async () => [{
+        sessionId: 'session-1',
+        title: '需要整理的对话',
+        events: [{ seq: 1, text: '问题', role: 'user' }, { seq: 2, text: '结论', role: 'assistant' }],
+        text: '用户：问题\n\n助手：结论'
+      }],
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') return { summary: '这是包含背景、当前认识和下一步的完整摘要。', sourceRefs: sourceRefs() }
+        mindMapCalls += 1
+        return mindMapCalls === 1 ? { rootId: 'root', nodes: [] } : validMindMap()
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1'], outputMode: 'mind-map',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.equal(mindMapCalls, 2)
+    assert.equal(completed.progress.percent, 100)
+    assert.ok(completed.events.some((event) => event.progress?.label === '已完成摘要：需要整理的对话' && event.progress.current === 1))
+    assert.ok(completed.timeline.some((item) => item.type === 'retry' && /思维导图.*1\/3/.test(item.message)))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator retries a malformed summary shape instead of reporting it as empty', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-summary-retry-'))
+  try {
+    let summaryCalls = 0
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-retry-summary',
+      sourceReader: async () => [{
+        sessionId: 'session-1', title: '旧对话',
+        events: [{ seq: 1, text: '问题', role: 'user' }, { seq: 2, text: '结论', role: 'assistant' }],
+        text: '用户：问题\n\n助手：结论'
+      }],
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') {
+          summaryCalls += 1
+          return summaryCalls === 1 ? { sessionId: 'session-1', eventSeqs: [1] } : { summary: '这是自动修复后包含背景、认识和下一步的摘要。', sourceRefs: sourceRefs() }
+        }
+        return validMindMap()
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1'], outputMode: 'mind-map',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.equal(summaryCalls, 2)
+    assert.ok(completed.timeline.some((item) => item.type === 'retry' && /摘要失败.*1\/3/.test(item.message)))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator summarizes conversations with at most three workers and merges chunks before the final view', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-parallel-'))
+  try {
+    const sources = Array.from({ length: 5 }, (_, index) => {
+      const sessionId = `session-${index + 1}`
+      const text = index === 0 ? `问题-${sessionId}\n${'背景内容。'.repeat(3500)}` : `问题-${sessionId}\n阶段结论。`
+      return {
+        sessionId,
+        title: `对话 ${index + 1}`,
+        events: [{ seq: 1, text: `问题-${sessionId}`, role: 'user' }, { seq: 2, text: '阶段结论。', role: 'assistant' }],
+        text
+      }
+    })
+    let activeSummaries = 0
+    let maxActiveSummaries = 0
+    let summaryCalls = 0
+    let summariesCompleted = 0
+    const activeSessions = new Set()
+    let finalSummaries = null
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-parallel-summary',
+      sourceReader: async () => sources,
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') {
+          const sessionId = input.prompt.match(/Session：([^\n]+)/)?.[1]
+          assert.ok(sessionId)
+          assert.equal(activeSessions.has(sessionId), false, '同一对话的分段必须顺序处理')
+          activeSessions.add(sessionId)
+          activeSummaries += 1
+          summaryCalls += 1
+          maxActiveSummaries = Math.max(maxActiveSummaries, activeSummaries)
+          await new Promise((resolve) => setImmediate(resolve))
+          activeSummaries -= 1
+          activeSessions.delete(sessionId)
+          summariesCompleted += 1
+          return { summary: `${sessionId} 的阶段摘要。`, keyPoints: [`${sessionId} 的关键点`], sourceRefs: sourceRefs(sessionId) }
+        }
+        assert.equal(summariesCompleted, summaryCalls, '最终视图必须等待全部对话摘要完成')
+        const marker = '对话摘要：'
+        finalSummaries = JSON.parse(input.prompt.slice(input.prompt.lastIndexOf(marker) + marker.length))
+        return validMindMap()
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: sources.map((source) => source.sessionId), outputMode: 'mind-map',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.equal(maxActiveSummaries, 3)
+    assert.equal(summaryCalls, 8)
+    assert.equal(finalSummaries.length, 5)
+    assert.deepEqual(finalSummaries.map((summary) => summary.sessionId), sources.map((source) => source.sessionId))
+    assert.ok(completed.events.some((event) => /并行整理/.test(event.progress?.label || '')))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator filters hallucinated source sessions and records the conversations actually summarized', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-source-filter-'))
+  try {
+    const invalidSessionId = 'session-1a18c8ce-81aa-4e98-adbd-21951fc830c'
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-source-filter',
+      sourceReader: async () => [{
+        sessionId: 'session-1', title: '实际总结的对话',
+        events: [{ seq: 1, text: '问题', role: 'user' }, { seq: 2, text: '结论', role: 'assistant' }],
+        text: '用户：问题\n\n助手：结论'
+      }],
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') return { summary: '这是实际对话的阶段摘要。', sourceRefs: sourceRefs() }
+        if (input.kind === 'mind-map') {
+          const map = validMindMap()
+          map.nodes[1].primarySourceSessionId = invalidSessionId
+          map.nodes[1].sourceRefs = sourceRefs(invalidSessionId, 2)
+          return map
+        }
+        const graph = validGraph()
+        graph.entities[1].sourceRefs = sourceRefs(invalidSessionId, 2)
+        return graph
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1'], outputMode: 'both',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.deepEqual(completed.result.mindMap.nodes.map((node) => node.id), ['root'])
+    assert.deepEqual(completed.result.knowledgeGraph.entities.map((entity) => entity.id), ['runtime'])
+    assert.equal(completed.result.knowledgeGraph.relations.length, 0)
+    assert.deepEqual(completed.result.sourceWarnings, { skippedRefs: 2, skippedItems: 3 })
+    assert.deepEqual(completed.result.manifest.sourceSessions, [{ sessionId: 'session-1', title: '实际总结的对话' }])
+    assert.match(completed.message, /已总结 1 个对话.*过滤 3 个/)
+    assert.ok(completed.events.some((event) => event.progress?.label === '过滤无效来源'))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator gives three reset retries, skips failed conversations, and preserves a successful partial view', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-retry-isolation-'))
+  try {
+    const summaryCalls = { 'session-1': 0, 'session-2': 0 }
+    let graphCalls = 0
+    const sources = ['session-1', 'session-2'].map((sessionId, index) => ({
+      sessionId,
+      title: index === 0 ? '始终失败的对话' : '可以总结的对话',
+      events: [{ seq: 1, text: '问题', role: 'user' }, { seq: 2, text: '结论', role: 'assistant' }],
+      text: '用户：问题\n\n助手：结论'
+    }))
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-retry-isolation',
+      sourceReader: async () => sources,
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') {
+          const sessionId = input.prompt.match(/Session：([^\n]+)/)?.[1]
+          summaryCalls[sessionId] += 1
+          if (sessionId === 'session-1') return '这是一段始终无法解析为 JSON 的普通文本。'
+          return { summary: '第二个对话成功生成了合法摘要。', sourceRefs: sourceRefs('session-2') }
+        }
+        if (input.kind === 'mind-map') return validMindMap('session-2')
+        graphCalls += 1
+        return '知识图谱也始终没有返回 JSON。'
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1', 'session-2'], outputMode: 'both',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.deepEqual(summaryCalls, { 'session-1': 4, 'session-2': 1 })
+    assert.equal(graphCalls, 4)
+    assert.ok(completed.result.mindMap)
+    assert.equal(completed.result.knowledgeGraph, null)
+    assert.deepEqual(completed.result.manifest.sourceSessionIds, ['session-2'])
+    assert.deepEqual(completed.result.manifest.failedSources.map((source) => source.sessionId), ['session-1'])
+    assert.equal(completed.timeline.filter((item) => item.type === 'retry' && /始终失败的对话/.test(item.message)).length, 3)
+    assert.ok(completed.timeline.some((item) => item.type === 'skipped' && /始终失败的对话/.test(item.message)))
+    assert.ok(completed.timeline.some((item) => item.type === 'view-failed' && /知识图谱/.test(item.message)))
+    assert.ok(completed.result.manifest.generationTimeline.some((item) => item.type === 'save'))
   } finally {
     await rm(cwd, { recursive: true, force: true })
   }
@@ -354,7 +686,7 @@ test('agent runner waits for the assistant surface and extracts structured text 
         return {
           events: [{
             type: 'assistant/message',
-            data: { message: { text: `结果如下：\n\n\`\`\`JSON\n${JSON.stringify({ ok: true, nested: { value: 1 } })}\n\`\`\`` } }
+            data: { message: { text: `结果如下：\n\n\`\`\`JSON\n${JSON.stringify({ summary: '结构化摘要', sourceRefs: [] })}\n\`\`\`` } }
           }]
         }
       }
@@ -366,9 +698,9 @@ test('agent runner waits for the assistant surface and extracts structured text 
     cwd: 'D:\\Code\\knowledge-workspace',
     model: { provider: 'chosen-provider', model: 'chosen-model' }
   })
-  assert.deepEqual(result, { ok: true, nested: { value: 1 } })
+  assert.deepEqual(result, { summary: '结构化摘要', sourceRefs: [] })
   assert.equal(reads, 2)
-  assert.deepEqual(createOptions.agentOptions, { provider: 'chosen-provider', model: 'chosen-model', maxTokens: 2500 })
+  assert.deepEqual(createOptions.agentOptions, { provider: 'chosen-provider', model: 'chosen-model', maxTokens: 12000 })
 })
 
 test('agent runner consumes live session events before querying the persisted surface', async () => {
@@ -394,7 +726,10 @@ test('agent runner consumes live session events before querying the persisted su
             followup() {
               publish({ id: 'knowledge-map-live-output' }, {
                 type: 'assistant/message',
-                data: { message: { content: [{ type: 'text', text: '{"ok":true}' }] } }
+                data: { message: { content: [
+                  { type: 'reasoning', text: '{"rootId":"reasoning-must-be-ignored","nodes":[]}' },
+                  { type: 'text', text: '{"rootId":"root","nodes":[]}' }
+                ] } }
               })
             },
             async whenIdle() {}
@@ -416,12 +751,132 @@ test('agent runner consumes live session events before querying the persisted su
     cwd: 'D:\\Code\\knowledge-workspace',
     model: { provider: 'chosen-provider', model: 'chosen-model' }
   })
-  assert.deepEqual(result, { ok: true })
+  assert.deepEqual(result, { rootId: 'root', nodes: [] })
   assert.equal(surfaceReads, 0)
   const serializedLogs = JSON.stringify(logs)
   assert.match(serializedLogs, /agent event/)
   assert.match(serializedLogs, /agent idle/)
   assert.doesNotMatch(serializedLogs, /\{"ok":true\}/)
+})
+
+test('agent follow-up messages include the runtime-required plugin source', () => {
+  const message = makeUserMessage('输出 JSON', 'knowledge-map-message')
+  assert.deepEqual(message, {
+    id: 'knowledge-map-message',
+    role: 'user',
+    content: [{ type: 'text', text: '输出 JSON' }],
+    source: {
+      kind: 'plugin',
+      plugin: '@p-dsh-market/conversation-knowledge-map',
+      form: 'generation'
+    }
+  })
+})
+
+test('agent runner surfaces persisted turn errors instead of misreporting empty JSON', async () => {
+  const logs = []
+  const logger = {
+    info(format, ...params) { logs.push(['info', format, ...params]) },
+    warn(format, ...params) { logs.push(['warn', format, ...params]) },
+    error(format, ...params) { logs.push(['error', format, ...params]) }
+  }
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'persisted-turn-error',
+    logger,
+    agents: {
+      async create() {
+        return { agent: { followup() {}, async whenIdle() {} }, async dispose() {} }
+      }
+    },
+    sessionQuery: {
+      async readSurface() { return { events: [] } },
+      async readSession() {
+        return {
+          events: [{
+            type: 'turn/end',
+            data: { reason: { kind: 'error', error: { code: 'UNKNOWN', message: "Cannot read properties of undefined (reading 'kind')" } } }
+          }]
+        }
+      }
+    }
+  })
+
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'summary', prompt: '输出 JSON', cwd: 'D:\\Code\\knowledge-workspace', model: { provider: 'test-provider', model: 'test-model' } }),
+    (error) => {
+      assert.match(error.message, /Agent Runtime 生成失败.*UNKNOWN.*Cannot read properties of undefined.*kind/)
+      return true
+    }
+  )
+  const serializedLogs = JSON.stringify(logs)
+  assert.match(serializedLogs, /agent turn failure/)
+  assert.doesNotMatch(serializedLogs, /agent output parse failed/)
+})
+
+test('agent runner stops immediately when a live turn error arrives', async () => {
+  let publish
+  let surfaceReads = 0
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'live-turn-error',
+    sessionEventSource(listener) {
+      publish = listener
+      return () => {}
+    },
+    agents: {
+      async create() {
+        return {
+          agent: {
+            followup() {
+              publish({ id: 'knowledge-map-live-turn-error' }, {
+                type: 'turn/end',
+                data: { reason: { kind: 'error', message: 'provider unavailable' } }
+              })
+            },
+            async whenIdle() {}
+          },
+          async dispose() {}
+        }
+      }
+    },
+    sessionQuery: {
+      async readSurface() {
+        surfaceReads += 1
+        return { events: [] }
+      }
+    }
+  })
+
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'mind-map', prompt: '输出 JSON', cwd: 'D:\\Code\\knowledge-workspace', model: { provider: 'test-provider', model: 'test-model' } }),
+    /Agent Runtime 生成失败.*provider unavailable/
+  )
+  assert.equal(surfaceReads, 0)
+})
+
+test('agent runner reports a token limit instead of a generic JSON parse failure', async () => {
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    idFactory: () => 'token-limit',
+    agents: {
+      async create() {
+        return { agent: { followup() {}, async whenIdle() {} }, async dispose() {} }
+      }
+    },
+    sessionQuery: {
+      async readSurface() {
+        return {
+          events: [
+            { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '```json\n{"summary":"未完成' }] } } },
+            { type: 'turn/end', data: { reason: { kind: 'max-tokens' } } }
+          ]
+        }
+      }
+    }
+  })
+
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'summary', prompt: '输出 JSON', cwd: 'D:\\Code\\knowledge-workspace', model: { provider: 'test-provider', model: 'test-model' } }),
+    /达到最大 Token 限制.*JSON 尚未完成/
+  )
 })
 
 test('agent runner logs empty output diagnostics without logging model content', async () => {
@@ -659,4 +1114,8 @@ test('structured model output accepts fenced JSON but never treats plain prose a
   assert.deepEqual(parseStructuredOutput('模型说明：```JSON\n{"ok":true,"nested":{"value":1}}\n```'), { ok: true, nested: { value: 1 } })
   assert.deepEqual(parseStructuredOutput({ result: '前缀 {"ok":true} 后缀' }), { ok: true })
   assert.throws(() => parseStructuredOutput('没有 JSON'), /没有可解析的 JSON/)
+  assert.throws(
+    () => parseStructuredOutput('{"summary":"未闭合 \"keyPoints\":[{"sessionId":"session-1","eventSeqs":[1]}]}', 'summary'),
+    /没有可解析的 JSON/
+  )
 })

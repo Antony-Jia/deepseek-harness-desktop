@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/conversation-knowledge-map",
-  "version": "0.1.3",
+  "version": "0.1.14",
   "description": "DSH 多对话思维导图与静态知识图谱",
   "keywords": [
     "dsh",
