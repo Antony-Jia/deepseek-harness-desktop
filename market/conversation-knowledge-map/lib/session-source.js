@@ -116,7 +116,7 @@ export function surfaceEventView(event, { fullSession = false } = {}) {
   const role = eventRole(String(event?.type || ''))
   const data = event?.data?.message || event?.data || {}
   if (fullSession && role === 'user' && data?.source?.kind !== 'user') return null
-  const text = shortText(eventMessageText(event), 12000)
+  const text = shortText(eventMessageText(event).replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, ''), 12000)
   if (!role || !text) return null
   return {
     seq: Number.isInteger(event?.seq) ? event.seq : 0,
@@ -127,7 +127,7 @@ export function surfaceEventView(event, { fullSession = false } = {}) {
   }
 }
 
-export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, sessionIds, fallbackSessionId = '', includeSubagents = false }) {
+export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, sessionIds, fallbackSessionId = '', includeSubagents = false, sourceMode = 'conversation' }) {
   const selected = [...new Set((sessionIds || []).map((id) => String(id || '').trim()).filter(Boolean))]
   if (selected.length === 0) throw new Error('至少选择一个对话。')
   const normalizedCwd = normalizeWorkspacePath(cwd)
@@ -172,6 +172,7 @@ export async function readSelectedSurfaces({ sessionQuery, sessions }, { cwd, se
         throw new Error(`读取对话“${id}”完整记录失败：${errorMessage(error)}`)
       }
     }
+    if (sourceMode === 'answer-only') events = events.filter((event) => event.role === 'assistant')
     if (surfaceError && events.length === 0) throw new Error(`读取对话“${id}”失败：${errorMessage(surfaceError)}`)
     return {
       sessionId: id,

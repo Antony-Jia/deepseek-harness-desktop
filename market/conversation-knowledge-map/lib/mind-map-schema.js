@@ -45,10 +45,11 @@ function detectCycle(nodes) {
   for (const node of nodes) visit(node.id)
 }
 
-export function validateMindMap(input, { selectedSessionIds = [], strict = false } = {}) {
+export function validateMindMap(input, { selectedSessionIds = [], strict = false, minNodes = 1 } = {}) {
   if (!input || typeof input !== 'object') throw new MindMapValidationError('思维导图结果必须是对象。')
   const rawNodes = Array.isArray(input.nodes) ? input.nodes : []
-  if (!rawNodes.length) throw new MindMapValidationError('思维导图至少需要一个节点。')
+  const requiredNodes = Math.max(1, Math.floor(Number(minNodes) || 1))
+  if (rawNodes.length < requiredNodes) throw new MindMapValidationError(`思维导图至少需要 ${requiredNodes} 个有效节点，当前仅有 ${rawNodes.length} 个。`)
   if (rawNodes.length > MAX_MIND_MAP_NODES) throw new MindMapValidationError(`思维导图节点不能超过 ${MAX_MIND_MAP_NODES} 个。`)
   const rootId = asText(input.rootId || rawNodes[0]?.id, '思维导图 rootId', 256)
   const ids = new Set()

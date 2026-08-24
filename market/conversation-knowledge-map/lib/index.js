@@ -66,10 +66,12 @@ function normalizeGenerationInput(body = {}) {
   const prompt = String(body.prompt || '').trim()
   if (prompt.length > 4000) throw new Error('额外 Prompt 不能超过 4000 个字符。')
   const expectedRevision = Number(body.expectedRevision)
+  const sourceMode = body.sourceMode === 'answer-only' ? 'answer-only' : 'conversation'
   return {
     anchorSessionId: safeId(body.anchorSessionId, '锚点 Session ID'),
     selectedSessionIds,
     outputMode: normalizeOutputMode(body.outputMode),
+    sourceMode,
     prompt,
     strict: body.strict !== false,
     includeSubagents: body.includeSubagents === true,
@@ -84,6 +86,7 @@ function canonicalPayload(value) {
     cwd: normalizeWorkspacePath(value.cwd),
     selectedSessionIds: [...value.selectedSessionIds].map(String).sort(),
     outputMode: value.outputMode,
+    sourceMode: value.sourceMode,
     prompt: value.prompt,
     strict: value.strict === true,
     includeSubagents: value.includeSubagents === true,
@@ -184,7 +187,7 @@ export function createHost(options = {}) {
         const payload = { ...input, model, anchorSessionId: context.sessionId, cwd: context.cwd, expectedRevision: state.revision }
         const token = randomUUID()
         confirmations.set(token, { payload, expiresAt: Date.now() + CONFIRMATION_TTL, used: false })
-        logMessage(logger, 'info', 'generation confirmed cwd=%s anchorSession=%s selectedSessions=%d outputMode=%s strict=%s model=%s expectedRevision=%d', shortText(context.cwd, 180), shortText(context.sessionId, 96), input.selectedSessionIds.length, input.outputMode, input.strict, `${model.provider}/${model.model}`, state.revision)
+        logMessage(logger, 'info', 'generation confirmed cwd=%s anchorSession=%s selectedSessions=%d outputMode=%s sourceMode=%s strict=%s model=%s expectedRevision=%d', shortText(context.cwd, 180), shortText(context.sessionId, 96), input.selectedSessionIds.length, input.outputMode, input.sourceMode, input.strict, `${model.provider}/${model.model}`, state.revision)
         return {
           token,
           expiresAt: Date.now() + CONFIRMATION_TTL,
@@ -192,6 +195,7 @@ export function createHost(options = {}) {
           context,
           selectedSessions: available.filter((item) => input.selectedSessionIds.includes(item.id)),
           outputMode: input.outputMode,
+          sourceMode: input.sourceMode,
           strict: input.strict,
           model,
           promptSummary: shortText(input.prompt, 300),
@@ -202,7 +206,7 @@ export function createHost(options = {}) {
       function consumeConfirmation(token, body) {
         const value = confirmations.get(String(token || ''))
         if (!value || value.used || value.expiresAt < Date.now()) throw new Error('生成确认已过期，请返回配置重新确认。')
-        const supplied = normalizeGenerationInput({ ...body, anchorSessionId: body.anchorSessionId || value.payload.anchorSessionId, selectedSessionIds: body.selectedSessionIds || value.payload.selectedSessionIds, outputMode: body.outputMode || value.payload.outputMode, prompt: body.prompt ?? value.payload.prompt, strict: body.strict ?? value.payload.strict, includeSubagents: body.includeSubagents ?? value.payload.includeSubagents, model: body.model ?? value.payload.model, expectedRevision: body.expectedRevision ?? value.payload.expectedRevision })
+        const supplied = normalizeGenerationInput({ ...body, anchorSessionId: body.anchorSessionId || value.payload.anchorSessionId, selectedSessionIds: body.selectedSessionIds || value.payload.selectedSessionIds, outputMode: body.outputMode || value.payload.outputMode, sourceMode: body.sourceMode ?? value.payload.sourceMode, prompt: body.prompt ?? value.payload.prompt, strict: body.strict ?? value.payload.strict, includeSubagents: body.includeSubagents ?? value.payload.includeSubagents, model: body.model ?? value.payload.model, expectedRevision: body.expectedRevision ?? value.payload.expectedRevision })
         const expected = canonicalPayload(value.payload)
         const actual = canonicalPayload({ ...supplied, cwd: value.payload.cwd })
         if (expected !== actual) throw new Error('确认内容已变化，请返回配置重新确认。')

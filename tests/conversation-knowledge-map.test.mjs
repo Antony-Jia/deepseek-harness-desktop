@@ -138,16 +138,28 @@ test('knowledge-map package exposes the host/client contract and safety boundari
   assert.match(client, /ckm-tree-children/)
   assert.match(client, /ckm-tree-children>\.ckm-tree-branch:after/)
   assert.match(client, /知识图谱缩放控制/)
-  assert.match(client, /var viewBox = \[/)
+  assert.match(client, /知识图谱节点间距控制/)
+  assert.match(client, /局部一跳/)
+  assert.match(client, /按住空白区域自由拖动/)
+  assert.match(client, /onPointerDown: beginPan/)
+  assert.match(client, /ckm-graph-node,\.ckm-graph-toolbar,button,input,select/)
+  assert.match(client, /ckm-graph-layout\{height:100%;min-height:0;overflow:hidden/)
+  assert.match(client, /ckm-graph-viewport\{position:relative;flex:1;min-height:360px;overflow:hidden/)
+  assert.match(client, /function setStagePan/)
+  assert.match(client, /stage\.style\.transform = 'translate\('/)
+  assert.match(client, /pan\.panY \+ event\.clientY - pan\.y/)
+  assert.doesNotMatch(client, /viewport\.scrollLeft/)
+  assert.match(client, /var viewBox = \['0'/)
   assert.match(client, /setZoom\(1\)/)
+  assert.match(client, /setSpacing\(1\)/)
   assert.match(client, /function graphLayout/)
   assert.match(client, /function graphLabelLines/)
   assert.match(client, /markerEnd: 'url\(#ckm-arrow\)'/)
   assert.match(client, /React\.createElement\('rect'/)
-  assert.match(client, /overflow-x:hidden/)
+  assert.match(client, /ckm-graph-stage\{position:absolute/)
   assert.doesNotMatch(client, /ckm-graph-node circle/)
   assert.match(client, /已总结.*个对话/)
-  assert.match(client, /知识图谱是静态结果/)
+  assert.match(client, /知识图谱位于固定视口内/)
   assert.match(client, /不会自动发送/)
   assert.doesNotMatch(client, /dangerouslySetInnerHTML/)
   assert.match(skill, /用户明确点击确认后/)
@@ -197,6 +209,11 @@ test('session source lists same-workspace conversations and reads only selected 
   assert.match(sources[0].text, /助手给出 session-1 的阶段性结论/)
   assert.doesNotMatch(sources[0].text, /内部推理/)
   assert.doesNotMatch(sources[0].text, /内部工具细节/)
+  const answerOnly = await readSelectedSurfaces({ sessionQuery }, { cwd, sessionIds: ['session-1'], sourceMode: 'answer-only' })
+  assert.doesNotMatch(answerOnly[0].text, /用户提出 session-1 的问题/)
+  assert.match(answerOnly[0].text, /助手给出 session-1 的阶段性结论/)
+  assert.deepEqual(answerOnly[0].events.map((event) => event.role), ['assistant'])
+  assert.doesNotMatch(answerOnly[0].text, /内部推理|内部工具细节/)
   assert.ok(calls.some((call) => call.method === 'readSurface'))
 
   await assert.rejects(
@@ -304,6 +321,7 @@ test('mind-map and knowledge-graph schemas reject unsupported or untraceable str
   const mindMap = validateMindMap(validMindMap(), { selectedSessionIds: ['session-1'], strict: true })
   assert.equal(mindMap.schemaVersion, 1)
   assert.deepEqual(mindMap.edges, [{ from: 'root', to: 'decision' }])
+  assert.throws(() => validateMindMap({ rootId: 'root', nodes: [validMindMap().nodes[0]] }, { minNodes: 4 }), /至少需要 4 个有效节点/)
 
   assert.throws(() => validateMindMap({ rootId: 'root', nodes: [{ id: 'root', parentId: null, title: '短', narrative: '关键词' }] }), MindMapValidationError)
   assert.throws(() => validateMindMap({ rootId: 'root', nodes: [
@@ -347,6 +365,7 @@ test('workspace storage atomically persists versioned results and bounded naviga
     assert.equal(state.manifest.generationId, 'generation-1')
     assert.deepEqual(state.manifest.sourceSessions, [{ sessionId: 'session-1', title: '主对话' }])
     assert.deepEqual(state.manifest.sourceWarnings, { skippedRefs: 2, skippedItems: 1 })
+    assert.equal(state.manifest.sourceMode, 'conversation')
     assert.equal(state.mindMap.nodes.length, 2)
     assert.equal(state.knowledgeGraph.entities.length, 2)
     assert.equal(state.navigationHistory.length, 0)
@@ -369,6 +388,54 @@ test('workspace storage atomically persists versioned results and bounded naviga
 
     const files = await readdir(state.dataDir)
     assert.deepEqual(files.sort(), ['knowledge-graph.json', 'manifest.json', 'mind-map.json', 'navigation-history.json'])
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('workspace storage preserves the view not targeted by a single-view generation', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-map-preserve-view-'))
+  try {
+    const storage = new WorkspaceStorage({ now: () => 1700000000000 })
+    await storage.saveBundle({
+      cwd,
+      expectedRevision: 0,
+      generationId: 'both',
+      sourceSessionIds: ['session-1'],
+      outputMode: 'both',
+      mindMap: validMindMap(),
+      knowledgeGraph: validGraph()
+    })
+    const graphOnly = validGraph()
+    graphOnly.entities[0].name = '更新后的 Runtime'
+    const graphSaved = await storage.saveBundle({
+      cwd,
+      expectedRevision: 1,
+      generationId: 'graph-only',
+      sourceSessionIds: ['session-1'],
+      outputMode: 'knowledge-graph',
+      mindMap: null,
+      knowledgeGraph: graphOnly
+    })
+    assert.equal(graphSaved.mindMap.nodes[0].title, '阶段主题')
+    assert.equal(graphSaved.knowledgeGraph.entities[0].name, '更新后的 Runtime')
+
+    const mindOnly = validMindMap()
+    mindOnly.nodes[0].title = '更新后的阶段主题'
+    const mindSaved = await storage.saveBundle({
+      cwd,
+      expectedRevision: 2,
+      generationId: 'mind-only',
+      sourceSessionIds: ['session-1'],
+      outputMode: 'mind-map',
+      mindMap: mindOnly,
+      knowledgeGraph: null
+    })
+    assert.equal(mindSaved.mindMap.nodes[0].title, '更新后的阶段主题')
+    assert.equal(mindSaved.knowledgeGraph.entities[0].name, '更新后的 Runtime')
+    const state = await storage.readState(cwd)
+    assert.equal(state.mindMap.nodes[0].title, '更新后的阶段主题')
+    assert.equal(state.knowledgeGraph.entities[0].name, '更新后的 Runtime')
   } finally {
     await rm(cwd, { recursive: true, force: true })
   }
@@ -573,6 +640,99 @@ test('orchestrator summarizes conversations with at most three workers and merge
   }
 })
 
+test('knowledge graph generation keeps chunk-level evidence and uses a dynamic high-recall budget', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-graph-coverage-'))
+  try {
+    const longAnswer = '模块接口与决策证据。'.repeat(900)
+    const source = {
+      sessionId: 'session-1',
+      title: '长对话',
+      events: [
+        { seq: 1, text: '请分析系统。', role: 'user' },
+        { seq: 2, text: longAnswer, role: 'assistant' }
+      ],
+      text: `用户：请分析系统。\n\n助手：${longAnswer}`
+    }
+    let summaryCall = 0
+    const graphPrompts = []
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-graph-coverage',
+      sourceReader: async () => [source],
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') {
+          summaryCall += 1
+          return {
+            summary: `第 ${summaryCall} 个分段保留的模块、接口、决策和风险。`,
+            keyPoints: [`分段 ${summaryCall} 的具名知识项`],
+            sourceRefs: sourceRefs('session-1', summaryCall === 1 ? 1 : 2)
+          }
+        }
+        graphPrompts.push(input.prompt)
+        return validGraph()
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1'], outputMode: 'knowledge-graph',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.ok(summaryCall >= 2)
+    assert.equal(graphPrompts.length, summaryCall)
+    assert.ok(graphPrompts.every((prompt) => /对话分段证据/.test(prompt)))
+    assert.ok(graphPrompts.some((prompt) => /"chunk":2/.test(prompt) && /第 2 个分段保留的模块/.test(prompt)))
+    assert.ok(graphPrompts.every((prompt) => /上限为 \d+ 个实体、\d+ 条关系/.test(prompt)))
+    assert.ok(graphPrompts.every((prompt) => !/最多生成 20 个实体、30 条关系/.test(prompt)))
+    assert.equal(completed.result.knowledgeGraph.entities.length, 2)
+    assert.equal(completed.result.knowledgeGraph.relations.length, 1)
+    assert.ok(completed.timeline.some((item) => item.type === 'graph-coverage' && /合并去重后保留 2 个实体、1 条关系/.test(item.message)))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('knowledge graph retries only the overflowing batch with a lower output budget', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-graph-token-retry-'))
+  try {
+    const graphPrompts = []
+    let graphCalls = 0
+    const orchestrator = new KnowledgeGenerationOrchestrator({
+      storage: new WorkspaceStorage(),
+      idFactory: () => 'generation-graph-token-retry',
+      sourceReader: async () => [{
+        sessionId: 'session-1', title: '单批对话',
+        events: [{ seq: 1, text: '系统包含模块和接口。', role: 'user' }, { seq: 2, text: '模块调用接口。', role: 'assistant' }],
+        text: '用户：系统包含模块和接口。\n\n助手：模块调用接口。'
+      }],
+      modelRunner: async (input) => {
+        if (input.kind === 'summary') return { summary: '系统包含模块和接口，模块调用接口。', keyPoints: ['模块', '接口', '调用关系'], sourceRefs: sourceRefs() }
+        graphCalls += 1
+        graphPrompts.push(input.prompt)
+        if (graphCalls === 1) {
+          const error = new Error('模型输出达到最大 Token 限制，JSON 尚未完成。')
+          error.tokenLimit = true
+          throw error
+        }
+        return validGraph()
+      }
+    })
+    const started = orchestrator.start({
+      anchorSessionId: 'session-1', cwd, selectedSessionIds: ['session-1'], outputMode: 'knowledge-graph',
+      strict: true, expectedRevision: 0, model: { provider: 'test-provider', model: 'test-model' }
+    })
+    const completed = await waitForGeneration(orchestrator, started.id)
+    assert.equal(completed.status, 'completed')
+    assert.equal(graphCalls, 2)
+    const firstLimit = Number(graphPrompts[0].match(/上限为 (\d+) 个实体/)?.[1])
+    const retryLimit = Number(graphPrompts[1].match(/上限为 (\d+) 个实体/)?.[1])
+    assert.ok(retryLimit < firstLimit)
+    assert.ok(completed.timeline.some((item) => item.type === 'retry' && /降低本批输出预算/.test(item.message)))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
 test('orchestrator filters hallucinated source sessions and records the conversations actually summarized', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'dsh-knowledge-source-filter-'))
   try {
@@ -604,12 +764,13 @@ test('orchestrator filters hallucinated source sessions and records the conversa
     })
     const completed = await waitForGeneration(orchestrator, started.id)
     assert.equal(completed.status, 'completed')
-    assert.deepEqual(completed.result.mindMap.nodes.map((node) => node.id), ['root'])
+    assert.equal(completed.result.mindMap, null)
     assert.deepEqual(completed.result.knowledgeGraph.entities.map((entity) => entity.id), ['runtime'])
     assert.equal(completed.result.knowledgeGraph.relations.length, 0)
-    assert.deepEqual(completed.result.sourceWarnings, { skippedRefs: 2, skippedItems: 3 })
+    assert.deepEqual(completed.result.sourceWarnings, { skippedRefs: 1, skippedItems: 2 })
     assert.deepEqual(completed.result.manifest.sourceSessions, [{ sessionId: 'session-1', title: '实际总结的对话' }])
-    assert.match(completed.message, /已总结 1 个对话.*过滤 3 个/)
+    assert.match(completed.message, /已总结 1 个对话.*过滤 2 个/)
+    assert.ok(completed.timeline.some((item) => item.type === 'view-failed' && /思维导图/.test(item.message)))
     assert.ok(completed.events.some((event) => event.progress?.label === '过滤无效来源'))
   } finally {
     await rm(cwd, { recursive: true, force: true })
@@ -879,7 +1040,7 @@ test('agent runner reports a token limit instead of a generic JSON parse failure
   )
 })
 
-test('agent runner logs empty output diagnostics without logging model content', async () => {
+test('agent runner logs empty output diagnostics without logging prompt content', async () => {
   const logs = []
   const logger = {
     info(format, ...params) { logs.push(['info', format, ...params]) },
@@ -908,6 +1069,40 @@ test('agent runner logs empty output diagnostics without logging model content',
   assert.match(serializedLogs, /agent output parse failed/)
   assert.match(serializedLogs, /extractedTextLength/)
   assert.doesNotMatch(serializedLogs, /输出 JSON/)
+})
+
+test('agent runner logs bounded model output and distinguishes malformed JSON from a wrong shape', async () => {
+  const logs = []
+  const logger = {
+    info(format, ...params) { logs.push(['info', format, ...params]) },
+    warn(format, ...params) { logs.push(['warn', format, ...params]) },
+    error(format, ...params) { logs.push(['error', format, ...params]) }
+  }
+  let response = 'JSON 如下：\n```json\n{"summary":"未闭合"\n```'
+  const orchestrator = new KnowledgeGenerationOrchestrator({
+    logger,
+    modelRunner: async () => response
+  })
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'summary', prompt: '不要写入日志的提示词', cwd: 'D:\\Code\\knowledge-workspace' }),
+    /没有可解析的 JSON/
+  )
+  response = 'JSON 如下：{"keyPoints":["只有关键点"]}'
+  await assert.rejects(
+    orchestrator.runModel({ kind: 'summary', prompt: '不要写入日志的提示词', cwd: 'D:\\Code\\knowledge-workspace' }),
+    /没有可解析的 JSON/
+  )
+  response = '{"summary":"","keyPoints":[]}'
+  assert.deepEqual(
+    await orchestrator.runModel({ kind: 'summary', prompt: '不要写入日志的提示词', cwd: 'D:\\Code\\knowledge-workspace' }),
+    { summary: '', keyPoints: [] }
+  )
+  const serializedLogs = JSON.stringify(logs)
+  assert.match(serializedLogs, /summary.*未闭合/)
+  assert.match(serializedLogs, /unclosed-object/)
+  assert.match(serializedLogs, /valid-json-wrong-shape/)
+  assert.match(serializedLogs, /summary.*keyPoints/)
+  assert.doesNotMatch(serializedLogs, /不要写入日志的提示词/)
 })
 
 test('orchestrator leaves workspace untouched when structured output fails validation', async () => {
@@ -983,8 +1178,10 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
       modelRunner: async (input) => {
         modelCalls.push(input.kind)
         modelSelections.push(input.model)
-        if (input.kind === 'summary') return { summary: '这是一个带有来源和下一步的完整摘要。', sourceRefs: sourceRefs() }
-        return validMindMap()
+        if (input.kind === 'summary') return { summary: '这是一个带有来源和下一步的完整摘要。', sourceRefs: sourceRefs('session-1', 2) }
+        const map = validMindMap()
+        map.nodes.forEach((node) => { node.sourceRefs = sourceRefs('session-1', 2) })
+        return map
       }
     })
     const llm = {
@@ -1044,10 +1241,11 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     assert.equal(result.status, 400)
     assert.equal(surfaceReads, 0)
 
-    result = await call('POST', '/conversation-knowledge-map/confirm', { anchorSessionId: 'session-1', selectedSessionIds: ['session-1'], outputMode: 'mind-map', prompt: '保留来源', strict: true, model: { provider: 'chosen-provider', model: 'chosen-model' }, expectedRevision: 0 })
+    result = await call('POST', '/conversation-knowledge-map/confirm', { anchorSessionId: 'session-1', selectedSessionIds: ['session-1'], outputMode: 'mind-map', sourceMode: 'answer-only', prompt: '保留来源', strict: true, model: { provider: 'chosen-provider', model: 'chosen-model' }, expectedRevision: 0 })
     assert.equal(result.status, 200)
     assert.ok(result.body.confirmation.token)
     assert.deepEqual(result.body.confirmation.model, { provider: 'chosen-provider', model: 'chosen-model' })
+    assert.equal(result.body.confirmation.sourceMode, 'answer-only')
     assert.equal(surfaceReads, 0)
 
     const token = result.body.confirmation.token
@@ -1080,6 +1278,7 @@ test('host enforces metadata-only discovery, explicit confirmation, workspace bo
     assert.equal(result.status, 200)
     assert.equal(result.body.state.revision, 1)
     assert.deepEqual(result.body.state.manifest.model, { provider: 'chosen-provider', model: 'chosen-model' })
+    assert.equal(result.body.state.manifest.sourceMode, 'answer-only')
     for (const cleanup of cleanups) cleanup()
   } finally {
     await rm(cwd, { recursive: true, force: true })
@@ -1106,6 +1305,9 @@ test('client bundle loads through the DSH module loader and exports the expected
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /navigator\.clipboard/)
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /request\('\/models'/)
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /confirmation\.model/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /sourceMode: confirmation\.sourceMode/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /仅助手回答正文/)
+  assert.match(text('market/conversation-knowledge-map/lib/client.js'), /reasoning \/ thinking、工具结果和流式过程块/)
   assert.match(text('market/conversation-knowledge-map/lib/client.js'), /setOverlayOpen\(false\)/)
 })
 
@@ -1113,6 +1315,7 @@ test('structured model output accepts fenced JSON but never treats plain prose a
   assert.deepEqual(parseStructuredOutput('```json\n{"ok":true}\n```'), { ok: true })
   assert.deepEqual(parseStructuredOutput('模型说明：```JSON\n{"ok":true,"nested":{"value":1}}\n```'), { ok: true, nested: { value: 1 } })
   assert.deepEqual(parseStructuredOutput({ result: '前缀 {"ok":true} 后缀' }), { ok: true })
+  assert.deepEqual(parseStructuredOutput('```json\n{"entities":[]}\n```', 'knowledge-graph'), { entities: [], relations: [] })
   assert.throws(() => parseStructuredOutput('没有 JSON'), /没有可解析的 JSON/)
   assert.throws(
     () => parseStructuredOutput('{"summary":"未闭合 \"keyPoints\":[{"sessionId":"session-1","eventSeqs":[1]}]}', 'summary'),

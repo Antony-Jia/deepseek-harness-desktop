@@ -151,7 +151,7 @@ export class WorkspaceStorage {
     }
   }
 
-  async saveBundle({ cwd, expectedRevision = 0, generationId, sourceSessionIds, sourceSessions, failedSources, sourceWarnings, generationTimeline, prompt, strict, outputMode, model, mindMap, knowledgeGraph }) {
+  async saveBundle({ cwd, expectedRevision = 0, generationId, sourceSessionIds, sourceSessions, failedSources, sourceWarnings, generationTimeline, prompt, strict, sourceMode, outputMode, model, mindMap, knowledgeGraph }) {
     const normalizedCwd = normalizeWorkspacePath(cwd)
     const key = workspaceKey(normalizedCwd)
     const previous = this.locks.get(key) || Promise.resolve()
@@ -187,18 +187,23 @@ export class WorkspaceStorage {
         })) : [],
         promptSummary: shortText(prompt, 500),
         strict: strict === true,
+        sourceMode: sourceMode === 'answer-only' ? 'answer-only' : 'conversation',
         outputMode: String(outputMode || 'both'),
         model: model ? { provider: String(model.provider || ''), model: String(model.model || '') } : null,
         generatedAt: this.now()
       }
       const navigationHistory = current.navigationHistory || []
+      // A generation request may target only one view. Keep the other view intact
+      // instead of replacing its persisted JSON with null.
+      const nextMindMap = mindMap || current.mindMap || null
+      const nextKnowledgeGraph = knowledgeGraph || current.knowledgeGraph || null
       await replaceBundle(this.resolveDataDir(normalizedCwd), {
         manifest,
-        mindMap: mindMap || null,
-        knowledgeGraph: knowledgeGraph || null,
+        mindMap: nextMindMap,
+        knowledgeGraph: nextKnowledgeGraph,
         navigationHistory
       })
-      return { revision, manifest, dataDir: this.resolveDataDir(normalizedCwd) }
+      return { revision, manifest, dataDir: this.resolveDataDir(normalizedCwd), mindMap: nextMindMap, knowledgeGraph: nextKnowledgeGraph }
     })
     this.locks.set(key, operation)
     try {

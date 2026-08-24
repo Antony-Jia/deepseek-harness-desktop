@@ -278,7 +278,7 @@ window.__ModuleLoader__.load({
       if (!sources.length) return null
       return React.createElement('section', { className: 'ckm-source-summary', 'aria-label': '本次总结来源' }, [
         React.createElement('div', { key: 'head', className: 'ckm-source-summary-head' }, [
-          React.createElement('strong', { key: 'title' }, '已总结 ' + sources.length + ' 个对话'),
+          React.createElement('strong', { key: 'title' }, '已总结 ' + sources.length + ' 个对话' + (manifest.sourceMode === 'answer-only' ? ' · 仅助手回答正文' : ' · 完整对话正文')),
           warnings.skippedItems || warnings.skippedRefs || failedSources.length ? React.createElement('span', { key: 'warning', className: 'ckm-source-warning' }, '失败对话 ' + failedSources.length + ' 个 · 已过滤 ' + (warnings.skippedRefs || 0) + ' 个无效引用、跳过 ' + (warnings.skippedItems || 0) + ' 个内容项') : null
         ]),
         React.createElement('div', { key: 'list', className: 'ckm-source-list' }, sources.map(function (source) {
@@ -380,6 +380,7 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { className: 'ckm-workspace' }, [
         React.createElement('section', { key: 'canvas', className: 'ckm-mind-canvas' }, [
           React.createElement('div', { key: 'hint', className: 'ckm-panel-hint' }, '节点代表阶段性认知；点击后可形成问题，但不会直接修改脑图。'),
+          map && map.nodes.length < 2 ? React.createElement('div', { key: 'coverage-warning', className: 'ckm-warning' }, '本次思维导图仅保留了根节点，没有可展开的子节点。请使用修复后的版本重新生成。') : null,
           tree ? React.createElement('ul', { key: 'tree', className: 'ckm-tree ckm-tree-root' }, React.createElement(MindTreeBranch, { branch: tree, selectedNodeId: props.selectedNodeId, setSelectedNodeId: props.setSelectedNodeId })) : null
         ]),
         React.createElement('aside', { key: 'detail', className: 'ckm-detail' }, [
@@ -424,7 +425,7 @@ window.__ModuleLoader__.load({
       ]))
     }
 
-    function graphLayout(entities, relations) {
+    function graphLayout(entities, relations, spacing) {
       var degree = Object.create(null)
       entities.forEach(function (entity) { degree[entity.id] = 0 })
       relations.forEach(function (relation) {
@@ -434,20 +435,30 @@ window.__ModuleLoader__.load({
       var ordered = entities.slice().sort(function (left, right) {
         return (degree[right.id] || 0) - (degree[left.id] || 0) || String(left.name || '').localeCompare(String(right.name || ''))
       })
-      if (!ordered.length) return []
-      var positions = [{ entity: ordered[0], x: 450, y: 310, width: 164, height: 68, central: true }]
+      if (!ordered.length) return { positions: [], width: 900, height: 620 }
+      var density = Math.max(0.8, Math.min(2.2, Number(spacing) || 1))
+      var nodeWidth = 150
+      var nodeHeight = 64
       var remaining = ordered.slice(1)
-      var inner = remaining.slice(0, Math.min(6, remaining.length))
-      var outer = remaining.slice(inner.length)
-      function placeRing(items, radiusX, radiusY, phase) {
-        items.forEach(function (entity, index) {
-          var angle = phase + index / Math.max(1, items.length) * Math.PI * 2
-          positions.push({ entity: entity, x: 450 + Math.cos(angle) * radiusX, y: 310 + Math.sin(angle) * radiusY, width: 138, height: 60, central: false })
-        })
+      var rings = []
+      var ringIndex = 1
+      while (remaining.length) {
+        var radius = ringIndex * 205 * density
+        var capacity = Math.max(8, Math.floor(Math.PI * 2 * radius / (nodeWidth + 34 * density)))
+        rings.push({ radius: radius, items: remaining.splice(0, capacity) })
+        ringIndex += 1
       }
-      placeRing(inner, 205, 145, -Math.PI / 2)
-      placeRing(outer, 350, 255, -Math.PI / 2 + Math.PI / Math.max(2, outer.length))
-      return positions
+      var maxRadius = rings.length ? rings[rings.length - 1].radius : 0
+      var size = Math.max(620, Math.ceil((maxRadius + nodeWidth / 2 + 110) * 2))
+      var center = size / 2
+      var positions = [{ entity: ordered[0], x: center, y: center, width: 174, height: 72, central: true }]
+      rings.forEach(function (ring, index) {
+        ring.items.forEach(function (entity, itemIndex) {
+          var angle = -Math.PI / 2 + (index % 2 ? Math.PI / Math.max(2, ring.items.length) : 0) + itemIndex / Math.max(1, ring.items.length) * Math.PI * 2
+          positions.push({ entity: entity, x: center + Math.cos(angle) * ring.radius, y: center + Math.sin(angle) * ring.radius, width: nodeWidth, height: nodeHeight, central: false })
+        })
+      })
+      return { positions: positions, width: size, height: size }
     }
 
     function graphLabelLines(value) {
@@ -493,32 +504,97 @@ window.__ModuleLoader__.load({
       var zoomPair = React.useState(1)
       var zoom = zoomPair[0]
       var setZoom = zoomPair[1]
+      var spacingPair = React.useState(1)
+      var spacing = spacingPair[0]
+      var setSpacing = spacingPair[1]
+      var localPair = React.useState(false)
+      var localOnly = localPair[0]
+      var setLocalOnly = localPair[1]
+      var panRef = React.useRef(null)
       if (!graph) return React.createElement(EmptyState, { title: '尚未生成知识图谱', copy: '从标题栏打开知识视图并选择生成知识图谱。' })
-      var entities = graph.entities.filter(function (entity) {
+      var filteredEntities = graph.entities.filter(function (entity) {
         return (confidence === 'all' || entity.confidence === confidence) && (!query.trim() || (entity.name + ' ' + entity.summary).toLowerCase().indexOf(query.trim().toLowerCase()) >= 0)
       })
       var visible = Object.create(null)
-      entities.forEach(function (entity) { visible[entity.id] = true })
-      var relations = graph.relations.filter(function (relation) { return visible[relation.from] && visible[relation.to] })
-      var positions = graphLayout(entities, relations)
+      filteredEntities.forEach(function (entity) { visible[entity.id] = true })
+      var filteredRelations = graph.relations.filter(function (relation) { return visible[relation.from] && visible[relation.to] })
+      var localIds = Object.create(null)
+      if (localOnly && selected && visible[selected.id]) {
+        localIds[selected.id] = true
+        filteredRelations.forEach(function (relation) {
+          if (relation.from === selected.id || relation.to === selected.id) {
+            localIds[relation.from] = true
+            localIds[relation.to] = true
+          }
+        })
+      }
+      var entities = localOnly && selected && visible[selected.id] ? filteredEntities.filter(function (entity) { return localIds[entity.id] }) : filteredEntities
+      var shown = Object.create(null)
+      entities.forEach(function (entity) { shown[entity.id] = true })
+      var relations = filteredRelations.filter(function (relation) { return shown[relation.from] && shown[relation.to] })
+      var layout = graphLayout(entities, relations, spacing)
+      var positions = layout.positions
       var byId = Object.create(null)
       positions.forEach(function (item) { byId[item.entity.id] = item })
-      var viewWidth = 900 / zoom
-      var viewHeight = 620 / zoom
-      var viewBox = [(900 - viewWidth) / 2, (620 - viewHeight) / 2, viewWidth, viewHeight].join(' ')
+      var viewBox = ['0', '0', layout.width, layout.height].join(' ')
+      var centerSignature = [layout.width, layout.height, zoom, spacing, localOnly ? selected && selected.id : 'all'].join(':')
+      function setStagePan(stage, x, y) {
+        stage.dataset.panX = String(x)
+        stage.dataset.panY = String(y)
+        stage.style.transform = 'translate(' + x + 'px,' + y + 'px)'
+      }
+      function centerGraphStage(stage) {
+        if (!stage || stage.dataset.centered === centerSignature) return
+        stage.dataset.centered = centerSignature
+        window.requestAnimationFrame(function () {
+          var viewport = stage.parentElement
+          if (!viewport) return
+          setStagePan(stage, (viewport.clientWidth - layout.width * zoom) / 2, (viewport.clientHeight - layout.height * zoom) / 2)
+        })
+      }
+      function beginPan(event) {
+        if (event.button !== 0 || (event.target.closest && event.target.closest('.ckm-graph-node,.ckm-graph-toolbar,button,input,select'))) return
+        var viewport = event.currentTarget
+        var stage = viewport.querySelector('.ckm-graph-stage')
+        if (!stage) return
+        panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: Number(stage.dataset.panX) || 0, panY: Number(stage.dataset.panY) || 0, stage: stage }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        event.currentTarget.dataset.dragging = 'true'
+        event.preventDefault()
+      }
+      function movePan(event) {
+        var pan = panRef.current
+        if (!pan || pan.pointerId !== event.pointerId) return
+        setStagePan(pan.stage, pan.panX + event.clientX - pan.x, pan.panY + event.clientY - pan.y)
+      }
+      function endPan(event) {
+        var pan = panRef.current
+        if (!pan || pan.pointerId !== event.pointerId) return
+        panRef.current = null
+        event.currentTarget.dataset.dragging = 'false'
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      }
       return React.createElement('div', { className: 'ckm-workspace ckm-graph-layout' }, [
         React.createElement('section', { key: 'graph', className: 'ckm-graph-canvas' }, [
           React.createElement('div', { key: 'toolbar', className: 'ckm-graph-toolbar' }, [
             React.createElement('input', { key: 'search', value: query, placeholder: '搜索实体…', onChange: function (event) { setQuery(event.target.value) } }),
             React.createElement('select', { key: 'confidence', value: confidence, onChange: function (event) { setConfidence(event.target.value) } }, [React.createElement('option', { key: 'all', value: 'all' }, '全部置信度'), React.createElement('option', { key: 'confirmed', value: 'confirmed' }, '已确认'), React.createElement('option', { key: 'inferred', value: 'inferred' }, '推测'), React.createElement('option', { key: 'conflicted', value: 'conflicted' }, '有冲突')]),
+            Button({ key: 'local', className: 'ckm-secondary', disabled: !selected, title: selected ? '只显示选中实体及其直接相邻实体' : '请先选择一个实体', onClick: function () { setLocalOnly(!localOnly) } }, localOnly ? '全部视图' : '局部一跳'),
+            React.createElement('div', { key: 'spacing', className: 'ckm-graph-zoom', 'aria-label': '知识图谱节点间距控制' }, [
+              Button({ key: 'compact', title: '缩小节点间距', disabled: spacing <= 0.8, onClick: function () { setSpacing(Math.max(0.8, Number((spacing - 0.2).toFixed(1)))) } }, '−'),
+              Button({ key: 'value', title: '重置节点间距', className: 'ckm-zoom-value', onClick: function () { setSpacing(1) } }, '间距 ' + Math.round(spacing * 100) + '%'),
+              Button({ key: 'loose', title: '增大节点间距', disabled: spacing >= 2.2, onClick: function () { setSpacing(Math.min(2.2, Number((spacing + 0.2).toFixed(1)))) } }, '+')
+            ]),
             React.createElement('div', { key: 'zoom', className: 'ckm-graph-zoom', 'aria-label': '知识图谱缩放控制' }, [
               Button({ key: 'out', title: '缩小', 'aria-label': '缩小知识图谱', disabled: zoom <= 0.5, onClick: function () { setZoom(Math.max(0.5, Number((zoom - 0.1).toFixed(1)))) } }, '−'),
               Button({ key: 'reset', title: '重置缩放', className: 'ckm-zoom-value', onClick: function () { setZoom(1) } }, Math.round(zoom * 100) + '%'),
               Button({ key: 'in', title: '放大', 'aria-label': '放大知识图谱', disabled: zoom >= 2, onClick: function () { setZoom(Math.min(2, Number((zoom + 0.1).toFixed(1)))) } }, '+')
             ])
           ]),
-          React.createElement('p', { key: 'static', className: 'ckm-panel-hint' }, '知识图谱是静态结果，可缩放查看；只能通过菜单栏完整重新生成，不支持直接编辑或节点发散。'),
-          React.createElement('svg', { key: 'svg', className: 'ckm-graph-svg', viewBox: viewBox, role: 'img', 'aria-label': '知识图谱' }, [
+          React.createElement('p', { key: 'static', className: 'ckm-panel-hint' }, '知识图谱位于固定视口内；可按住空白区域自由拖动，移出视口的部分会被裁剪。画布缩放与节点间距可分别调整，选择实体后可查看一跳局部子图。'),
+          React.createElement('div', { key: 'viewport', className: 'ckm-graph-viewport', onPointerDown: beginPan, onPointerMove: movePan, onPointerUp: endPan, onPointerCancel: endPan }, [
+            React.createElement('div', { key: 'stage', ref: centerGraphStage, className: 'ckm-graph-stage', style: { width: layout.width * zoom + 'px', height: layout.height * zoom + 'px' } }, [
+              React.createElement('svg', { key: 'svg', className: 'ckm-graph-svg', viewBox: viewBox, width: layout.width * zoom, height: layout.height * zoom, style: { width: layout.width * zoom + 'px', height: layout.height * zoom + 'px' }, role: 'img', 'aria-label': '知识图谱' }, [
             React.createElement('defs', { key: 'defs' }, React.createElement('marker', { id: 'ckm-arrow', markerWidth: 7, markerHeight: 7, refX: 6, refY: 3.5, orient: 'auto', markerUnits: 'strokeWidth' }, React.createElement('path', { d: 'M0,0 L7,3.5 L0,7 Z', className: 'ckm-arrow-head' }))),
             React.createElement('g', { key: 'edges', className: 'ckm-graph-edges' }, relations.map(function (relation) {
               var from = byId[relation.from]
@@ -536,6 +612,8 @@ window.__ModuleLoader__.load({
                 React.createElement('title', { key: 'title' }, item.entity.name + ' · ' + item.entity.confidence)
               ])
             })
+              ])
+            ])
           ])
         ]),
         React.createElement('aside', { key: 'detail', className: 'ckm-detail' }, [
@@ -587,6 +665,9 @@ window.__ModuleLoader__.load({
       var modePair = React.useState('both')
       var mode = modePair[0]
       var setMode = modePair[1]
+      var sourceModePair = React.useState('conversation')
+      var sourceMode = sourceModePair[0]
+      var setSourceMode = sourceModePair[1]
       var promptPair = React.useState('')
       var prompt = promptPair[0]
       var setPrompt = promptPair[1]
@@ -637,11 +718,11 @@ window.__ModuleLoader__.load({
       function confirm() {
         if (!selected.length) { setMessage('至少选择一个对话。'); return }
         setBusy(true)
-        request('/confirm', { method: 'POST', body: { anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: { provider: modelProvider, model: modelId }, expectedRevision: store.state ? store.state.revision : 0 } }).then(function (body) { setConfirmation(body.confirmation); setMessage(''); setBusy(false) }).catch(function (error) { setMessage(error.message || String(error)); setBusy(false) })
+        request('/confirm', { method: 'POST', body: { anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, sourceMode: sourceMode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: { provider: modelProvider, model: modelId }, expectedRevision: store.state ? store.state.revision : 0 } }).then(function (body) { setConfirmation(body.confirmation); setMessage(''); setBusy(false) }).catch(function (error) { setMessage(error.message || String(error)); setBusy(false) })
       }
       function start() {
         setBusy(true)
-        request('/generations', { method: 'POST', body: { token: confirmation.token, anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: confirmation.model, expectedRevision: confirmation.revision } }).then(function (body) {
+        request('/generations', { method: 'POST', body: { token: confirmation.token, anchorSessionId: store.sessionId, selectedSessionIds: selected, outputMode: mode, sourceMode: confirmation.sourceMode, prompt: prompt, strict: strict, includeSubagents: includeSubagents, model: confirmation.model, expectedRevision: confirmation.revision } }).then(function (body) {
           setConfirmation(null)
           setBusy(false)
           setOverlayOpen(false)
@@ -652,7 +733,7 @@ window.__ModuleLoader__.load({
       if (!store.context || !store.context.ready) return React.createElement('div', { className: 'ckm-modal-backdrop' }, React.createElement('div', { className: 'ckm-modal' }, [React.createElement('h3', { key: 'title' }, '知识视图'), React.createElement('p', { key: 'copy' }, '请先打开一个有明确工作路径的已有对话。'), Button({ key: 'close', className: 'ckm-primary', onClick: function () { setOverlayOpen(false) } }, '关闭')]))
       return React.createElement('div', { className: 'ckm-modal-backdrop' }, React.createElement('div', { className: 'ckm-modal ckm-config-modal', role: 'dialog', 'aria-modal': 'true' }, confirmation ? [
         React.createElement('h3', { key: 'title' }, '确认生成知识视图？'),
-        React.createElement('dl', { key: 'summary', className: 'ckm-confirm-summary' }, [React.createElement('dt', { key: 'cwd-label' }, '工作路径'), React.createElement('dd', { key: 'cwd' }, store.context.cwd), React.createElement('dt', { key: 'source-label' }, '来源'), React.createElement('dd', { key: 'sources' }, confirmation.selectedSessions.length + ' 个已选择对话'), React.createElement('dt', { key: 'output-label' }, '生成'), React.createElement('dd', { key: 'output' }, mode === 'both' ? '思维导图 + 知识图谱' : mode), React.createElement('dt', { key: 'model-label' }, '模型'), React.createElement('dd', { key: 'model' }, confirmation.model.provider + ' / ' + confirmation.model.model), React.createElement('dt', { key: 'strict-label' }, '约束'), React.createElement('dd', { key: 'strict' }, strict ? '严格约束已开启' : '普通约束'), React.createElement('dt', { key: 'save-label' }, '保存'), React.createElement('dd', { key: 'save' }, '.g-dsh-market-knowledge' + (confirmation.overwrite ? '（将替换已有结果）' : ''))]),
+        React.createElement('dl', { key: 'summary', className: 'ckm-confirm-summary' }, [React.createElement('dt', { key: 'cwd-label' }, '工作路径'), React.createElement('dd', { key: 'cwd' }, store.context.cwd), React.createElement('dt', { key: 'source-label' }, '来源'), React.createElement('dd', { key: 'sources' }, confirmation.selectedSessions.length + ' 个已选择对话'), React.createElement('dt', { key: 'scope-label' }, '提取范围'), React.createElement('dd', { key: 'scope' }, confirmation.sourceMode === 'answer-only' ? '仅助手回答正文' : '完整对话正文'), React.createElement('dt', { key: 'output-label' }, '生成'), React.createElement('dd', { key: 'output' }, mode === 'both' ? '思维导图 + 知识图谱' : mode), React.createElement('dt', { key: 'model-label' }, '模型'), React.createElement('dd', { key: 'model' }, confirmation.model.provider + ' / ' + confirmation.model.model), React.createElement('dt', { key: 'strict-label' }, '约束'), React.createElement('dd', { key: 'strict' }, strict ? '严格约束已开启' : '普通约束'), React.createElement('dt', { key: 'save-label' }, '保存'), React.createElement('dd', { key: 'save' }, '.g-dsh-market-knowledge' + (confirmation.overwrite ? '（将替换已有结果）' : ''))]),
         React.createElement('p', { key: 'note', className: 'ckm-warning' }, '确认后才会读取所选对话正文、调用模型并写入工作区；不会自动发送消息。'),
         React.createElement('div', { key: 'actions', className: 'ckm-modal-actions' }, [Button({ key: 'back', className: 'ckm-secondary', onClick: function () { setConfirmation(null) }, disabled: busy }, '返回修改'), Button({ key: 'ok', className: 'ckm-primary', onClick: start, disabled: busy }, busy ? '生成中…' : '确认并生成')])
       ] : [
@@ -675,6 +756,14 @@ window.__ModuleLoader__.load({
           ])
         ]),
         React.createElement('label', { key: 'mode', className: 'ckm-field' }, ['生成内容', React.createElement('select', { key: 'select', value: mode, onChange: function (event) { setMode(event.target.value) } }, [React.createElement('option', { key: 'both', value: 'both' }, '思维导图 + 知识图谱'), React.createElement('option', { key: 'mind', value: 'mind-map' }, '仅思维导图'), React.createElement('option', { key: 'graph', value: 'knowledge-graph' }, '仅知识图谱')])]),
+        React.createElement('label', { key: 'source-mode', className: 'ckm-field' }, [
+          '提取范围（同时作用于思维导图和知识图谱）',
+          React.createElement('select', { key: 'select', value: sourceMode, onChange: function (event) { setSourceMode(event.target.value) } }, [
+            React.createElement('option', { key: 'conversation', value: 'conversation' }, '完整对话正文（用户问题 + 助手回答）'),
+            React.createElement('option', { key: 'answer-only', value: 'answer-only' }, '仅助手回答正文')
+          ]),
+          React.createElement('span', { key: 'hint', className: 'ckm-panel-hint' }, '两种模式都会排除 reasoning / thinking、工具结果和流式过程块。')
+        ]),
         React.createElement('label', { key: 'model', className: 'ckm-field' }, [
           '生成模型',
           React.createElement('span', { key: 'hint', className: 'ckm-panel-hint' }, '默认带入 DSH 默认模型；可以为本次知识视图单独选择 Provider / Model。'),
@@ -713,6 +802,8 @@ window.__ModuleLoader__.load({
       '.ckm-graph-layout{grid-template-columns:minmax(0,1fr) 330px}.ckm-graph-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.ckm-model-selectors{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:8px}.ckm-graph-toolbar input,.ckm-graph-toolbar select,.ckm-field textarea,.ckm-field select,.ckm-field input,.ckm-modal textarea,.ckm-modal select{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 9px;background:var(--dsw-specific-input-major);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}.ckm-graph-toolbar input{flex:1;min-width:180px}.ckm-graph-zoom{display:flex;align-items:center;margin-left:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;overflow:hidden}.ckm-graph-zoom button{min-width:32px;border:0;border-right:1px solid var(--dsw-alias-border-l2);padding:7px 9px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit}.ckm-graph-zoom button:last-child{border-right:0}.ckm-graph-zoom button:hover{background:var(--dsw-alias-interactive-bg-hover)}.ckm-graph-zoom button:disabled{opacity:.4;cursor:not-allowed}.ckm-graph-zoom .ckm-zoom-value{min-width:58px;color:var(--dsw-alias-state-business-primary);font-size:11px}.ckm-graph-svg{display:block;width:100%;max-width:100%;height:auto;min-height:500px;margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:radial-gradient(circle at 50% 48%,var(--dsw-alias-state-business-tertiary),var(--dsw-alias-bg-layer-1) 58%);box-sizing:border-box}.ckm-graph-edges{opacity:.62}.ckm-edge{fill:none;stroke:var(--dsw-alias-border-l2);stroke-width:1.4}.ckm-arrow-head{fill:var(--dsw-alias-label-tertiary)}.ckm-graph-node{cursor:pointer}.ckm-graph-node rect{fill:var(--dsw-alias-bg-layer-1);stroke:var(--dsw-alias-state-business-primary);stroke-width:1.5;filter:drop-shadow(0 4px 8px rgba(0,0,0,.14))}.ckm-graph-node[data-central=true] rect{fill:var(--dsw-alias-button-info-fill);stroke:var(--dsw-alias-label-primary);stroke-width:2}.ckm-graph-node[data-confidence="inferred"] rect{stroke:#d69a42}.ckm-graph-node[data-confidence="conflicted"] rect{stroke:#e06c75}.ckm-graph-node[data-active=true] rect{fill:var(--dsw-alias-state-business-tertiary);stroke:var(--dsw-alias-label-primary);stroke-width:2.5}.ckm-graph-node text{pointer-events:none}.ckm-graph-node-type{fill:var(--dsw-alias-label-tertiary);font-size:9px;letter-spacing:.04em;text-transform:uppercase}.ckm-graph-node-name{fill:var(--dsw-alias-label-primary);font-size:11px;font-weight:600}.ckm-graph-node[data-central=true] .ckm-graph-node-type,.ckm-graph-node[data-central=true] .ckm-graph-node-name{fill:var(--dsw-alias-label-primary-foreground)}' +
       '.ckm-modal-backdrop{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.46)}.ckm-modal{width:min(680px,calc(100vw - 40px));max-height:min(760px,calc(100vh - 40px));overflow:auto;padding:22px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;box-shadow:0 18px 56px #0008}.ckm-modal h3{margin:0;font-size:17px}.ckm-modal p{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.65}.ckm-modal-head{display:flex;align-items:center;justify-content:space-between}.ckm-icon-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-size:20px;cursor:pointer}.ckm-workspace-label{padding:9px;border-radius:8px;background:var(--dsw-alias-bg-layer-1);word-break:break-all}.ckm-field{display:flex;flex-direction:column;gap:7px;margin:14px 0;color:var(--dsw-alias-label-secondary);font-size:12px}.ckm-field textarea{resize:vertical}.ckm-session-list{display:flex;max-height:220px;flex-direction:column;gap:5px;overflow:auto}.ckm-session-option{display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid transparent;border-radius:8px;background:var(--dsw-alias-bg-layer-1);cursor:pointer}.ckm-session-option:hover{border-color:var(--dsw-alias-border-l2)}.ckm-session-option input,.ckm-inline-field input{margin-top:3px}.ckm-session-option span{display:flex;flex-direction:column;gap:3px}.ckm-session-option small{color:var(--dsw-alias-label-secondary);font-size:10px}.ckm-inline-field{display:flex;align-items:flex-start;gap:7px;margin:10px 0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.5}.ckm-confirm-summary{display:grid;grid-template-columns:100px 1fr;gap:7px 12px;margin:18px 0;font-size:12px}.ckm-confirm-summary dt{color:var(--dsw-alias-label-secondary)}.ckm-confirm-summary dd{margin:0;word-break:break-all}.ckm-warning{padding:10px;border-radius:8px;background:#d29c2518;color:var(--dsw-alias-label-secondary)}.ckm-error{color:#ff9898!important}.ckm-modal-actions{justify-content:flex-end;margin-top:18px}.ckm-header-pending{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-tertiary)}' +
       '@media(max-width:800px){.ckm-workspace,.ckm-graph-layout{display:flex;flex-direction:column}.ckm-detail{border-top:1px solid var(--dsw-alias-border-l2);border-left:0}.ckm-page-header{align-items:flex-start;flex-direction:column}.ckm-page-actions{width:100%;flex-wrap:wrap}}'
+
+    CSS += '.ckm-graph-layout{height:100%;min-height:0;overflow:hidden;align-self:stretch}.ckm-graph-canvas{display:flex;flex-direction:column;height:100%;max-height:100%;box-sizing:border-box;overflow:hidden}.ckm-graph-toolbar{position:relative;z-index:2;padding-bottom:4px;background:var(--dsw-alias-bg-base);cursor:default}.ckm-graph-zoom{margin-left:0}.ckm-graph-zoom:last-child{margin-left:auto}.ckm-graph-viewport{position:relative;flex:1;min-height:360px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:radial-gradient(circle at 50% 48%,var(--dsw-alias-state-business-tertiary),var(--dsw-alias-bg-layer-1) 58%);cursor:grab;touch-action:none}.ckm-graph-viewport[data-dragging="true"]{cursor:grabbing;user-select:none}.ckm-graph-stage{position:absolute;left:0;top:0;will-change:transform}.ckm-graph-svg{display:block;width:auto;max-width:none;height:auto;min-width:620px;min-height:620px;margin:0;border:0;border-radius:0;background:transparent}@media(max-width:800px){.ckm-graph-layout{height:auto;overflow:visible}.ckm-graph-canvas{height:auto;min-height:420px}.ckm-graph-viewport{flex:none;height:60vh}}'
 
     function apply(ctx) {
       var sessions = ctx.sessions || (ctx.get && ctx.get('sessions'))

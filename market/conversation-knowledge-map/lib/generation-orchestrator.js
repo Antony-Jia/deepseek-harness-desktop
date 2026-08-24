@@ -10,6 +10,12 @@ const SUMMARY_MAX_TOKENS = 12000
 const VIEW_MAX_TOKENS = 24000
 const SUMMARY_CONCURRENCY = 3
 const MAX_MODEL_RETRIES = 3
+const GRAPH_CONCURRENCY = 2
+const GRAPH_BATCH_MAX_ENTITIES = 18
+const GRAPH_BATCH_MAX_RELATIONS = 24
+const MIN_GRAPH_ENTITIES = 30
+const MAX_GRAPH_ENTITIES = 100
+const MAX_GRAPH_RELATIONS = 200
 
 function modelLabel(selection) {
   const provider = String(selection?.provider || '').trim()
@@ -74,7 +80,7 @@ function expectedObject(value, kind = '') {
   if (!kind) return true
   if (kind === 'summary') return typeof value?.summary === 'string' || typeof value?.narrative === 'string' || typeof value?.text === 'string'
   if (kind === 'mind-map') return Array.isArray(value?.nodes)
-  if (kind === 'knowledge-graph') return Array.isArray(value?.entities) && Array.isArray(value?.relations)
+  if (kind === 'knowledge-graph') return Array.isArray(value?.entities) && (value.relations === undefined || Array.isArray(value.relations))
   if (kind === 'follow-up') return typeof value?.question === 'string'
   return true
 }
@@ -122,12 +128,85 @@ function findJsonObject(text, kind = '') {
   return null
 }
 
+function modelOutputText(value) {
+  const text = textFromContent(value)
+  if (text) return text
+  if (value && typeof value === 'object') {
+    try { return JSON.stringify(value) } catch { /* fall through to a printable scalar */ }
+  }
+  return String(value ?? '')
+}
+
+function loggableModelOutput(value, max = 32000) {
+  const text = modelOutputText(value)
+  if (text.length <= max) return { text, loggedText: JSON.stringify(text), truncated: false }
+  const half = Math.floor(max / 2)
+  const bounded = `${text.slice(0, half)}\n…[中间 ${text.length - max} 个字符因日志长度限制被省略]…\n${text.slice(-half)}`
+  return { text, loggedText: JSON.stringify(bounded), truncated: true }
+}
+
+function jsonParseDiagnostics(value, kind = '') {
+  const text = modelOutputText(value).replace(/^\uFEFF/, '').trim()
+  const starts = []
+  for (let index = 0; index < text.length && starts.length < 12; index += 1) if (text[index] === '{') starts.push(index)
+  const candidates = []
+  for (const start of starts) {
+    let depth = 0
+    let inString = false
+    let escaped = false
+    let end = -1
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index]
+      if (inString) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') inString = false
+        continue
+      }
+      if (char === '"') inString = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) { end = index; break }
+    }
+    if (end < 0) {
+      candidates.push({ start, status: 'unclosed-object' })
+      continue
+    }
+    const fragment = text.slice(start, end + 1)
+    try {
+      const parsed = JSON.parse(fragment)
+      candidates.push({
+        start,
+        end,
+        status: expectedObject(parsed, kind) ? 'valid-expected-shape' : 'valid-json-wrong-shape',
+        keys: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).slice(0, 20) : []
+      })
+    } catch (error) {
+      candidates.push({ start, end, status: 'invalid-json', error: shortText(errorMessage(error), 300) })
+    }
+  }
+  return {
+    kind,
+    textLength: text.length,
+    fencedJson: /```(?:json)?\s*[\s\S]*?```/i.test(text),
+    firstBrace: text.indexOf('{'),
+    lastBrace: text.lastIndexOf('}'),
+    candidateCountInspected: candidates.length,
+    candidates
+  }
+}
+
 export function parseStructuredOutput(value, kind = '') {
   const object = asObject(value)
-  if (object && expectedObject(object, kind)) return object
+  if (object && expectedObject(object, kind)) {
+    if (kind === 'knowledge-graph' && object.relations === undefined) return { ...object, relations: [] }
+    return object
+  }
   const text = textFromContent(value).replace(/^\uFEFF/, '').trim()
   const parsed = findJsonObject(text, kind)
-  if (parsed) return parsed
+  if (parsed) {
+    if (kind === 'knowledge-graph' && parsed.relations === undefined) return { ...parsed, relations: [] }
+    return parsed
+  }
   if (!text) throw new Error('模型没有返回 JSON 对象。')
   throw new Error('模型返回了文本，但其中没有可解析的 JSON 对象。')
 }
@@ -154,7 +233,7 @@ function normalizeSummary(value, source, chunk) {
   const summary = shortText(result.summary || result.narrative || result.text, MAX_SUMMARY_CHARS)
   if (!summary) throw new Error(`对话 ${source.sessionId} 的摘要为空。`)
   const keyPoints = Array.isArray(result.keyPoints)
-    ? result.keyPoints.map((item) => shortText(item, 500)).filter(Boolean).slice(0, 12)
+    ? result.keyPoints.map((item) => shortText(item, 500)).filter(Boolean).slice(0, 24)
     : []
   const sourceRefs = sanitizeSourceRefs(result.sourceRefs, source, sourceRefsFromChunk(source, chunk))
   return {
@@ -175,6 +254,129 @@ function mergeSourceSummaries(source, chunkSummaries) {
     .flatMap((ref) => ref.eventSeqs || []))].slice(0, 24)
   const sourceRefs = eventSeqs.length ? [{ sessionId: source.sessionId, eventSeqs }] : []
   return { sessionId: source.sessionId, title: source.title, summary, keyPoints, sourceRefs }
+}
+
+function graphGenerationContext(successfulResults) {
+  return successfulResults.flatMap((result) => (result.chunkSummaries || []).map((summary, index) => ({
+    sessionId: summary.sessionId,
+    title: summary.title,
+    chunk: index + 1,
+    summary: summary.summary,
+    keyPoints: summary.keyPoints,
+    sourceRefs: summary.sourceRefs
+  })))
+}
+
+function graphGenerationBudget(sources, context) {
+  const sourceChars = sources.reduce((total, source) => total + String(source?.text || '').length, 0)
+  const evidenceUnits = Math.max(sources.length, context.length)
+  const entities = Math.min(MAX_GRAPH_ENTITIES, Math.max(
+    MIN_GRAPH_ENTITIES,
+    Math.ceil(sourceChars / 1200),
+    evidenceUnits * 6
+  ))
+  return {
+    entities,
+    relations: Math.min(MAX_GRAPH_RELATIONS, Math.max(entities, Math.ceil(entities * 1.8)))
+  }
+}
+
+function graphBatchBudget(context, attempt = 0) {
+  const contextChars = JSON.stringify(context || []).length
+  const reduction = Math.max(0.5, 1 - attempt * 0.2)
+  const entities = Math.max(8, Math.floor(Math.min(GRAPH_BATCH_MAX_ENTITIES, Math.max(10, Math.ceil(contextChars / 500))) * reduction))
+  return {
+    entities,
+    relations: Math.max(entities, Math.floor(Math.min(GRAPH_BATCH_MAX_RELATIONS, Math.ceil(entities * 1.35)) * reduction))
+  }
+}
+
+function mergeRefs(...groups) {
+  const bySession = new Map()
+  for (const ref of groups.flat()) {
+    const sessionId = String(ref?.sessionId || '')
+    if (!sessionId) continue
+    const seqs = bySession.get(sessionId) || new Set()
+    for (const seq of ref?.eventSeqs || []) if (Number.isInteger(seq) && seq >= 0) seqs.add(seq)
+    bySession.set(sessionId, seqs)
+  }
+  return [...bySession.entries()].slice(0, 12).map(([sessionId, seqs]) => ({ sessionId, eventSeqs: [...seqs].slice(0, 48) }))
+}
+
+function mergedConfidence(left, right) {
+  const values = new Set([left, right])
+  if (values.has('conflicted')) return 'conflicted'
+  if (values.has('inferred')) return 'inferred'
+  return 'confirmed'
+}
+
+function entityMergeKey(entity) {
+  const normalize = (value) => String(value || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ')
+  return `${normalize(entity?.type || 'concept')}\u0000${normalize(entity?.name)}`
+}
+
+function mergeKnowledgeGraphs(graphs, budget) {
+  const entitiesByKey = new Map()
+  const idMaps = []
+  let nextEntityId = 1
+  const usedEntityIds = new Set()
+  graphs.forEach((graph, graphIndex) => {
+    const idMap = new Map()
+    for (const entity of graph.entities || []) {
+      const key = entityMergeKey(entity)
+      let merged = entitiesByKey.get(key)
+      if (!merged) {
+        const requestedId = String(entity.id || '').trim()
+        let id = requestedId && !usedEntityIds.has(requestedId) ? requestedId : `entity-${nextEntityId++}`
+        while (usedEntityIds.has(id)) id = `entity-${nextEntityId++}`
+        usedEntityIds.add(id)
+        merged = { ...entity, id, sourceRefs: mergeRefs(entity.sourceRefs), order: entitiesByKey.size }
+        entitiesByKey.set(key, merged)
+      } else {
+        merged.sourceRefs = mergeRefs(merged.sourceRefs, entity.sourceRefs)
+        merged.confidence = mergedConfidence(merged.confidence, entity.confidence)
+        if (String(entity.summary || '').length > String(merged.summary || '').length) merged.summary = entity.summary
+      }
+      idMap.set(String(entity.id), merged.id)
+    }
+    idMaps[graphIndex] = idMap
+  })
+
+  const relationsByKey = new Map()
+  graphs.forEach((graph, graphIndex) => {
+    const idMap = idMaps[graphIndex]
+    for (const relation of graph.relations || []) {
+      const from = idMap.get(String(relation.from))
+      const to = idMap.get(String(relation.to))
+      if (!from || !to || from === to) continue
+      const type = String(relation.type || 'related_to').trim()
+      const key = `${from}\u0000${to}\u0000${type.toLowerCase()}`
+      const existing = relationsByKey.get(key)
+      if (existing) {
+        existing.evidence = mergeRefs(existing.evidence, relation.evidence)
+        existing.confidence = mergedConfidence(existing.confidence, relation.confidence)
+      } else {
+        relationsByKey.set(key, { ...relation, from, to, type, evidence: mergeRefs(relation.evidence), order: relationsByKey.size })
+      }
+    }
+  })
+
+  const degree = new Map()
+  for (const relation of relationsByKey.values()) {
+    degree.set(relation.from, (degree.get(relation.from) || 0) + 1)
+    degree.set(relation.to, (degree.get(relation.to) || 0) + 1)
+  }
+  const entities = [...entitiesByKey.values()]
+    .sort((left, right) => (degree.get(right.id) || 0) - (degree.get(left.id) || 0) || right.sourceRefs.length - left.sourceRefs.length || left.order - right.order)
+    .slice(0, budget.entities)
+    .map(({ order, ...entity }) => entity)
+  const retainedIds = new Set(entities.map((entity) => entity.id))
+  const relations = [...relationsByKey.values()]
+    .filter((relation) => retainedIds.has(relation.from) && retainedIds.has(relation.to))
+    .sort((left, right) => right.evidence.length - left.evidence.length || left.order - right.order)
+    .slice(0, budget.relations)
+    .map(({ order, ...relation }, index) => ({ ...relation, id: `relation-${index + 1}` }))
+  return { entities, relations }
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -300,7 +502,7 @@ function assertOutputSourceRefs(value, sources) {
   for (const relation of value?.knowledgeGraph?.relations || []) for (const ref of relation.evidence || []) check(ref, `知识图谱关系 ${relation.id}`)
 }
 
-function outputPrompt(kind, summaries, prompt, strict) {
+function outputPrompt(kind, summaries, prompt, strict, options = {}) {
   const rules = [
     '只输出一个 JSON 对象，不要 Markdown 代码围栏，不要额外解释。',
     '所有 sourceRefs/evidence 必须使用给定的 sessionId 和 eventSeqs，不能虚构来源。',
@@ -308,30 +510,35 @@ function outputPrompt(kind, summaries, prompt, strict) {
   ]
   const context = JSON.stringify(summaries)
   if (kind === 'mind-map') {
+    const minNodes = Math.max(2, Math.min(6, Number(options.mindMapMinNodes) || 4))
     return [
       '请根据以下多个对话摘要生成阶段性思维导图。节点不是关键词，narrative 必须是至少一段完整说明，包含背景、当前认识和下一步/未决点。',
-      '最多生成 12 个节点；每个 narrative 控制在 300 字以内。不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。',
+      `生成 ${minNodes}–12 个有效节点，至少包含根节点和覆盖不同对话/阶段的子节点；每个 narrative 控制在 300 字以内。不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。`,
       'JSON 形状：{"rootId":"...","nodes":[{"id":"...","parentId":null,"type":"theme|stage|question|decision|solution|risk|conclusion","title":"...","narrative":"...","primarySourceSessionId":"...","sourceRefs":[{"sessionId":"...","eventSeqs":[1]}],"openQuestions":[]}]}。',
       ...rules,
       `额外要求：${shortText(prompt, 2000) || '没有额外要求。'}`,
       `对话摘要：${context}`
     ].join('\n\n')
   }
+  const graphBudget = options.graphBudget || { entities: MIN_GRAPH_ENTITIES, relations: Math.ceil(MIN_GRAPH_ENTITIES * 1.8) }
   return [
-    '请根据以下多个对话摘要生成静态知识图谱。抽取实体、概念、模块、接口、决策、风险和外部系统，并只建立有依据的关系。',
-    '最多生成 20 个实体、30 条关系；实体 summary 控制在 220 字以内。不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。',
+    '请根据以下多个对话分段证据生成高召回的静态知识图谱。系统性抽取人物/组织、实体、概念、模块、接口、数据对象、工具、外部系统、需求、约束、决策、结论、风险、问题和行动项，并只建立有依据的关系。',
+    `本次内容规模对应的上限为 ${graphBudget.entities} 个实体、${graphBudget.relations} 条关系。这是防止输出失控的上限，不是要求凑数；在有依据的前提下应尽量完整覆盖每个对话和分段，不要只保留少数总括性主题。实体 summary 控制在 220 字以内。`,
+    '同名同义实体应合并，但不同模块、接口、决策、风险或行动项不能因为属于同一主题就合并。优先保留能承载具体关系的细粒度实体；每个分段都要检查是否存在尚未覆盖的新实体和关系。',
+    '不要输出 schema 之外的字段。确保最终内容是可被 JSON.parse 直接解析的完整 JSON。',
     'JSON 形状：{"entities":[{"id":"...","type":"...","name":"...","summary":"...","confidence":"confirmed|inferred|conflicted","sourceRefs":[{"sessionId":"...","eventSeqs":[1]}]}],"relations":[{"id":"...","from":"...","to":"...","type":"depends_on|calls|supports|constrains|belongs_to|derived_from","confidence":"confirmed|inferred|conflicted","evidence":[{"sessionId":"...","eventSeqs":[1]}]}]}。',
     ...rules,
     `额外要求：${shortText(prompt, 2000) || '没有额外要求。'}`,
-    `对话摘要：${context}`
+    `对话分段证据：${context}`
   ].join('\n\n')
 }
 
-function summaryPrompt(source, chunk, strict) {
+function summaryPrompt(source, chunk, strict, sourceMode = 'conversation') {
   return [
     '请把一段 DSH 对话整理成带来源的结构化摘要。不要复述完整聊天，不要添加对话中没有的事实。',
+    sourceMode === 'answer-only' ? '本次选择“仅助手回答正文”：只保留回答中的事实、结论、决策、方案、风险、问题和行动项；忽略检查步骤、搜索过程、工具调用过程、重试过程、状态播报以及 thinking/reasoning。' : '本次使用用户问题与助手回答正文共同形成摘要；thinking/reasoning、工具结果和流式过程块不在输入中。',
     '只输出 JSON：{"summary":"完整阶段性说明","keyPoints":["..."],"sourceRefs":[{"sessionId":"...","eventSeqs":[1]}]}。',
-    'summary 控制在 1200 字以内；keyPoints 最多 8 条，每条不超过 160 字。不要增加其他字段。字符串中的双引号必须正确转义，确保整个输出可以被 JSON.parse 直接解析。',
+    'summary 控制在 1200 字以内；keyPoints 最多 16 条，每条不超过 160 字。keyPoints 要优先保留具名的人物/组织、模块、接口、数据对象、工具、外部系统、需求、约束、决策、风险、问题、行动项以及它们之间的关系，不要只写总括性主题。不要增加其他字段。字符串中的双引号必须正确转义，确保整个输出可以被 JSON.parse 直接解析。',
     strict ? '严格模式：每个关键点都要能回指给定事件。' : '允许标记尚未确认的冲突，但不能编造事件序号。',
     `Session：${source.sessionId}`,
     `标题：${source.title}`,
@@ -593,7 +800,7 @@ export class KnowledgeGenerationOrchestrator {
     }
     this.tasks.set(task.id, task)
     this.busyByWorkspace.set(key, task.id)
-    logMessage(this.logger, 'info', 'generation start id=%s cwd=%s outputMode=%s selectedSessions=%d strict=%s model=%s', logId(task.id), shortText(request.cwd, 180), request.outputMode, Array.isArray(request.selectedSessionIds) ? request.selectedSessionIds.length : 0, request.strict === true, modelLabel(request.model))
+    logMessage(this.logger, 'info', 'generation start id=%s cwd=%s outputMode=%s sourceMode=%s selectedSessions=%d strict=%s model=%s', logId(task.id), shortText(request.cwd, 180), request.outputMode, request.sourceMode || 'conversation', Array.isArray(request.selectedSessionIds) ? request.selectedSessionIds.length : 0, request.strict === true, modelLabel(request.model))
     this.update(task, 'created', { request: { ...request, prompt: shortText(request.prompt, 500) } })
     task.promise = this.run(task, request).finally(() => {
       if (this.busyByWorkspace.get(key) === task.id) this.busyByWorkspace.delete(key)
@@ -615,13 +822,14 @@ export class KnowledgeGenerationOrchestrator {
 
   async run(task, request) {
     try {
-      this.recordTimeline(task, 'start', `开始处理 ${request.selectedSessionIds.length} 个已选对话。`)
+      this.recordTimeline(task, 'start', `开始处理 ${request.selectedSessionIds.length} 个已选对话（${request.sourceMode === 'answer-only' ? '仅助手回答正文' : '完整对话正文'}）。`)
       this.update(task, 'reading-sources', { progress: { percent: 5, current: 0, total: request.selectedSessionIds.length, label: '读取对话记录' } })
       const sources = await this.sourceReader({ sessionQuery: this.sessionQuery, sessions: this.sessions }, {
         cwd: request.cwd,
         sessionIds: request.selectedSessionIds,
         fallbackSessionId: request.anchorSessionId,
-        includeSubagents: request.includeSubagents === true
+        includeSubagents: request.includeSubagents === true,
+        sourceMode: request.sourceMode || 'conversation'
       })
       const loadedSessionIds = [...new Set(sources.map((source) => source.sessionId))]
       this.assertNotCancelled(task)
@@ -642,7 +850,7 @@ export class KnowledgeGenerationOrchestrator {
         for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
           const chunk = chunks[chunkIndex]
           this.assertNotCancelled(task)
-          const basePrompt = summaryPrompt(source, chunk, request.strict === true)
+          const basePrompt = summaryPrompt(source, chunk, request.strict === true, request.sourceMode || 'conversation')
           const generateSummary = async (summaryInput) => this.runModel({
             kind: 'summary', prompt: summaryInput, cwd: request.cwd, strict: request.strict === true,
             selectedSessionIds: loadedSessionIds, model: request.model, signal: task.controller.signal
@@ -684,7 +892,7 @@ export class KnowledgeGenerationOrchestrator {
           sourceCount: sources.length,
           progress: { percent: 10 + Math.floor(60 * completedSources / sources.length), current: completedSources, total: sources.length, label: `已完成摘要：${source.title}` }
         })
-        return { source, error: '', summary: mergeSourceSummaries(source, chunkSummaries) }
+        return { source, error: '', summary: mergeSourceSummaries(source, chunkSummaries), chunkSummaries }
       })
       this.assertNotCancelled(task)
       const successfulResults = summaryResults.filter((result) => result?.summary)
@@ -694,6 +902,8 @@ export class KnowledgeGenerationOrchestrator {
       if (!successfulResults.length) throw new Error(`所选 ${sources.length} 个对话均未能生成合法摘要，已分别重试 ${MAX_MODEL_RETRIES} 次。`)
       const summarizedSources = successfulResults.map((result) => result.source)
       const summaries = successfulResults.map((result) => result.summary)
+      const graphContext = graphGenerationContext(successfulResults)
+      const graphBudget = graphGenerationBudget(summarizedSources, graphContext)
       const sourceSessionIds = summarizedSources.map((source) => source.sessionId)
       this.recordTimeline(task, 'merge', `已合并 ${summaries.length} 个对话摘要${failedSources.length ? `，跳过 ${failedSources.length} 个失败对话` : ''}，开始生成最终视图。`)
       let mindMap = null
@@ -702,7 +912,8 @@ export class KnowledgeGenerationOrchestrator {
       if (request.outputMode === 'mind-map' || request.outputMode === 'both') {
         this.recordTimeline(task, 'view-start', '开始生成思维导图。')
         this.update(task, 'building-mind-map', { progress: { percent: 78, current: sources.length, total: sources.length, label: '生成思维导图' } })
-        const baseMindMapPrompt = outputPrompt('mind-map', summaries, request.prompt, request.strict === true)
+        const mindMapTargetNodes = Math.min(6, Math.max(2, summarizedSources.length + 1))
+        const baseMindMapPrompt = outputPrompt('mind-map', summaries, request.prompt, request.strict === true, { mindMapMinNodes: mindMapTargetNodes })
         const generateMindMap = async (prompt) => this.runModel({
           kind: 'mind-map', prompt, cwd: request.cwd, strict: request.strict === true,
           selectedSessionIds: sourceSessionIds, model: request.model, signal: task.controller.signal
@@ -713,7 +924,7 @@ export class KnowledgeGenerationOrchestrator {
             const prompt = attempt === 0 ? baseMindMapPrompt : `${baseMindMapPrompt}\n\n第 ${attempt} 次输出未通过校验：${shortText(errorMessage(mindMapError), 500)}。请完全重置并从头生成，只输出完整、严格合法且更精简的 JSON。`
             const value = await generateMindMap(prompt)
             const sanitized = sanitizeMindMapSources(value, summarizedSources, request.strict === true)
-            mindMap = validateMindMap(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
+            mindMap = validateMindMap(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true, minNodes: 2 })
             sourceWarnings.skippedRefs += sanitized.skippedRefs
             sourceWarnings.skippedItems += sanitized.skippedItems
             mindMapError = null
@@ -738,39 +949,56 @@ export class KnowledgeGenerationOrchestrator {
         }
       }
       if (request.outputMode === 'knowledge-graph' || request.outputMode === 'both') {
-        this.recordTimeline(task, 'view-start', '开始生成知识图谱。')
-        this.update(task, 'building-knowledge-graph', { progress: { percent: 86, current: sources.length, total: sources.length, label: '生成知识图谱' } })
-        const baseGraphPrompt = outputPrompt('knowledge-graph', summaries, request.prompt, request.strict === true)
-        let graphError = null
-        for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt += 1) {
-          try {
-            const prompt = attempt === 0 ? baseGraphPrompt : `${baseGraphPrompt}\n\n第 ${attempt} 次输出未通过校验：${shortText(errorMessage(graphError), 500)}。请完全重置并从头生成，只输出完整、严格合法且更精简的 JSON。`
-            const value = await this.runModel({
-              kind: 'knowledge-graph', prompt, cwd: request.cwd, strict: request.strict === true,
-              selectedSessionIds: sourceSessionIds, model: request.model, signal: task.controller.signal
-            })
-            const sanitized = sanitizeKnowledgeGraphSources(value, summarizedSources, request.strict === true)
-            knowledgeGraph = validateKnowledgeGraph(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
-            sourceWarnings.skippedRefs += sanitized.skippedRefs
-            sourceWarnings.skippedItems += sanitized.skippedItems
-            graphError = null
-            this.recordTimeline(task, 'view-complete', '知识图谱生成完成。')
-            break
-          } catch (error) {
-            this.assertNotCancelled(task)
-            graphError = error
-            logMessage(this.logger, 'warn', 'knowledge graph attempt invalid id=%s attempt=%d error=%s', logId(task.id), attempt + 1, errorMessage(error))
-            if (attempt < MAX_MODEL_RETRIES) {
-              this.recordTimeline(task, 'retry', `知识图谱生成失败（${shortText(errorMessage(graphError), 160)}），重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}。`)
-              this.update(task, 'building-knowledge-graph', {
-                message: `知识图谱结构无效，正在重置重试 ${attempt + 1}/${MAX_MODEL_RETRIES}…`,
-                progress: { percent: 88, current: sources.length, total: sources.length, label: `知识图谱重试 ${attempt + 1}/${MAX_MODEL_RETRIES}` }
+        const graphBatches = graphContext.map((item) => [item])
+        this.recordTimeline(task, 'view-start', `开始分 ${graphBatches.length} 批生成知识图谱（最多 ${GRAPH_CONCURRENCY} 批并行）。`)
+        this.update(task, 'building-knowledge-graph', { progress: { percent: 86, current: 0, total: graphBatches.length, label: '分批生成知识图谱' } })
+        let completedGraphBatches = 0
+        let graphRetryCount = 0
+        const graphBatchResults = await mapWithConcurrency(graphBatches, GRAPH_CONCURRENCY, async (batch, batchIndex) => {
+          let graphError = null
+          for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt += 1) {
+            try {
+              const batchBudget = graphBatchBudget(batch, attempt)
+              const baseGraphPrompt = outputPrompt('knowledge-graph', batch, request.prompt, request.strict === true, { graphBudget: batchBudget })
+              const prompt = attempt === 0 ? baseGraphPrompt : `${baseGraphPrompt}\n\n本批第 ${attempt} 次输出未通过校验：${shortText(errorMessage(graphError), 500)}。请完全重置并从头生成；本次预算已降低，优先保留有明确关系和来源的实体。只输出完整、严格合法的 JSON。`
+              const value = await this.runModel({
+                kind: 'knowledge-graph', prompt, cwd: request.cwd, strict: request.strict === true,
+                selectedSessionIds: sourceSessionIds, model: request.model, signal: task.controller.signal
               })
+              const sanitized = sanitizeKnowledgeGraphSources(value, summarizedSources, request.strict === true)
+              const graph = validateKnowledgeGraph(sanitized.value, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
+              sourceWarnings.skippedRefs += sanitized.skippedRefs
+              sourceWarnings.skippedItems += sanitized.skippedItems
+              completedGraphBatches += 1
+              this.recordTimeline(task, 'graph-batch-complete', `知识图谱第 ${batchIndex + 1}/${graphBatches.length} 批完成：保留 ${graph.entities.length} 个实体、${graph.relations.length} 条关系。`, { batch: batchIndex + 1, totalBatches: graphBatches.length })
+              this.update(task, 'building-knowledge-graph', { progress: { percent: 86 + Math.floor(4 * completedGraphBatches / graphBatches.length), current: completedGraphBatches, total: graphBatches.length, label: `知识图谱批次 ${completedGraphBatches}/${graphBatches.length}` } })
+              return { graph, rawEntities: Array.isArray(value?.entities) ? value.entities.length : 0, rawRelations: Array.isArray(value?.relations) ? value.relations.length : 0, error: null }
+            } catch (error) {
+              this.assertNotCancelled(task)
+              graphError = error
+              logMessage(this.logger, 'warn', 'knowledge graph batch invalid id=%s batch=%d attempt=%d error=%s', logId(task.id), batchIndex + 1, attempt + 1, errorMessage(error))
+              if (attempt < MAX_MODEL_RETRIES) {
+                graphRetryCount += 1
+                this.recordTimeline(task, 'retry', `知识图谱第 ${batchIndex + 1}/${graphBatches.length} 批输出无效（${shortText(errorMessage(graphError), 160)}），正在降低本批输出预算并重试 ${attempt + 1}/${MAX_MODEL_RETRIES}。`)
+              }
             }
           }
-        }
-        if (graphError) {
-          this.recordTimeline(task, 'view-failed', `知识图谱连续重试 ${MAX_MODEL_RETRIES} 次后仍失败，已跳过该视图。`)
+          completedGraphBatches += 1
+          this.recordTimeline(task, 'graph-batch-skipped', `知识图谱第 ${batchIndex + 1}/${graphBatches.length} 批连续失败，已跳过本批。`)
+          return { graph: null, rawEntities: 0, rawRelations: 0, error: graphError }
+        })
+        const successfulGraphBatches = graphBatchResults.filter((result) => result.graph)
+        if (successfulGraphBatches.length) {
+          const mergedGraph = mergeKnowledgeGraphs(successfulGraphBatches.map((result) => result.graph), graphBudget)
+          knowledgeGraph = validateKnowledgeGraph(mergedGraph, { selectedSessionIds: sourceSessionIds, strict: request.strict === true })
+          const rawEntities = successfulGraphBatches.reduce((total, result) => total + result.rawEntities, 0)
+          const rawRelations = successfulGraphBatches.reduce((total, result) => total + result.rawRelations, 0)
+          const retrySummary = graphRetryCount ? `；期间发生 ${graphRetryCount} 次批次重试${successfulGraphBatches.length === graphBatches.length ? '，已全部恢复' : ''}` : ''
+          this.recordTimeline(task, 'graph-coverage', `知识图谱 ${successfulGraphBatches.length}/${graphBatches.length} 批成功，模型共返回 ${rawEntities} 个实体、${rawRelations} 条关系；合并去重后保留 ${knowledgeGraph.entities.length} 个实体、${knowledgeGraph.relations.length} 条关系${retrySummary}。`, { entityLimit: graphBudget.entities, relationLimit: graphBudget.relations })
+          this.recordTimeline(task, 'view-complete', '知识图谱分批生成与合并完成。')
+        } else {
+          const graphError = graphBatchResults.find((result) => result.error)?.error || new Error('所有知识图谱批次均生成失败。')
+          this.recordTimeline(task, 'view-failed', `知识图谱 ${graphBatches.length} 个批次均失败，已跳过该视图。`)
           if (request.outputMode === 'knowledge-graph') throw graphError
         }
       }
@@ -798,13 +1026,14 @@ export class KnowledgeGenerationOrchestrator {
         generationTimeline: task.timeline,
         prompt: request.prompt,
         strict: request.strict,
+        sourceMode: request.sourceMode || 'conversation',
         outputMode: request.outputMode,
         model: request.model,
         mindMap,
         knowledgeGraph
       })
       task.revision = saved.revision
-      task.result = { revision: saved.revision, manifest: saved.manifest, mindMap, knowledgeGraph, sourceSessions: saved.manifest.sourceSessions, failedSources, sourceWarnings }
+      task.result = { revision: saved.revision, manifest: saved.manifest, mindMap: saved.mindMap, knowledgeGraph: saved.knowledgeGraph, sourceSessions: saved.manifest.sourceSessions, failedSources, sourceWarnings }
       this.recordTimeline(task, 'complete', '知识视图已保存，生成流程完成。')
       logMessage(this.logger, 'info', 'generation completed id=%s revision=%d elapsedMs=%d', logId(task.id), saved.revision, this.now() - task.createdAt)
       this.update(task, 'completed', {
@@ -828,13 +1057,15 @@ export class KnowledgeGenerationOrchestrator {
 
   async runModel(input) {
     const parseModelOutput = (value, source, diagnostics = {}) => {
+      const output = loggableModelOutput(value)
+      logMessage(this.logger, 'info', 'agent output content kind=%s source=%s length=%d truncated=%s content=%s', input.kind, source, output.text.length, output.truncated, output.loggedText)
       try {
         const result = parseStructuredOutput(value, input.kind)
         logMessage(this.logger, 'info', 'agent output parsed kind=%s source=%s value=%s result=%s', input.kind, source, diagnosticSummary(value), diagnosticSummary(result))
         return result
       } catch (error) {
         const surfacedError = diagnostics.agentLimit || error
-        logMessage(this.logger, 'error', 'agent output parse failed kind=%s source=%s value=%s diagnostics=%s error=%s', input.kind, source, diagnosticSummary(value), JSON.stringify(diagnostics), errorMessage(surfacedError))
+        logMessage(this.logger, 'error', 'agent output parse failed kind=%s source=%s value=%s parseDiagnostics=%s runtimeDiagnostics=%s error=%s', input.kind, source, diagnosticSummary(value), JSON.stringify(jsonParseDiagnostics(value, input.kind)), JSON.stringify(diagnostics), errorMessage(surfacedError))
         throw surfacedError
       }
     }
