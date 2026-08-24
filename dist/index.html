@@ -17,7 +17,7 @@
         </button>
         <span class="titlebar-caption">DeepSeek Harness</span>
         <div class="titlebar-tools" aria-label="DSH 导航">
-          <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false">插件市场</button>
+          <button id="titlebar-market" class="titlebar-market" type="button" title="打开插件市场" aria-label="打开插件市场" aria-pressed="false"><span>插件市场</span><span id="market-update-badge" class="market-update-badge" hidden aria-label="有插件新版本"></span></button>
           <button id="titlebar-mcp" class="titlebar-market" type="button" title="打开 MCP 管理" aria-label="打开 MCP 管理" aria-pressed="false">MCP</button>
           <button id="titlebar-skills" class="titlebar-market" type="button" title="DSH 未启动，无法管理 Skills" aria-label="管理 Skills" disabled>Skills</button>
           <nav id="app-actions" class="app-actions" aria-label="DSH 页面操作">
@@ -248,6 +248,7 @@
             <div class="market-search-row">
               <input id="market-query" class="market-query" type="search" maxlength="120" placeholder="输入插件、主题包名称或关键词，留空列出远程目录" />
               <button id="market-search-button" class="button primary" type="submit">搜索</button>
+              <button id="market-refresh-button" class="button secondary" type="button">刷新扫描</button>
             </div>
             <p class="muted market-search-hint">目录由 GitHub 远程更新，仅展示属于 <code>@p-dsh-market</code> scope 且通过清单协议校验的公开插件和主题包。</p>
           </form>

@@ -5,6 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{Read, Write},
@@ -12,7 +13,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Mutex,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -34,10 +35,13 @@ const MAX_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024;
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MARKET_SCAN_CACHE_SCHEMA_VERSION: u32 = 1;
+const MARKET_SCAN_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const MAX_MARKET_SCAN_CACHE_BYTES: usize = 512 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MARKET_SCAN_CONCURRENCY: usize = 4;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketPlugin {
     pub name: String,
@@ -50,7 +54,7 @@ pub struct MarketPlugin {
     pub installed_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketTheme {
     pub id: String,
@@ -66,6 +70,8 @@ pub struct MarketSearchResult {
     pub plugins: Vec<MarketPlugin>,
     pub runtime_ready: bool,
     pub package_manager_ready: bool,
+    pub cached: bool,
+    pub scanned_at: Option<u64>,
     pub message: String,
 }
 
@@ -160,6 +166,24 @@ struct LoadedMarketCatalog {
     source: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketUpdateNotice {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketScanCache {
+    schema_version: u32,
+    scanned_at: u64,
+    runtime_ready: bool,
+    package_manager_ready: bool,
+    plugins: Vec<MarketPlugin>,
+    pending_updates: Vec<MarketUpdateNotice>,
+}
+
 #[derive(Debug, Clone)]
 struct PnpmTool {
     executable: PathBuf,
@@ -182,11 +206,15 @@ struct CommandResult {
     log: String,
 }
 
+#[derive(Clone)]
 pub struct MarketManager {
     tools_dir: PathBuf,
     logs_dir: PathBuf,
     catalog_cache: PathBuf,
-    pnpm_lock: Mutex<()>,
+    scan_cache: PathBuf,
+    pnpm_lock: Arc<Mutex<()>>,
+    cache_lock: Arc<Mutex<()>>,
+    scan_lock: Arc<Mutex<()>>,
 }
 
 impl MarketManager {
@@ -195,7 +223,10 @@ impl MarketManager {
             tools_dir: base_dir.join("tools"),
             logs_dir: base_dir.join("logs"),
             catalog_cache: base_dir.join("market-catalog-v1.json"),
-            pnpm_lock: Mutex::new(()),
+            scan_cache: base_dir.join("market-scan-v1.json"),
+            pnpm_lock: Arc::new(Mutex::new(())),
+            cache_lock: Arc::new(Mutex::new(())),
+            scan_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -213,6 +244,66 @@ impl MarketManager {
         {
             let _ = file.write_all(line.as_bytes());
         }
+    }
+
+    fn read_scan_cache(&self) -> Option<MarketScanCache> {
+        let _guard = match self.cache_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.read_scan_cache_unlocked()
+    }
+
+    fn read_scan_cache_unlocked(&self) -> Option<MarketScanCache> {
+        let raw = match fs::read_to_string(&self.scan_cache) {
+            Ok(raw) => raw,
+            Err(_) => return None,
+        };
+        if raw.len() > MAX_MARKET_SCAN_CACHE_BYTES {
+            self.debug_log("market scan cache rejected: file too large");
+            return None;
+        }
+        let cache = match serde_json::from_str::<MarketScanCache>(&raw) {
+            Ok(cache) => cache,
+            Err(error) => {
+                self.debug_log(format!("market scan cache rejected: {error}"));
+                return None;
+            }
+        };
+        if cache.schema_version != MARKET_SCAN_CACHE_SCHEMA_VERSION
+            || cache.plugins.len() > MAX_CATALOG_PACKAGES
+        {
+            self.debug_log("market scan cache rejected: unsupported schema or package count");
+            return None;
+        }
+        Some(cache)
+    }
+
+    fn write_scan_cache(&self, cache: &MarketScanCache) -> Result<(), String> {
+        let payload = serde_json::to_vec_pretty(cache)
+            .map_err(|error| format!("序列化市场扫描缓存失败: {error}"))?;
+        if payload.len() > MAX_MARKET_SCAN_CACHE_BYTES {
+            return Err(format!(
+                "市场扫描缓存超过 {MAX_MARKET_SCAN_CACHE_BYTES} 字节限制。"
+            ));
+        }
+        let _guard = match self.cache_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let parent = self
+            .scan_cache
+            .parent()
+            .ok_or_else(|| "市场扫描缓存路径没有父目录。".to_string())?;
+        fs::create_dir_all(parent).map_err(|error| format!("创建市场扫描缓存目录失败: {error}"))?;
+        let temporary = self.scan_cache.with_extension("json.tmp");
+        fs::write(&temporary, payload).map_err(|error| format!("写入市场扫描缓存失败: {error}"))?;
+        if self.scan_cache.exists() {
+            fs::remove_file(&self.scan_cache)
+                .map_err(|error| format!("替换市场扫描缓存失败: {error}"))?;
+        }
+        fs::rename(temporary, &self.scan_cache)
+            .map_err(|error| format!("提交市场扫描缓存失败: {error}"))
     }
 
     fn load_catalog(&self) -> Result<LoadedMarketCatalog, String> {
@@ -279,20 +370,116 @@ impl MarketManager {
         })
     }
 
+    pub fn cache_status(&self) -> (Option<u64>, u32) {
+        self.read_scan_cache()
+            .map(|cache| {
+                (
+                    Some(cache.scanned_at),
+                    cache.pending_updates.len().min(u32::MAX as usize) as u32,
+                )
+            })
+            .unwrap_or((None, 0))
+    }
+
+    pub fn should_background_scan(&self) -> bool {
+        let Some(cache) = self.read_scan_cache() else {
+            return false;
+        };
+        let scanned_at = UNIX_EPOCH + Duration::from_millis(cache.scanned_at);
+        SystemTime::now()
+            .duration_since(scanned_at)
+            .is_ok_and(|age| age >= MARKET_SCAN_CACHE_TTL)
+    }
+
+    pub fn cached_search(&self, query: &str) -> Result<Option<MarketSearchResult>, String> {
+        let query = normalize_query(query)?;
+        let Some(cache) = self.read_scan_cache() else {
+            return Ok(None);
+        };
+        let plugins = cache
+            .plugins
+            .into_iter()
+            .filter(|plugin| market_plugin_matches_query(plugin, &query))
+            .collect::<Vec<_>>();
+        Ok(Some(MarketSearchResult {
+            query,
+            plugins,
+            runtime_ready: cache.runtime_ready,
+            package_manager_ready: cache.package_manager_ready,
+            cached: true,
+            scanned_at: Some(cache.scanned_at),
+            message: "已加载本地缓存，可点击“刷新扫描”获取最新版本。".to_string(),
+        }))
+    }
+
+    pub fn acknowledge_updates(&self) -> Result<(), String> {
+        let Some(mut cache) = self.read_scan_cache() else {
+            return Ok(());
+        };
+        if cache.pending_updates.is_empty() {
+            return Ok(());
+        }
+        cache.pending_updates.clear();
+        self.write_scan_cache(&cache)
+    }
+
+    pub fn update_cached_install_state(
+        &self,
+        name: &str,
+        installed: bool,
+        installed_version: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(mut cache) = self.read_scan_cache() else {
+            return Ok(());
+        };
+        if let Some(plugin) = cache.plugins.iter_mut().find(|plugin| plugin.name == name) {
+            plugin.installed = installed;
+            plugin.installed_version = installed_version.map(str::to_string);
+        }
+        self.write_scan_cache(&cache)
+    }
+
     pub async fn search(
         &self,
         runtime: &RuntimeManager,
         state: &PersistedState,
         dsh_home: &Path,
         query: &str,
+        force_refresh: bool,
     ) -> Result<MarketSearchResult, String> {
         let query = normalize_query(query)?;
+        let cached_fallback = if force_refresh {
+            self.cached_search(&query)?
+        } else {
+            None
+        };
+        let fallback_result = |message: String, readonly: bool| {
+            cached_fallback.clone().map(|mut cached| {
+                cached.message = format!("{message} 当前继续使用本地缓存。");
+                if readonly {
+                    cached.runtime_ready = false;
+                    cached.package_manager_ready = false;
+                }
+                cached
+            })
+        };
+        if !force_refresh {
+            if let Some(cached) = self.cached_search(&query)? {
+                self.debug_log(format!(
+                    "market cache hit query={query:?} plugins={} scanned_at={:?}",
+                    cached.plugins.len(),
+                    cached.scanned_at
+                ));
+                return Ok(cached);
+            }
+        }
+
         let managed_path = runtime
             .runtime_path(&state.pinned)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| "<非法版本路径>".to_string());
         self.debug_log(format!(
-            "search start query={query:?} source={} pinned={} managed_path={} managed_ready={} dsh_home={}",
+            "search start query={query:?} force_refresh={force_refresh} source={} pinned={} managed_path={} managed_ready={} dsh_home={}",
             state.runtime_source,
             state.pinned,
             managed_path,
@@ -311,15 +498,63 @@ impl MarketManager {
             }
             Err(message) => {
                 self.debug_log(format!("runtime unavailable: {message}"));
+                if let Some(cached) = fallback_result(format!("刷新扫描失败：{message}"), true)
+                {
+                    return Ok(cached);
+                }
                 return Ok(MarketSearchResult {
                     query,
                     plugins: Vec::new(),
                     runtime_ready: false,
                     package_manager_ready: false,
+                    cached: false,
+                    scanned_at: self.cache_status().0,
                     message,
                 });
             }
         };
+
+        let manager = self.clone();
+        let runtime = runtime.clone();
+        let dsh_home = dsh_home.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager.scan_sync(&runtime, &dsh_home, &query, selected)
+        })
+        .await
+        .map_err(|error| format!("插件市场扫描任务失败: {error}"))
+        .and_then(|result| match result {
+            Ok(value) if !value.runtime_ready || !value.package_manager_ready => {
+                if let Some(cached) = fallback_result(value.message.clone(), true) {
+                    Ok(Ok(cached))
+                } else {
+                    Ok(Ok(value))
+                }
+            }
+            Ok(value) => Ok(Ok(value)),
+            Err(error) => {
+                if let Some(cached) = fallback_result(format!("刷新扫描失败：{error}"), false)
+                {
+                    Ok(Ok(cached))
+                } else {
+                    Ok(Err(error))
+                }
+            }
+        })?
+    }
+
+    fn scan_sync(
+        &self,
+        runtime: &RuntimeManager,
+        dsh_home: &Path,
+        query: &str,
+        selected: RuntimeCommand,
+    ) -> Result<MarketSearchResult, String> {
+        let _scan_guard = match self.scan_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous_cache = self.read_scan_cache();
+        let query = query.to_string();
         let pnpm = match self.prepare_pnpm(runtime) {
             Ok(pnpm) => {
                 self.debug_log(format!(
@@ -336,6 +571,8 @@ impl MarketManager {
                     plugins: Vec::new(),
                     runtime_ready: true,
                     package_manager_ready: false,
+                    cached: false,
+                    scanned_at: self.cache_status().0,
                     message: format!("私有 pnpm 准备失败：{error}"),
                 });
             }
@@ -388,10 +625,9 @@ impl MarketManager {
             });
         for result in inspected {
             match result? {
-                Some(plugin) if market_plugin_matches_query(&plugin, &query) => {
+                Some(plugin) => {
                     plugins.insert(plugin.name.clone(), plugin);
                 }
-                Some(_) => {}
                 None => rejected += 1,
             }
         }
@@ -424,13 +660,32 @@ impl MarketManager {
             }
         }
 
+        let all_plugins = plugins.into_values().collect::<Vec<_>>();
+        let scanned_at = unix_timestamp_millis();
+        let pending_updates = merge_pending_updates(previous_cache.as_ref(), &all_plugins);
+        let cache = MarketScanCache {
+            schema_version: MARKET_SCAN_CACHE_SCHEMA_VERSION,
+            scanned_at,
+            runtime_ready: true,
+            package_manager_ready: true,
+            plugins: all_plugins.clone(),
+            pending_updates,
+        };
+        if let Err(error) = self.write_scan_cache(&cache) {
+            self.debug_log(format!("market scan cache write failed: {error}"));
+        }
+
+        let visible_plugins = all_plugins
+            .into_iter()
+            .filter(|plugin| market_plugin_matches_query(plugin, &query))
+            .collect::<Vec<_>>();
         let mut messages = Vec::new();
         if catalog_source == "cache" {
             messages.push("远程市场目录暂不可用，当前使用本地缓存。".to_string());
         } else if catalog_source == "embedded" {
             messages.push("远程市场目录暂不可用，当前使用内置目录。".to_string());
         }
-        if plugins.is_empty() {
+        if visible_plugins.is_empty() {
             if rejected > 0 {
                 messages.push(format!(
                     "没有找到符合市场协议的插件，已过滤 {rejected} 个候选包。"
@@ -444,15 +699,17 @@ impl MarketManager {
         let message = messages.join(" ");
         self.debug_log(format!(
             "search complete query={query:?} accepted={} rejected_manifest_or_view={} out_of_scope={} message={message:?}",
-            plugins.len(),
+            visible_plugins.len(),
             rejected,
             out_of_scope
         ));
         Ok(MarketSearchResult {
             query,
-            plugins: plugins.into_values().collect(),
+            plugins: visible_plugins,
             runtime_ready: true,
             package_manager_ready: true,
+            cached: false,
+            scanned_at: Some(scanned_at),
             message,
         })
     }
@@ -1165,6 +1422,80 @@ fn merge_market_catalog_packages(
         ));
     }
     Ok(packages.into_iter().collect())
+}
+
+fn merge_pending_updates(
+    previous: Option<&MarketScanCache>,
+    current_plugins: &[MarketPlugin],
+) -> Vec<MarketUpdateNotice> {
+    let Some(previous) = previous else {
+        // The first successful scan establishes the baseline. Newly discovered
+        // packages are intentionally silent until a later scan changes their version.
+        return Vec::new();
+    };
+    let old_by_name = previous
+        .plugins
+        .iter()
+        .map(|plugin| (plugin.name.as_str(), plugin))
+        .collect::<BTreeMap<_, _>>();
+    let pending_by_name = previous
+        .pending_updates
+        .iter()
+        .map(|notice| (notice.name.as_str(), notice))
+        .collect::<BTreeMap<_, _>>();
+    let mut notices = Vec::new();
+
+    for plugin in current_plugins {
+        let Some(old) = old_by_name.get(plugin.name.as_str()) else {
+            continue;
+        };
+        let version_changed =
+            compare_market_versions(&plugin.version, &old.version) == CmpOrdering::Greater;
+        if version_changed {
+            notices.push(MarketUpdateNotice {
+                name: plugin.name.clone(),
+                version: plugin.version.clone(),
+            });
+        } else if let Some(previous_notice) = pending_by_name.get(plugin.name.as_str()) {
+            if previous_notice.version == plugin.version {
+                notices.push((**previous_notice).clone());
+            }
+        }
+    }
+    notices.sort_by(|left, right| left.name.cmp(&right.name));
+    notices
+}
+
+fn compare_market_versions(left: &str, right: &str) -> CmpOrdering {
+    let parse = |value: &str| {
+        let value = value.trim_start_matches('v');
+        let (core, prerelease) = value
+            .split_once('-')
+            .map(|(core, prerelease)| (core, Some(prerelease.to_string())))
+            .unwrap_or((value, None));
+        let numbers = core
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or_default())
+            .collect::<Vec<_>>();
+        (numbers, prerelease)
+    };
+    let (left_numbers, left_prerelease) = parse(left);
+    let (right_numbers, right_prerelease) = parse(right);
+    left_numbers
+        .cmp(&right_numbers)
+        .then_with(|| match (left_prerelease, right_prerelease) {
+            (None, None) => CmpOrdering::Equal,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (Some(_), None) => CmpOrdering::Less,
+            (Some(left), Some(right)) => left.cmp(&right),
+        })
+}
+
+fn unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 fn market_plugin_matches_query(plugin: &MarketPlugin, query: &str) -> bool {
@@ -2196,6 +2527,107 @@ mod tests {
             command: PathBuf::from("npx.cmd"),
         });
         assert_eq!(local.prefix, vec!["--no-install", "@deepseek-ai/dsh"]);
+    }
+
+    fn cached_plugin(name: &str, version: &str) -> MarketPlugin {
+        MarketPlugin {
+            name: name.to_string(),
+            display_name: name.to_string(),
+            version: version.to_string(),
+            description: String::new(),
+            capabilities: vec!["client".to_string()],
+            theme: None,
+            installed: false,
+            installed_version: None,
+        }
+    }
+
+    #[test]
+    fn version_notifications_ignore_new_packages_and_keep_unseen_updates() {
+        let previous = MarketScanCache {
+            schema_version: MARKET_SCAN_CACHE_SCHEMA_VERSION,
+            scanned_at: unix_timestamp_millis(),
+            runtime_ready: true,
+            package_manager_ready: true,
+            plugins: vec![
+                cached_plugin("@p-dsh-market/existing", "1.0.0"),
+                cached_plugin("@p-dsh-market/unchanged", "1.0.0"),
+            ],
+            pending_updates: vec![MarketUpdateNotice {
+                name: "@p-dsh-market/unchanged".to_string(),
+                version: "1.0.0".to_string(),
+            }],
+        };
+        let current = vec![
+            cached_plugin("@p-dsh-market/existing", "1.1.0"),
+            cached_plugin("@p-dsh-market/unchanged", "1.0.0"),
+            cached_plugin("@p-dsh-market/new", "1.0.0"),
+        ];
+        let notices = merge_pending_updates(Some(&previous), &current);
+        assert_eq!(
+            notices
+                .iter()
+                .map(|notice| (notice.name.as_str(), notice.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("@p-dsh-market/existing", "1.1.0"),
+                ("@p-dsh-market/unchanged", "1.0.0"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_cache_is_persistent_and_install_state_updates_without_rescan() {
+        let root = env::temp_dir().join(format!(
+            "dsh-market-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        let manager = MarketManager::new(root.join("desktop-data"));
+        let cache = MarketScanCache {
+            schema_version: MARKET_SCAN_CACHE_SCHEMA_VERSION,
+            scanned_at: unix_timestamp_millis(),
+            runtime_ready: true,
+            package_manager_ready: true,
+            plugins: vec![cached_plugin("@p-dsh-market/example", "1.2.3")],
+            pending_updates: vec![MarketUpdateNotice {
+                name: "@p-dsh-market/example".to_string(),
+                version: "1.2.3".to_string(),
+            }],
+        };
+        manager
+            .write_scan_cache(&cache)
+            .expect("scan cache should be written");
+
+        let cached = manager
+            .cached_search("")
+            .expect("cache should be readable")
+            .expect("cache should exist");
+        assert!(cached.cached);
+        assert_eq!(cached.plugins[0].version, "1.2.3");
+
+        manager
+            .update_cached_install_state("@p-dsh-market/example", true, Some("1.2.3"))
+            .expect("install state should update the cache");
+        let updated = manager
+            .cached_search("example")
+            .expect("updated cache should be readable")
+            .expect("updated cache should exist");
+        assert!(updated.plugins[0].installed);
+        assert_eq!(
+            updated.plugins[0].installed_version.as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(manager.cache_status().1, 1);
+
+        manager
+            .acknowledge_updates()
+            .expect("acknowledgement should clear pending notices");
+        assert_eq!(manager.cache_status().1, 0);
+        fs::remove_dir_all(root).expect("test cache should be removed");
     }
 
     #[test]

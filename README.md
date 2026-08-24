@@ -12,9 +12,9 @@ code.
 ## Download and install
 
 The current Windows x64 installer is available from the
-[v0.1.7 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.7):
+[v0.1.8 GitHub release](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/tag/v0.1.8):
 
-[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.7/DSH.Desktop_0.1.7_x64-setup.exe)
+[Download DSH Desktop for Windows](https://github.com/Antony-Jia/deepseek-harness-desktop/releases/download/v0.1.8/DSH.Desktop_0.1.8_x64-setup.exe)
 
 The installer includes a checksum-verified Node.js v24.19.0 x64 runtime, so
 the target machine does not need Node.js, npm, or npx installed. The first
@@ -35,6 +35,10 @@ its embedded WebView; no manual browser URL copy is required.
   the system npm installation.
 - Provides a validated marketplace for installing and uninstalling Web-profile
   plugins and theme packs, with installed/enabled/protocol compatibility gates.
+- Caches validated marketplace scans, shows pending plugin updates in the title
+  bar, and provides an explicit refresh action when the remote catalog changes.
+- Adds `@p-dsh-market/conversation-knowledge-map` for turning selected
+  same-workspace conversations into a mind map or a read-only knowledge graph.
 - Adds the DeepSeek Vision Bridge plugin for non-vision models, with a `/vision`
   command and a guarded `deepseek_vision_analyze` tool for persisted session images.
 - Keeps desktop plugin actions responsive with an overflow menu and exposes the
@@ -93,6 +97,17 @@ paths or remote URLs. Native vision models bypass the bridge and keep the tool
 hidden. The command records the original question and images as a normal user
 message, while bridge guidance stays in the system prompt so the conversation
 shows the expected user bubble and image gallery.
+
+### Conversation Knowledge Map
+
+The marketplace includes `@p-dsh-market/conversation-knowledge-map`. Select
+multiple historical conversations from the same workspace to generate a staged
+mind map, a read-only source-linked knowledge graph, or both. Generation requires
+an explicit in-app confirmation, supports provider/model and extraction-scope
+selection, and persists graph data plus source metadata under
+`.g-dsh-market-knowledge/` without copying full chat transcripts. The view also
+provides a progress timeline, failure diagnostics, batch generation, zoom,
+spacing, and one-hop filtering for graph exploration.
 
 ## Screenshots
 
@@ -174,7 +189,7 @@ npm run build
 The Windows NSIS installer is generated at:
 
 ```text
-src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.7_x64-setup.exe
+src-tauri/target/release/bundle/nsis/DSH Desktop_0.1.8_x64-setup.exe
 ```
 
 `src-tauri/target/`, `dist/bundle/`, portable Node binaries, and installer

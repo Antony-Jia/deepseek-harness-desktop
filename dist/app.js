@@ -28,6 +28,7 @@
   var marketOperation = null
   var marketCategory = 'all'
   var marketSelectedPlugin = null
+  var marketCacheSeenAt = 0
   var mcpResult = null
   var mcpBusy = false
   var mcpError = ''
@@ -59,6 +60,17 @@
   function el(id) { return document.getElementById(id) }
   function setText(id, value) { if (el(id)) el(id).textContent = value == null ? '' : String(value) }
   function setHidden(id, hidden) { if (el(id)) el(id).hidden = hidden }
+  function renderMarketUpdateBadge(snapshot) {
+    var button = el('titlebar-market')
+    var badge = el('market-update-badge')
+    if (!button || !badge) return
+    var count = Math.max(0, Number(snapshot && snapshot.marketUpdateCount || 0))
+    badge.hidden = count < 1
+    badge.textContent = count > 99 ? '99+' : String(count)
+    var label = count > 0 ? '打开插件市场（' + count + ' 个插件有新版本）' : '打开插件市场'
+    button.title = label
+    button.setAttribute('aria-label', label)
+  }
   function setAppLoading(message, detail) {
     appLoadingMessage = message ? String(message) : ''
     appLoadingDetail = detail ? String(detail) : ''
@@ -325,6 +337,7 @@
       marketButton.classList.toggle('active', showingMarket)
       marketButton.setAttribute('aria-pressed', showingMarket ? 'true' : 'false')
     }
+    renderMarketUpdateBadge(state)
     var mcpButton = el('titlebar-mcp')
     if (mcpButton) {
       mcpButton.classList.toggle('active', showingMcp)
@@ -358,7 +371,23 @@
   function openMarket() {
     viewMode = 'market'
     updateView()
-    if (!marketBusy) marketSearch(marketResult ? marketQuery : '')
+    invokeOrThrow('acknowledge_market_updates').catch(function (error) {
+      if (window.console && console.warn) console.warn('[dsh-desktop] market update acknowledgement failed:', messageOf(error))
+    })
+    if (!marketBusy && !marketResult) {
+      marketSearch(marketQuery, false).then(function (result) {
+        if (result && result.cached) requestMarketBackgroundScan()
+      })
+    } else if (!marketBusy) {
+      requestMarketBackgroundScan()
+    }
+  }
+
+  function requestMarketBackgroundScan() {
+    return invokeOrThrow('start_market_background_scan').catch(function (error) {
+      if (window.console && console.warn) console.warn('[dsh-desktop] market background scan unavailable:', messageOf(error))
+      return false
+    })
   }
   function openMcp() {
     viewMode = 'mcp'
@@ -641,6 +670,12 @@
       searchButton.disabled = interactionBusy || !canSearch
       searchButton.textContent = marketBusy ? '处理中…' : '搜索'
     }
+    var refreshButton = el('market-refresh-button')
+    if (refreshButton) {
+      refreshButton.disabled = interactionBusy
+      refreshButton.textContent = marketBusy ? '刷新中…' : '刷新扫描'
+      refreshButton.title = '主动扫描远程市场并更新本地缓存'
+    }
     if (query) query.disabled = interactionBusy || !canSearch
     var message = marketError || (marketResult && marketResult.message) || ''
     if (!message && marketResult) message = marketResult.plugins.length + ' 个插件通过协议校验。'
@@ -906,17 +941,17 @@
     document.body.classList.remove('modal-open')
     resolver(confirmed === true)
   }
-  function marketSearch(queryValue) {
+  function marketSearch(queryValue, forceRefresh) {
     if (marketBusy || marketConfirming) return Promise.resolve()
     closeMarketDetail()
     marketQuery = String(queryValue == null ? '' : queryValue).trim()
     marketError = ''
     marketBusy = true
-    setAppLoading('正在向 npm 确认插件信息…', '正在读取市场目录、校验清单并同步 web profile 状态，请稍候。')
     renderMarket()
-    return invokeOrThrow('search_market_plugins', { query: marketQuery }).then(function (result) {
+    return invokeOrThrow('search_market_plugins', { query: marketQuery, forceRefresh: forceRefresh === true }).then(function (result) {
       marketResult = result || null
       marketQuery = result && result.query != null ? String(result.query) : marketQuery
+      if (result && result.scannedAt) marketCacheSeenAt = Number(result.scannedAt)
       marketError = ''
       renderMarket()
       return result
@@ -927,7 +962,6 @@
     }).finally(function () {
       marketBusy = false
       renderMarket()
-      clearAppLoading()
     })
   }
   function runMarketOperation(plugin, operation) {
@@ -1438,7 +1472,12 @@
   }
   function render(next) {
     var wasRunning = !!(state && state.webUrl)
+    var previousMarketCacheAt = marketCacheSeenAt
     state = next || state || {}
+    var nextMarketCacheAt = Number(state.marketCacheUpdatedAt || 0)
+    var marketCacheChanged = nextMarketCacheAt > 0 && nextMarketCacheAt !== previousMarketCacheAt
+    if (nextMarketCacheAt > 0) marketCacheSeenAt = nextMarketCacheAt
+    renderMarketUpdateBadge(state)
     if (state.themePreviewUntil) themePreviewUntil = Number(state.themePreviewUntil)
     else if (themePreviewUntil && themePreviewUntil <= Date.now()) { themePreviewUntil = 0; themePreviewId = '' }
     if (!!state.webUrl && !wasRunning && pendingRestartNames.length) {
@@ -1449,6 +1488,11 @@
     updateView()
     renderMarket()
     renderMcp()
+    if (marketCacheChanged && marketResult && viewMode === 'market' && !marketBusy) {
+      window.setTimeout(function () {
+        if (viewMode === 'market' && !marketBusy) marketSearch(marketQuery, false)
+      }, 0)
+    }
     if (viewMode === 'mcp') refreshMcpRuntimeStatus(false)
     var meta = statusMeta(state.status)
     setText('status-title', state.message || '等待操作')
@@ -1719,7 +1763,10 @@
   })
   el('market-search-form').addEventListener('submit', function (event) {
     event.preventDefault()
-    marketSearch(el('market-query').value)
+    marketSearch(el('market-query').value, false)
+  })
+  el('market-refresh-button').addEventListener('click', function () {
+    marketSearch(el('market-query').value, true)
   })
   el('market-confirm-cancel').addEventListener('click', function () { resolveMarketConfirmation(false) })
   el('market-confirm-accept').addEventListener('click', function () { resolveMarketConfirmation(true) })

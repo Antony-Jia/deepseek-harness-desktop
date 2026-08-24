@@ -172,6 +172,9 @@ button.titlebar-brand {
 .titlebar-tool:disabled { cursor: default; opacity: .42; }
 .titlebar-tool:focus-visible { outline: 0; box-shadow: 0 0 0 2px rgba(166, 178, 255, .55); }
 .titlebar-market {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-left: 0;
   min-height: 28px;
   padding: 0 11px;
@@ -186,6 +189,19 @@ button.titlebar-brand {
 }
 .titlebar-market:hover, .titlebar-market.active { color: #f5f7ff; background: rgba(139, 156, 246, .18); border-color: rgba(165, 180, 252, .18); }
 .titlebar-market:focus-visible { outline: 0; box-shadow: 0 0 0 2px rgba(166, 178, 255, .55); }
+.market-update-badge {
+  display: inline-grid;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  background: #d55370;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+}
 .app-actions {
   display: flex;
   flex: 0 0 auto;
@@ -403,6 +419,7 @@ button.titlebar-brand {
 .market-search { display: grid; gap: 10px; }
 .market-search-label { color: var(--accent-strong); font-size: 13px; font-weight: 700; }
 .market-search-row { display: flex; gap: 10px; }
+.market-search-row .button { flex: 0 0 auto; }
 .market-query {
   flex: 1;
   min-width: 0;

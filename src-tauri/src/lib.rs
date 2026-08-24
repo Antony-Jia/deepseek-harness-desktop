@@ -58,6 +58,7 @@ pub struct DesktopContext {
     logs: Arc<Mutex<Vec<String>>>,
     start_lock: Arc<Mutex<()>>,
     market_task_lock: Arc<tauri::async_runtime::Mutex<()>>,
+    market_background_scan: Arc<AtomicBool>,
     theme_preview: Arc<Mutex<Option<ThemePreview>>>,
     allow_close: Arc<AtomicBool>,
     window_save_revision: Arc<AtomicU64>,
@@ -99,6 +100,7 @@ impl DesktopContext {
             logs: Arc::new(Mutex::new(Vec::new())),
             start_lock: Arc::new(Mutex::new(())),
             market_task_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
+            market_background_scan: Arc::new(AtomicBool::new(false)),
             theme_preview: Arc::new(Mutex::new(None)),
             allow_close: Arc::new(AtomicBool::new(false)),
             window_save_revision: Arc::new(AtomicU64::new(0)),
@@ -141,6 +143,8 @@ pub fn run() {
             quit_app,
             stop_dsh,
             search_market_plugins,
+            start_market_background_scan,
+            acknowledge_market_updates,
             install_market_plugin,
             uninstall_market_plugin,
             list_mcp_servers,
@@ -188,6 +192,7 @@ pub fn run() {
                 *control = Some(server);
             }
             refresh_common(&context_for_setup);
+            spawn_market_background_scan(app.handle().clone(), context_for_setup.clone());
             spawn_start(app.handle().clone(), context_for_setup.clone(), None);
             Ok(())
         })
@@ -671,6 +676,7 @@ fn stop_dsh(app: AppHandle, context: tauri::State<'_, DesktopContext>) -> Result
 async fn search_market_plugins(
     context: tauri::State<'_, DesktopContext>,
     query: String,
+    force_refresh: Option<bool>,
 ) -> Result<MarketSearchResult, String> {
     let _guard = match context.market_task_lock.try_lock() {
         Ok(guard) => guard,
@@ -679,23 +685,48 @@ async fn search_market_plugins(
     let state = context.store.load().map_err(io_error)?;
     let result = context
         .market
-        .search(&context.manager, &state, &context.dsh_home, &query)
+        .search(
+            &context.manager,
+            &state,
+            &context.dsh_home,
+            &query,
+            force_refresh.unwrap_or(false),
+        )
         .await;
     match &result {
         Ok(value) => add_log(
             &context,
             format!(
-                "插件市场搜索 query={:?} runtimeReady={} packageManagerReady={} plugins={} message={:?}",
+                "插件市场搜索 query={:?} runtimeReady={} packageManagerReady={} plugins={} cached={} message={:?}",
                 value.query,
                 value.runtime_ready,
                 value.package_manager_ready,
                 value.plugins.len(),
+                value.cached,
                 value.message
             ),
         ),
         Err(error) => add_log(&context, format!("插件市场搜索失败：{error}")),
     }
     result
+}
+
+#[tauri::command]
+fn start_market_background_scan(
+    app: AppHandle,
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<bool, String> {
+    Ok(spawn_market_background_scan(app, context.inner().clone()))
+}
+
+#[tauri::command]
+fn acknowledge_market_updates(
+    app: AppHandle,
+    context: tauri::State<'_, DesktopContext>,
+) -> Result<(), String> {
+    context.market.acknowledge_updates()?;
+    emit_status_snapshot(&app, &context);
+    Ok(())
 }
 
 #[tauri::command]
@@ -747,6 +778,12 @@ async fn install_market_plugin(
         } else {
             format!("已安装主题包 {name}@{version}，可在设置中预览。")
         };
+    }
+    if let Err(error) = context
+        .market
+        .update_cached_install_state(&name, true, Some(&version))
+    {
+        add_log(&context, format!("更新插件市场安装缓存失败：{error}"));
     }
     refresh_common(&context);
     Ok(result)
@@ -803,6 +840,12 @@ async fn uninstall_market_plugin(
                 } else {
                     format!("已卸载主题包 {name}，当前主题已回退为默认主题。")
                 };
+            }
+            if let Err(error) = context
+                .market
+                .update_cached_install_state(&name, false, None)
+            {
+                add_log(&context, format!("更新插件市场安装缓存失败：{error}"));
             }
             refresh_common(&context);
             Ok(result)
@@ -1565,6 +1608,56 @@ fn cache_local_runtime(context: &DesktopContext, runtime: Option<LocalRuntime>) 
     }
 }
 
+fn spawn_market_background_scan(app: AppHandle, context: DesktopContext) -> bool {
+    if !context.market.should_background_scan()
+        || context
+            .market_background_scan
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+    {
+        return false;
+    }
+    let task_context = context.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = if let Ok(_guard) = task_context.market_task_lock.try_lock() {
+            let state = task_context.store.load().map_err(io_error);
+            match state {
+                Ok(state) => task_context
+                    .market
+                    .search(
+                        &task_context.manager,
+                        &state,
+                        &task_context.dsh_home,
+                        "",
+                        true,
+                    )
+                    .await
+                    .map(|result| Some(result)),
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(None)
+        };
+        match result {
+            Ok(Some(value)) => add_log(
+                &task_context,
+                format!(
+                    "插件市场后台扫描完成 plugins={} pendingUpdates={}",
+                    value.plugins.len(),
+                    task_context.market.cache_status().1
+                ),
+            ),
+            Ok(None) => {}
+            Err(error) => add_log(&task_context, format!("插件市场后台扫描失败：{error}")),
+        }
+        task_context
+            .market_background_scan
+            .store(false, Ordering::SeqCst);
+        emit_status_snapshot(&app, &task_context);
+    });
+    true
+}
+
 fn local_runtime_summary(runtime: &LocalRuntime) -> LocalRuntimeSummary {
     LocalRuntimeSummary {
         version: runtime.version.clone(),
@@ -1576,6 +1669,7 @@ fn local_runtime_summary(runtime: &LocalRuntime) -> LocalRuntimeSummary {
 fn refresh_common(context: &DesktopContext) {
     let state = context.store.load().unwrap_or_default();
     let preview = current_theme_preview(context);
+    let (market_cache_updated_at, market_update_count) = context.market.cache_status();
     let mut versions = context.manager.list_installed().unwrap_or_default();
     for version in [Some(state.pinned.clone()), state.available.clone()]
         .into_iter()
@@ -1618,10 +1712,22 @@ fn refresh_common(context: &DesktopContext) {
         status.background_intensity = state.background_intensity;
         status.reduce_effects = state.reduce_effects;
         status.theme_preview_until = preview.as_ref().map(|item| item.expires_at);
+        status.market_cache_updated_at = market_cache_updated_at;
+        status.market_update_count = market_update_count;
         status.local_runtime = local_runtime;
         status.versions = versions;
         status.logs = logs;
     }
+}
+
+fn emit_status_snapshot(app: &AppHandle, context: &DesktopContext) {
+    refresh_common(context);
+    let snapshot = context
+        .status
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default();
+    let _ = app.emit("desktop://status", snapshot);
 }
 
 fn current_theme_preview(context: &DesktopContext) -> Option<ThemePreview> {
