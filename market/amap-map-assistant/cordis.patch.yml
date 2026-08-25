@@ -1,0 +1,4 @@
+- insert:
+    - id: p-dsh-market-amap-map-assistant
+      name: '@p-dsh-market/amap-map-assistant'
+      inject: [sessions, skills, tools, webServer]

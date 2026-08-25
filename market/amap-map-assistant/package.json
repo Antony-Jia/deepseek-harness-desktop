@@ -1,0 +1,63 @@
+{
+  "name": "@p-dsh-market/amap-map-assistant",
+  "version": "0.1.2",
+  "description": "DSH 高德地图查询、搜索与路线规划可视化插件",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "amap",
+    "maps"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./protocol": "./lib/protocol.js",
+    "./presentation-schema": "./lib/presentation-schema.js",
+    "./presentation-tool": "./lib/presentation-tool.js",
+    "./session-storage": "./lib/session-storage.js",
+    "./settings-storage": "./lib/settings-storage.js",
+    "./amap-proxy": "./lib/amap-proxy.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "skills/amap-map-assistant/SKILL.md",
+    "skills/amap-map-assistant/references/*.md",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "高德地图",
+      "capabilities": [
+        "skills",
+        "host",
+        "client",
+        "persistent-storage"
+      ]
+    },
+    "desktop": {
+      "permissions": [
+        "network:outbound",
+        "storage:user"
+      ]
+    }
+  }
+}

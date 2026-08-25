@@ -1801,9 +1801,6 @@ fn validate_desktop_manifest(
     let Some(desktop_value) = dsh.get("desktop") else {
         return Ok(None);
     };
-    if !capabilities.iter().any(|item| item == "desktop-shell") {
-        return Err("声明 dsh.desktop 时必须包含 desktop-shell capability。".to_string());
-    }
     if dsh.get("protocolVersion").and_then(Value::as_u64)
         != Some(u64::from(DESKTOP_PROTOCOL_VERSION))
     {
@@ -1854,6 +1851,12 @@ fn validate_desktop_manifest(
     let actions = actions_value
         .as_array()
         .ok_or_else(|| "dsh.desktop.contributes.titlebarActions 必须是数组。".to_string())?;
+    if !actions.is_empty() && !capabilities.iter().any(|item| item == "desktop-shell") {
+        return Err(
+            "声明 dsh.desktop.contributes.titlebarActions 时必须包含 desktop-shell capability。"
+                .to_string(),
+        );
+    }
     if !actions.is_empty() && !permissions.iter().any(|item| item == "shell:titlebar") {
         return Err("标题栏贡献缺少权限 shell:titlebar。".to_string());
     }
@@ -2248,6 +2251,7 @@ mod tests {
             packages,
             vec![
                 "@p-dsh-market/akshare-market-analysis".to_string(),
+                "@p-dsh-market/amap-map-assistant".to_string(),
                 "@p-dsh-market/conversation-knowledge-map".to_string(),
                 "@p-dsh-market/deepseek-vision-bridge".to_string(),
                 "@p-dsh-market/dsh-open-workspace".to_string(),
@@ -2351,6 +2355,20 @@ mod tests {
     }
 
     #[test]
+    fn accepts_amap_manifest_with_permissions_but_no_outer_frame_actions() {
+        let manifest: Value =
+            serde_json::from_str(include_str!("../../market/amap-map-assistant/package.json"))
+                .expect("amap manifest should be valid JSON");
+        let result = validate_market_manifest("@p-dsh-market/amap-map-assistant", &manifest)
+            .expect("permission-only desktop metadata should be accepted");
+        let desktop = result
+            .desktop
+            .expect("desktop permission metadata should be retained");
+        assert!(desktop.actions.is_empty());
+        assert_eq!(result.display_name, "高德地图");
+    }
+
+    #[test]
     fn accepts_deepseek_vision_bridge_market_manifest() {
         let manifest: Value = serde_json::from_str(include_str!(
             "../../market/deepseek-vision-bridge/package.json"
@@ -2387,6 +2405,11 @@ mod tests {
         assert_eq!(desktop.actions.len(), 1);
         assert_eq!(desktop.actions[0].slot, DESKTOP_TITLEBAR_WORKSPACE_ACTIONS);
 
+        manifest["dsh"]["market"]["capabilities"] = serde_json::json!(["skills", "host", "client"]);
+        assert!(validate_market_manifest("@p-dsh-market/workspace", &manifest).is_err());
+
+        manifest["dsh"]["market"]["capabilities"] =
+            serde_json::json!(["skills", "host", "client", "desktop-shell"]);
         manifest["dsh"]["desktop"]["permissions"] = serde_json::json!(["shell:titlebar"]);
         assert!(validate_market_manifest("@p-dsh-market/workspace", &manifest).is_err());
     }

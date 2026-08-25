@@ -1162,6 +1162,8 @@
       var key = el('mcp-' + id + '-key')
       var autoConnect = el('mcp-' + id + '-auto-connect')
       var save = document.querySelector('[data-mcp-save="' + id + '"]')
+      var secretInputs = document.querySelectorAll('[data-mcp-secret-server="' + id + '"]')
+      var secretStates = Array.isArray(server.secretStates) ? server.secretStates : []
       if (enabled && server) {
         enabled.checked = Object.prototype.hasOwnProperty.call(mcpDraftEnabled, id)
           ? !!mcpDraftEnabled[id]
@@ -1179,14 +1181,23 @@
         key.disabled = mcpBusy || desktopActionsBusy
         key.placeholder = server && server.apiKeyConfigured ? '已配置；留空会保留当前 Key' : '填写 API Key 后即可启用'
       }
+      secretInputs.forEach(function (input) {
+        var name = input.getAttribute('data-mcp-secret') || ''
+        var secretState = secretStates.find(function (item) { return item.name === name })
+        input.disabled = mcpBusy || desktopActionsBusy
+        input.placeholder = secretState && secretState.configured
+          ? '已配置；留空会保留当前凭据'
+          : '填写凭据后保存'
+      })
       if (save) save.disabled = mcpBusy || desktopActionsBusy
+      document.querySelectorAll('[data-mcp-clear-server="' + id + '"]').forEach(function (button) { button.disabled = mcpBusy || desktopActionsBusy })
       var status = el('mcp-' + id + '-status')
       if (status) {
         var toolSummary = runtimeServer && Array.isArray(runtimeServer.tools)
           ? runtimeServer.tools.slice(0, 4).map(function (name) { return name.replace('mcp__' + server.serverName + '__', '') }).join('、')
           : ''
         var readiness = mcpReadinessServerById(id)
-        status.textContent = !server
+        var statusText = !server
           ? '正在读取配置…'
           : runtimeServer && runtimeServer.status === 'connected'
             ? runtimeServer.message + (toolSummary ? ' ' + toolSummary + (runtimeServer.toolCount > 4 ? ' 等' : '') : '')
@@ -1195,6 +1206,8 @@
           : server.enabled
             ? ((runtimeServer && runtimeServer.message) || (server.requiresApiKey && !server.apiKeyConfigured ? '缺少 API Key。' : '已启用；重启 DSH 后注册工具。'))
             : (server.requiresApiKey ? (server.apiKeyConfigured ? 'API Key 已保存，服务当前关闭。' : '尚未配置，服务当前关闭。') : '服务当前关闭。')
+        if (id === 'amap') statusText += ' Web JS API Key 与 securityJsCode 请在地图插件的“地图设置”中配置。'
+        status.textContent = statusText
         status.className = 'mcp-server-status ' + (runtimeServer && runtimeServer.status === 'connected' ? 'good' : runtimeServer && runtimeServer.status === 'not_connected' && readiness && readiness.canStart ? 'bad' : server.enabled ? 'warn' : server.requiresApiKey && !server.apiKeyConfigured ? 'warn' : '')
       }
       renderMcpPipeline(server, runtimeServer)
@@ -1253,12 +1266,19 @@
       refreshMcpReadiness(true)
     })
   }
-  function saveMcpServer(id) {
+  function saveMcpServer(id, clearSecret) {
     if (mcpBusy || desktopActionsBusy) return
     var enabled = el('mcp-' + id + '-enabled')
     var key = el('mcp-' + id + '-key')
     var autoConnect = el('mcp-' + id + '-auto-connect')
     var apiKey = key ? key.value.trim() : ''
+    var secrets = []
+    document.querySelectorAll('[data-mcp-secret-server="' + id + '"]').forEach(function (input) {
+      var name = input.getAttribute('data-mcp-secret') || ''
+      var value = input.value.trim()
+      if (name && value) secrets.push({ name: name, value: value })
+    })
+    if (clearSecret) secrets.push({ name: clearSecret, clear: true })
     mcpBusy = true
     mcpError = ''
     setAppLoading('正在保存 MCP 配置', '配置将写入 DSH web profile，API Key 不会显示在界面中。')
@@ -1268,11 +1288,13 @@
       enabled: !!(enabled && enabled.checked),
       autoConnect: autoConnect ? !!autoConnect.checked : null,
       apiKey: apiKey || null,
-      clearApiKey: false
+      clearApiKey: false,
+      secrets: secrets.length ? secrets : null
     }).then(function (result) {
       mcpResult = result || mcpResult
       syncMcpDrafts(mcpResult, true)
       if (key) key.value = ''
+      document.querySelectorAll('[data-mcp-secret-server="' + id + '"]').forEach(function (input) { input.value = '' })
     }).catch(function (error) {
       mcpError = '保存失败：' + messageOf(error)
       syncMcpDrafts(mcpResult, true)
@@ -1746,6 +1768,11 @@
   })
   document.querySelectorAll('[data-mcp-save]').forEach(function (button) {
     button.addEventListener('click', function () { saveMcpServer(button.getAttribute('data-mcp-save')) })
+  })
+  document.querySelectorAll('[data-mcp-clear-secret]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      saveMcpServer(button.getAttribute('data-mcp-clear-server'), button.getAttribute('data-mcp-clear-secret'))
+    })
   })
   document.querySelectorAll('[data-mcp-server] input[id$="-enabled"]').forEach(function (checkbox) {
     checkbox.addEventListener('change', function () {

@@ -409,6 +409,30 @@
             <p id="mcp-chrome-status" class="mcp-server-status">服务当前关闭。</p>
             <div id="mcp-chrome-pipeline" class="mcp-server-pipeline"></div>
           </article>
+
+          <article class="card mcp-server-card" data-mcp-server="amap">
+            <div class="mcp-server-heading">
+              <div class="mcp-server-icon amap">A</div>
+              <div>
+                <p class="eyebrow">默认地图</p>
+                <h2>高德地图</h2>
+                <code>@amap/amap-maps-mcp-server@0.0.8</code>
+              </div>
+              <label class="mcp-switch"><input id="mcp-amap-enabled" type="checkbox" /><span>启用</span></label>
+            </div>
+            <p class="mcp-server-description">通过官方 MCP 提供地理编码、逆地理编码、POI 搜索、天气、距离和驾车/公交/步行/骑行路线规划。Web JS API Key 与 securityJsCode 请在地图插件的“地图设置”中配置。</p>
+            <div class="mcp-secret-grid">
+              <div class="mcp-secret-row">
+                <label class="mcp-key-label" for="mcp-amap-maps-api-key">Web 服务 Key（MCP）</label>
+                <div class="mcp-key-row">
+                  <input id="mcp-amap-maps-api-key" class="market-query" type="password" maxlength="512" autocomplete="off" data-mcp-secret-server="amap" data-mcp-secret="AMAP_MAPS_API_KEY" placeholder="填写新 Key；留空保留已配置的 Key" />
+                  <button class="button secondary" type="button" data-mcp-clear-server="amap" data-mcp-clear-secret="AMAP_MAPS_API_KEY">清除</button>
+                </div>
+              </div>
+            </div>
+            <p id="mcp-amap-status" class="mcp-server-status">服务当前关闭。</p>
+            <div id="mcp-amap-pipeline" class="mcp-server-pipeline"></div>
+          </article>
         </div>
 
         <section class="card mcp-note">

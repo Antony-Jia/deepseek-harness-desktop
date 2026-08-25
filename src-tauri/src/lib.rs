@@ -16,6 +16,7 @@ use market::{
 };
 use mcp::{
     McpConfigResult, McpCustomServerInput, McpManager, McpReadinessResult, McpRuntimeResult,
+    McpSecretPatch,
 };
 use plugin::ensure_profile_plugin;
 use process::DshProcess;
@@ -876,14 +877,25 @@ fn save_mcp_server(
     auto_connect: Option<bool>,
     api_key: Option<String>,
     clear_api_key: bool,
+    secrets: Option<Vec<McpSecretPatch>>,
 ) -> Result<McpConfigResult, String> {
     let running = is_dsh_running(&context);
     let (mcp_command, mcp_command_args) = context.manager.mcp_npx_command();
     let api_key_changed = api_key
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty())
-        || clear_api_key;
-    let mut result = context.mcp.save_server(
+        || clear_api_key
+        || secrets.as_ref().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.clear
+                    || item
+                        .value
+                        .as_deref()
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)
+            })
+        });
+    let mut result = context.mcp.save_server_with_secrets(
         &context.dsh_home,
         &mcp_command,
         &mcp_command_args,
@@ -892,6 +904,7 @@ fn save_mcp_server(
         auto_connect,
         api_key,
         clear_api_key,
+        secrets,
     )?;
     result.restart_required = running;
     result.message = if running {

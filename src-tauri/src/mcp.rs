@@ -12,6 +12,10 @@ const MCP_END: &str = "# END DSH Desktop MCP integration";
 const TAVILY_PACKAGE: &str = "tavily-mcp@0.2.22";
 const FIRECRAWL_PACKAGE: &str = "firecrawl-mcp@3.24.0";
 const CHROME_PACKAGE: &str = "chrome-devtools-mcp@1.7.0";
+const AMAP_PACKAGE: &str = "@amap/amap-maps-mcp-server@0.0.8";
+const AMAP_MAPS_API_KEY: &str = "AMAP_MAPS_API_KEY";
+const AMAP_JS_API_KEY: &str = "AMAP_JS_API_KEY";
+const AMAP_JS_SECURITY_CODE: &str = "AMAP_JS_SECURITY_CODE";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +48,8 @@ struct StoredServer {
     env: BTreeMap<String, String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default)]
+    secrets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -66,6 +72,7 @@ pub struct McpServerSummary {
     pub command: String,
     pub url: String,
     pub secret_names: Vec<String>,
+    pub secret_states: Vec<McpSecretState>,
     pub enabled: bool,
     pub api_key_configured: bool,
     pub requires_api_key: bool,
@@ -73,11 +80,28 @@ pub struct McpServerSummary {
     pub auto_connect: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecretState {
+    pub name: String,
+    pub configured: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSecretInput {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecretPatch {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,6 +205,7 @@ impl McpManager {
         Ok(result(&config, false, "MCP 配置已加载。"))
     }
 
+    #[allow(dead_code)]
     pub fn save_server(
         &self,
         dsh_home: &Path,
@@ -191,6 +216,31 @@ impl McpManager {
         auto_connect: Option<bool>,
         api_key: Option<String>,
         clear_api_key: bool,
+    ) -> Result<McpConfigResult, String> {
+        self.save_server_with_secrets(
+            dsh_home,
+            command,
+            command_args,
+            id,
+            enabled,
+            auto_connect,
+            api_key,
+            clear_api_key,
+            None,
+        )
+    }
+
+    pub fn save_server_with_secrets(
+        &self,
+        dsh_home: &Path,
+        command: &Path,
+        command_args: &[String],
+        id: &str,
+        enabled: bool,
+        auto_connect: Option<bool>,
+        api_key: Option<String>,
+        clear_api_key: bool,
+        secret_patches: Option<Vec<McpSecretPatch>>,
     ) -> Result<McpConfigResult, String> {
         let _guard = self
             .lock
@@ -228,6 +278,12 @@ impl McpManager {
                 }
                 server.api_key = protect_secret(value.as_bytes())?;
             }
+        }
+        if let Some(patches) = secret_patches {
+            if id != "amap" && !patches.is_empty() {
+                return Err("当前 MCP 服务不支持多凭据配置。".to_string());
+            }
+            apply_amap_secret_patches(server, &patches)?;
         }
         if built_in && requires_api_key && enabled && server.api_key.is_empty() {
             return Err("请先填写 API Key，再启用该 MCP 服务。".to_string());
@@ -369,6 +425,11 @@ impl McpManager {
                     definition.desktop_env.to_string(),
                     unprotect_secret(&server.api_key)?,
                 );
+            }
+        }
+        if let Some(server) = config.servers.get("amap").filter(|server| server.enabled) {
+            for (name, value) in &server.secrets {
+                environment.insert(amap_desktop_secret_env(name), unprotect_secret(value)?);
             }
         }
         for (id, server) in config
@@ -682,7 +743,7 @@ struct ServerDefinition {
     args: &'static [&'static str],
 }
 
-fn definitions() -> [ServerDefinition; 3] {
+fn definitions() -> [ServerDefinition; 4] {
     [
         ServerDefinition {
             id: "tavily",
@@ -717,6 +778,17 @@ fn definitions() -> [ServerDefinition; 3] {
             requires_api_key: false,
             args: &["--no-usage-statistics", "--no-performance-crux"],
         },
+        ServerDefinition {
+            id: "amap",
+            display_name: "高德地图",
+            description: "通过官方高德地图 MCP 提供地理编码、POI、天气、距离和路线规划工具。",
+            package: AMAP_PACKAGE,
+            server_name: "amap",
+            server_env: AMAP_MAPS_API_KEY,
+            desktop_env: "DSH_DESKTOP_MCP_AMAP_MAPS_API_KEY",
+            requires_api_key: true,
+            args: &[],
+        },
     ]
 }
 
@@ -725,6 +797,83 @@ fn definition(id: &str) -> Result<ServerDefinition, String> {
         .into_iter()
         .find(|item| item.id == id)
         .ok_or_else(|| format!("不支持的 MCP 服务: {id}"))
+}
+
+fn secret_names_for(definition: &ServerDefinition) -> Vec<String> {
+    if definition.id == "amap" {
+        vec![
+            AMAP_MAPS_API_KEY.to_string(),
+            AMAP_JS_API_KEY.to_string(),
+            AMAP_JS_SECURITY_CODE.to_string(),
+        ]
+    } else if definition.requires_api_key {
+        vec![definition.server_env.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn secret_configured(server: Option<&StoredServer>, name: &str) -> bool {
+    let Some(server) = server else { return false };
+    if name == AMAP_MAPS_API_KEY {
+        !server.api_key.is_empty()
+    } else {
+        server
+            .secrets
+            .get(name)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+    }
+}
+
+fn apply_amap_secret_patches(
+    server: &mut StoredServer,
+    patches: &[McpSecretPatch],
+) -> Result<(), String> {
+    if patches.is_empty() {
+        return Ok(());
+    }
+    let allowed = [AMAP_MAPS_API_KEY, AMAP_JS_API_KEY, AMAP_JS_SECURITY_CODE];
+    let mut seen = BTreeSet::new();
+    for patch in patches {
+        let name = patch.name.trim();
+        if !allowed.contains(&name) {
+            return Err(format!("高德地图不支持该凭据名称: {name}"));
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(format!("高德地图凭据重复: {name}"));
+        }
+        if patch.clear {
+            if name == AMAP_MAPS_API_KEY {
+                server.api_key.clear();
+            } else {
+                server.secrets.remove(name);
+            }
+            continue;
+        }
+        let Some(value) = patch.value.as_deref() else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.len() > 512 || value.contains(['\r', '\n', '\0']) {
+            return Err(format!("{name} 过长或包含非法字符。"));
+        }
+        let encrypted = protect_secret(value.as_bytes())?;
+        if name == AMAP_MAPS_API_KEY {
+            server.api_key = encrypted;
+        } else {
+            server.secrets.insert(name.to_string(), encrypted);
+        }
+    }
+    Ok(())
+}
+
+fn amap_desktop_secret_env(name: &str) -> String {
+    let suffix = name.strip_prefix("AMAP_").unwrap_or(name);
+    format!("DSH_DESKTOP_MCP_AMAP_{suffix}")
 }
 
 fn result(config: &StoredConfig, restart_required: bool, message: &str) -> McpConfigResult {
@@ -744,8 +893,15 @@ fn result(config: &StoredConfig, restart_required: bool, message: &str) -> McpCo
                 url: String::new(),
                 secret_names: definition
                     .requires_api_key
-                    .then(|| vec![definition.server_env.to_string()])
+                    .then(|| secret_names_for(&definition))
                     .unwrap_or_default(),
+                secret_states: secret_names_for(&definition)
+                    .into_iter()
+                    .map(|name| McpSecretState {
+                        configured: secret_configured(stored, &name),
+                        name,
+                    })
+                    .collect(),
                 enabled: stored.map(|item| item.enabled).unwrap_or(false),
                 api_key_configured: stored.map(|item| !item.api_key.is_empty()).unwrap_or(false),
                 requires_api_key: definition.requires_api_key,
@@ -774,6 +930,16 @@ fn result(config: &StoredConfig, restart_required: bool, message: &str) -> McpCo
                     .keys()
                     .cloned()
                     .chain(server.headers.keys().map(|name| format!("Header: {name}")))
+                    .collect(),
+                secret_states: server
+                    .env
+                    .keys()
+                    .cloned()
+                    .chain(server.headers.keys().map(|name| format!("Header: {name}")))
+                    .map(|name| McpSecretState {
+                        configured: true,
+                        name,
+                    })
                     .collect(),
                 enabled: server.enabled,
                 api_key_configured: !server.env.is_empty() || !server.headers.is_empty(),
@@ -1305,11 +1471,175 @@ mod tests {
     fn defaults_are_disabled_and_do_not_expose_keys() {
         let manager = McpManager::new(temp_root());
         let result = manager.list().unwrap();
-        assert_eq!(result.servers.len(), 3);
+        assert_eq!(result.servers.len(), 4);
         assert!(result
             .servers
             .iter()
             .all(|item| !item.enabled && !item.api_key_configured));
+    }
+
+    #[test]
+    fn amap_secrets_are_encrypted_and_only_web_service_key_enters_mcp_environment() {
+        let root = temp_root();
+        let manager = McpManager::new(root.join("data"));
+        let dsh_home = root.join("dsh");
+        manager
+            .save_server_with_secrets(
+                &dsh_home,
+                Path::new("node"),
+                &["npx-cli.js".to_string()],
+                "amap",
+                true,
+                None,
+                None,
+                false,
+                Some(vec![
+                    McpSecretPatch {
+                        name: AMAP_MAPS_API_KEY.to_string(),
+                        value: Some("maps-secret".to_string()),
+                        clear: false,
+                    },
+                    McpSecretPatch {
+                        name: AMAP_JS_API_KEY.to_string(),
+                        value: Some("js-secret".to_string()),
+                        clear: false,
+                    },
+                    McpSecretPatch {
+                        name: AMAP_JS_SECURITY_CODE.to_string(),
+                        value: Some("security-secret".to_string()),
+                        clear: false,
+                    },
+                ]),
+            )
+            .unwrap();
+        let patch = fs::read_to_string(dsh_home.join("profiles/web/cordis.patch.yml")).unwrap();
+        let stored = fs::read_to_string(root.join("data/mcp.json")).unwrap();
+        assert!(patch.contains(AMAP_PACKAGE));
+        assert!(
+            patch.contains("AMAP_MAPS_API_KEY: !!js process.env.DSH_DESKTOP_MCP_AMAP_MAPS_API_KEY")
+        );
+        assert!(!patch.contains("maps-secret"));
+        assert!(!patch.contains("js-secret"));
+        assert!(!patch.contains("security-secret"));
+        assert!(!stored.contains("maps-secret"));
+        assert!(!stored.contains("js-secret"));
+        assert!(!stored.contains("security-secret"));
+        let environment = manager.process_environment().unwrap();
+        assert_eq!(
+            environment
+                .get("DSH_DESKTOP_MCP_AMAP_MAPS_API_KEY")
+                .map(String::as_str),
+            Some("maps-secret")
+        );
+        assert_eq!(
+            environment
+                .get("DSH_DESKTOP_MCP_AMAP_JS_API_KEY")
+                .map(String::as_str),
+            Some("js-secret")
+        );
+        assert_eq!(
+            environment
+                .get("DSH_DESKTOP_MCP_AMAP_JS_SECURITY_CODE")
+                .map(String::as_str),
+            Some("security-secret")
+        );
+        let amap = manager
+            .list()
+            .unwrap()
+            .servers
+            .into_iter()
+            .find(|server| server.id == "amap")
+            .unwrap();
+        assert_eq!(amap.secret_states.len(), 3);
+        assert!(amap.secret_states.iter().all(|item| item.configured));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn amap_empty_secret_patch_preserves_and_clear_removes_value() {
+        let root = temp_root();
+        let manager = McpManager::new(root.join("data"));
+        let dsh_home = root.join("dsh");
+        manager
+            .save_server_with_secrets(
+                &dsh_home,
+                Path::new("node"),
+                &[],
+                "amap",
+                false,
+                None,
+                None,
+                false,
+                Some(vec![McpSecretPatch {
+                    name: AMAP_JS_API_KEY.to_string(),
+                    value: Some("keep-me".to_string()),
+                    clear: false,
+                }]),
+            )
+            .unwrap();
+        manager
+            .save_server_with_secrets(
+                &dsh_home,
+                Path::new("node"),
+                &[],
+                "amap",
+                false,
+                None,
+                None,
+                false,
+                Some(vec![McpSecretPatch {
+                    name: AMAP_JS_API_KEY.to_string(),
+                    value: None,
+                    clear: false,
+                }]),
+            )
+            .unwrap();
+        assert!(
+            manager
+                .list()
+                .unwrap()
+                .servers
+                .iter()
+                .find(|item| item.id == "amap")
+                .unwrap()
+                .secret_states
+                .iter()
+                .find(|item| item.name == AMAP_JS_API_KEY)
+                .unwrap()
+                .configured
+        );
+        manager
+            .save_server_with_secrets(
+                &dsh_home,
+                Path::new("node"),
+                &[],
+                "amap",
+                false,
+                None,
+                None,
+                false,
+                Some(vec![McpSecretPatch {
+                    name: AMAP_JS_API_KEY.to_string(),
+                    value: None,
+                    clear: true,
+                }]),
+            )
+            .unwrap();
+        assert!(
+            !manager
+                .list()
+                .unwrap()
+                .servers
+                .iter()
+                .find(|item| item.id == "amap")
+                .unwrap()
+                .secret_states
+                .iter()
+                .find(|item| item.name == AMAP_JS_API_KEY)
+                .unwrap()
+                .configured
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1493,7 +1823,7 @@ mod tests {
         assert!(!fs::read_to_string(&patch_path)
             .unwrap()
             .contains("custom-remote_search"));
-        assert_eq!(manager.list().unwrap().servers.len(), 3);
+        assert_eq!(manager.list().unwrap().servers.len(), 4);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1614,7 +1944,7 @@ mod tests {
             )
             .unwrap();
         assert!(readiness.runtime_ready);
-        assert_eq!(readiness.servers.len(), 3);
+        assert_eq!(readiness.servers.len(), 4);
         assert!(readiness
             .servers
             .iter()

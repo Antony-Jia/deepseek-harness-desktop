@@ -205,6 +205,7 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
   assert.equal(catalog.schemaVersion, 1)
   assert.deepEqual(catalog.packages, [
     '@p-dsh-market/akshare-market-analysis',
+    '@p-dsh-market/amap-map-assistant',
     '@p-dsh-market/conversation-knowledge-map',
     '@p-dsh-market/deepseek-vision-bridge',
     '@p-dsh-market/dsh-open-workspace',
