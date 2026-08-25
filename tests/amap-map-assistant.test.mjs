@@ -36,15 +36,27 @@ test('amap package manifest and formal slots are represented', () => {
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
-  assert.deepEqual(manifest.dsh.market.capabilities.sort(), ['client', 'host', 'persistent-storage', 'skills'])
+  assert.deepEqual(manifest.dsh.market.capabilities.sort(), ['client', 'desktop-shell', 'host', 'persistent-storage', 'skills'])
+  assert.ok(manifest.dsh.desktop.permissions.includes('shell:titlebar'))
+  assert.deepEqual(manifest.dsh.desktop.contributes.titlebarActions[0].action, {
+    type: 'pluginRpc',
+    method: 'amapMapAssistant.openSettings'
+  })
   assert.match(patch, /@p-dsh-market\/amap-map-assistant/)
   assert.match(patch, /inject: \[sessions, skills, tools, webServer\]/)
   assert.doesNotMatch(patch, /inject: \[[^\]]*\bslots\b/)
   assert.match(client, /conversation\.view/)
-  assert.match(client, /conversation\.session\.header\.actions/)
+  assert.match(client, /name: 'conversation\.view', id: 'amap-map-assistant'/)
+  assert.doesNotMatch(client, /conversation\.session\.header\.actions/)
+  assert.match(client, /sidebar\.footer\.action/)
+  assert.match(client, /amapMapAssistant\.openSettings/)
   assert.match(client, /tool\.call\.toolview/)
   assert.match(client, /shell\.overlay/)
   assert.match(client, /在地图中查看/)
+  assert.doesNotMatch(client, /在高德中打开/)
+  assert.doesNotMatch(client, /uri\.amap\.com|normalizeNavigationHref|navigationHref/)
+  assert.match(client, /waypoints/)
+  assert.match(client, /AMap\.Polyline/)
   assert.doesNotMatch(client, /document\.querySelectorAll\([^)]*conversation/)
 })
 
@@ -53,6 +65,13 @@ test('presentation protocol accepts route and rejects untrusted coordinates or s
   assert.equal(normalized.scene, 'route')
   assert.equal(normalized.origin.location.longitude, 116.378)
   assert.deepEqual(normalized.sourceTools, ['mcp__amap__maps_direction_driving'])
+  const multiPoint = normalizePresentation(validInput({
+    waypoints: [
+      { name: '前门', location: { longitude: 116.397, latitude: 39.900 } },
+      { name: '天安门', location: { longitude: 116.397, latitude: 39.908 } }
+    ]
+  }))
+  assert.equal(multiPoint.waypoints.length, 2)
   assert.throws(() => normalizePresentation(validInput({ sourceTools: ['mcp__amap__fake'] })), /sourceTools/)
   assert.throws(() => normalizePresentation(validInput({ origin: { name: 'London', location: { longitude: -0.1, latitude: 51.5 } } })), /GCJ-02/)
   assert.throws(() => normalizePresentation(validInput({ scene: 'places', origin: undefined, destination: undefined, mode: undefined, places: [] })), /places/)
@@ -101,7 +120,11 @@ test('host registers skill, presentation tool and controlled routes', async () =
     assert.equal(registrations.skills.length, 1)
     assert.equal(registrations.tools.length, 1)
     assert.equal(registrations.tools[0].name, 'amap_present_map')
-    assert.equal(registrations.routes.length, 1)
+    assert.equal(registrations.routes.length, 2)
+    const route = registrations.routes.find((item) => item.path === '/amap-map')
+    const proxyRoute = registrations.routes.find((item) => item.path === '/_AMapService')
+    assert.ok(route)
+    assert.ok(proxyRoute)
     const result = await registrations.tools[0].execute(validInput(), {
       id: 'tool-call-1',
       agent: { session: { header: { id: 'session-main' } } }
@@ -138,7 +161,8 @@ test('plugin settings stores JS credentials without returning securityJsCode', a
       storage: new SessionStateStore({ root: directory }),
       settingsStore: new AmapSettingsStore({ path: join(directory, 'settings.json') })
     }).apply(ctx)
-    const route = registrations.routes[0]
+    const route = registrations.routes.find((item) => item.path === '/amap-map')
+    assert.ok(route)
     const getSettings = await route.handler({ method: 'GET', url: '/amap-map/settings' }, {})
     assert.equal(getSettings.settings.jsApiReady, false)
     const saved = await route.handler({
@@ -150,6 +174,7 @@ test('plugin settings stores JS credentials without returning securityJsCode', a
     assert.doesNotMatch(JSON.stringify(saved), /js-secret|security-secret/)
     const bootstrap = await route.handler({ method: 'GET', url: '/amap-map/bootstrap' }, {})
     assert.equal(bootstrap.jsApiKey, 'js-secret')
+    assert.equal(bootstrap.serviceHost, '/_AMapService')
     assert.equal(Object.prototype.hasOwnProperty.call(bootstrap, 'securityJsCode'), false)
     const cleared = await route.handler({
       method: 'PUT',
@@ -164,6 +189,7 @@ test('plugin settings stores JS credentials without returning securityJsCode', a
 
 test('service proxy only accepts fixed AMap service paths', () => {
   assert.equal(proxyPath({ url: '/amap-map/_AMapService/v3/geocode/geo' }), '/v3/geocode/geo')
+  assert.equal(proxyPath({ url: '/_AMapService/v3/geocode/geo' }), '/v3/geocode/geo')
   assert.throws(() => proxyPath({ url: '/amap-map/_AMapService/https://example.com' }), /未允许|拒绝/)
   assert.throws(() => proxyPath({ url: '/amap-map/_AMapService/v3/../secret' }), /拒绝|未允许/)
 })

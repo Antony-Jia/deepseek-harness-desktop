@@ -1,6 +1,6 @@
 {
   "name": "@p-dsh-market/amap-map-assistant",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "DSH 高德地图查询、搜索与路线规划可视化插件",
   "keywords": [
     "dsh",
@@ -50,14 +50,31 @@
         "skills",
         "host",
         "client",
-        "persistent-storage"
+        "persistent-storage",
+        "desktop-shell"
       ]
     },
     "desktop": {
       "permissions": [
         "network:outbound",
-        "storage:user"
-      ]
+        "storage:user",
+        "shell:titlebar"
+      ],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "open-amap-settings",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "地图设置",
+            "order": 160,
+            "when": ["dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "pluginRpc",
+              "method": "amapMapAssistant.openSettings"
+            }
+          }
+        ]
+      }
     }
   }
 }

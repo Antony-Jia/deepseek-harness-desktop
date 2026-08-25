@@ -351,6 +351,7 @@ test('workspace market plugin is a floating, protocol-contributing package', () 
   assert.match(javascript, /workspace-panel-toggle/)
   assert.match(javascript, /terminal-panel-toggle/)
   assert.match(javascript, /multiAgentRoundtable\.open/)
+  assert.match(javascript, /amapMapAssistant\.openSettings/)
   assert.match(javascript, /get_desktop_contributions/)
   assert.match(javascript, /function restartDsh/)
   const restartSection = javascript.slice(

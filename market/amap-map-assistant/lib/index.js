@@ -21,6 +21,7 @@ import { presentationMeta } from './presentation-schema.js'
 
 const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url))
 const SKILL_PATH = join(PACKAGE_ROOT, '..', 'skills', 'amap-map-assistant', 'SKILL.md')
+const SERVICE_PROXY_PATH = '/_AMapService'
 
 function service(ctx, name) {
   return ctx?.get?.(name) ?? ctx?.[name]
@@ -145,6 +146,19 @@ export function createHost(options = {}) {
         return settingsStatus()
       }
 
+      const proxyHandler = async (req, res) => {
+        try {
+          return await proxyAmapService(req, res, {
+            securityJsCode: effectiveSettings().securityJsCode,
+            fetchImpl: options.fetchImpl,
+            timeoutMs: options.proxyTimeoutMs
+          })
+        } catch (error) {
+          logMessage(logger, 'warn', 'proxy route failed path=%s status=%d error=%s', parseUrl(req).pathname, errorStatus(error), errorMessage(error))
+          return jsonResponse(res, errorStatus(error), { ok: false, error: errorMessage(error) })
+        }
+      }
+
       const bootstrap = () => {
         const current = effectiveSettings()
         const names = toolNames(tools)
@@ -155,7 +169,7 @@ export function createHost(options = {}) {
           jsApiConfigured: Boolean(current.jsApiKey),
           jsApiKey: jsApiReady ? current.jsApiKey : null,
           version: '2.0',
-          serviceHost: `${BASE_PATH}/_AMapService`,
+          serviceHost: SERVICE_PROXY_PATH,
           mcp: { connected: names.length > 0, toolCount: names.length, tools: names },
           mapBootstrapReady: jsApiReady,
           mapProxyReady: Boolean(current.securityJsCode)
@@ -213,13 +227,18 @@ export function createHost(options = {}) {
               const current = await storage.read(sessionId)
               return jsonResponse(res, 200, { state: publicState(current.state), revision: current.revision })
             }
-            if (path[0] === '_AMapService') return proxyAmapService(req, res, { securityJsCode: effectiveSettings().securityJsCode, fetchImpl: options.fetchImpl, timeoutMs: options.proxyTimeoutMs })
+            if (path[0] === '_AMapService') return proxyHandler(req, res)
             return jsonResponse(res, 404, { ok: false, error: 'Not found' })
           } catch (error) {
             logMessage(logger, 'warn', 'route failed path=%s status=%d error=%s', path.join('/'), errorStatus(error), errorMessage(error))
             return jsonResponse(res, errorStatus(error), { ok: false, error: errorMessage(error) })
           }
         }
+      })
+      registerEffect(ctx, webServer, {
+        kind: 'prefix',
+        path: SERVICE_PROXY_PATH,
+        handler: proxyHandler
       })
 
       logMessage(logger, 'info', 'host ready mcpTools=%d jsApiConfigured=%s proxyConfigured=%s', bootstrap().mcp.toolCount, settingsStatus().jsApiConfigured, settingsStatus().securityJsCodeConfigured)

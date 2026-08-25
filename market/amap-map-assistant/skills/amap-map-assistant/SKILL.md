@@ -16,7 +16,7 @@ description: 当用户明确查询地点、搜索 POI、查询天气、测量距
 3. POI 关键词使用 `mcp__amap__maps_text_search`，周边使用 `mcp__amap__maps_around_search`。
 4. 路线分别使用 `mcp__amap__maps_direction_driving`、`mcp__amap__maps_direction_transit_integrated`、`mcp__amap__maps_direction_walking` 或 `mcp__amap__maps_bicycling`；距离使用 `mcp__amap__maps_distance`。
 5. 只使用 MCP 原始结果中的 GCJ-02 经度、纬度、名称、地址、距离、时长、费用、换乘和步骤字段。
-6. 查询成功后调用 `amap_present_map`。最终回答只提示用户可以点击地图卡片，不声称面板已经自动打开。
+6. 查询成功后调用 `amap_present_map`。最终回答只提示用户可以点击地图卡片，不声称页面已经自动打开；用户可以切换到“地图”大地图页，或从 DSH 侧边栏的“地图”入口打开右侧地图面板。
 
 ## `amap_present_map` 约束
 

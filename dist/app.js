@@ -439,7 +439,7 @@
   function desktopActionSupported(action) {
     var descriptor = action && action.action ? action.action : {}
     if (descriptor.type === 'native') return descriptor.command === 'workspace.openFolder' || descriptor.command === 'workspace.openTerminal'
-    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal' || descriptor.method === 'akshare.toggleAnalysisPanel' || descriptor.method === 'multiAgentRoundtable.open'
+    if (descriptor.type === 'pluginRpc') return descriptor.method === 'workspace.togglePanel' || descriptor.method === 'workspace.toggleTerminal' || descriptor.method === 'akshare.toggleAnalysisPanel' || descriptor.method === 'multiAgentRoundtable.open' || descriptor.method === 'amapMapAssistant.openSettings'
     return false
   }
   function desktopActionPressed(action) {
@@ -487,6 +487,13 @@
         pluginId: contribution && (contribution.packageName || contribution.name),
         method: method,
         open: !roundtablePanelOpen
+      })
+      return
+    }
+    if (method === 'amapMapAssistant.openSettings') {
+      postDshMessage('plugin-rpc', {
+        pluginId: contribution && (contribution.packageName || contribution.name),
+        method: method
       })
       return
     }

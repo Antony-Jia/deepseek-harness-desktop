@@ -2355,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_amap_manifest_with_permissions_but_no_outer_frame_actions() {
+    fn accepts_amap_manifest_with_permissions_and_controlled_outer_frame_action() {
         let manifest: Value =
             serde_json::from_str(include_str!("../../market/amap-map-assistant/package.json"))
                 .expect("amap manifest should be valid JSON");
@@ -2364,7 +2364,24 @@ mod tests {
         let desktop = result
             .desktop
             .expect("desktop permission metadata should be retained");
-        assert!(desktop.actions.is_empty());
+        assert_eq!(desktop.actions.len(), 1);
+        assert_eq!(desktop.actions[0].slot, DESKTOP_TITLEBAR_WORKSPACE_ACTIONS);
+        assert_eq!(desktop.actions[0].id, "open-amap-settings");
+        assert_eq!(desktop.actions[0].label, "地图设置");
+        assert_eq!(
+            desktop.actions[0].when,
+            vec![
+                "dshRunning".to_string(),
+                "pluginActive".to_string(),
+                "restartNotRequired".to_string(),
+            ]
+        );
+        assert_eq!(
+            desktop.actions[0].action,
+            DesktopAction::PluginRpc {
+                method: "amapMapAssistant.openSettings".to_string()
+            }
+        );
         assert_eq!(result.display_name, "高德地图");
     }
 
