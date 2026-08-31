@@ -209,6 +209,7 @@ test('plugin market contract is represented in the Rust, UI and fixture layers',
     '@p-dsh-market/conversation-knowledge-map',
     '@p-dsh-market/deepseek-vision-bridge',
     '@p-dsh-market/dsh-open-workspace',
+    '@p-dsh-market/graph-job-orchestrator',
     '@p-dsh-market/multi-agent-roundtable',
     '@p-dsh-market/neon-agent-theme',
   ])
@@ -660,6 +661,17 @@ test('javascript artifacts pass node syntax validation', () => {
     'market/dsh-open-workspace/lib/client.js',
     'market/neon-agent-theme/lib/index.js',
     'market/neon-agent-theme/lib/client.js',
+    'market/graph-job-orchestrator/lib/index.js',
+    'market/graph-job-orchestrator/lib/client.js',
+    'market/graph-job-orchestrator/lib/capabilities.js',
+    'market/graph-job-orchestrator/lib/executors.js',
+    'market/graph-job-orchestrator/lib/graph-schema.js',
+    'market/graph-job-orchestrator/lib/orchestrator.js',
+    'market/graph-job-orchestrator/lib/planner.js',
+    'market/graph-job-orchestrator/lib/protocol.js',
+    'market/graph-job-orchestrator/lib/scheduler.js',
+    'market/graph-job-orchestrator/lib/storage.js',
+    'market/graph-job-orchestrator/lib/validator.js',
   ]) {
     execFileSync(process.execPath, ['--check', file(path)], { stdio: 'pipe' })
   }

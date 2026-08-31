@@ -1,0 +1,4 @@
+- insert:
+    - id: p-dsh-market-graph-job-orchestrator
+      name: '@p-dsh-market/graph-job-orchestrator'
+      inject: [agentDefaultModel, agentPresets, agents, commands, llm, sessions, skills, subagents, systemPrompt, tools, webServer]

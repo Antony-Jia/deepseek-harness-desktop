@@ -6,6 +6,7 @@
     "@p-dsh-market/conversation-knowledge-map",
     "@p-dsh-market/deepseek-vision-bridge",
     "@p-dsh-market/dsh-open-workspace",
+    "@p-dsh-market/graph-job-orchestrator",
     "@p-dsh-market/multi-agent-roundtable",
     "@p-dsh-market/neon-agent-theme"
   ]

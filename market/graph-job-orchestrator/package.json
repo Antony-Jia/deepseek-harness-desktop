@@ -1,0 +1,81 @@
+{
+  "name": "@p-dsh-market/graph-job-orchestrator",
+  "version": "0.1.0",
+  "description": "DSH Graph Job 多 Subagent 任务图编排器",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "p-dsh-market",
+    "graph-job",
+    "subagent",
+    "dag"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./capabilities": "./lib/capabilities.js",
+    "./executors": "./lib/executors.js",
+    "./graph-schema": "./lib/graph-schema.js",
+    "./orchestrator": "./lib/orchestrator.js",
+    "./planner": "./lib/planner.js",
+    "./protocol": "./lib/protocol.js",
+    "./scheduler": "./lib/scheduler.js",
+    "./storage": "./lib/storage.js",
+    "./validator": "./lib/validator.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/capabilities.js",
+    "lib/executors.js",
+    "lib/graph-schema.js",
+    "lib/orchestrator.js",
+    "lib/planner.js",
+    "lib/protocol.js",
+    "lib/scheduler.js",
+    "lib/storage.js",
+    "lib/validator.js",
+    "skills/graph-job-orchestrator/SKILL.md",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "protocolVersion": 1,
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "market": {
+      "displayName": "Graph Job 任务图",
+      "capabilities": ["skills", "host", "client", "desktop-shell"]
+    },
+    "desktop": {
+      "permissions": ["shell:titlebar", "shell:page", "workspace:write-plugin-data"],
+      "contributes": {
+        "titlebarActions": [
+          {
+            "id": "open-graph-job",
+            "slot": "desktop.titlebar.workspaceActions",
+            "label": "Graph Job",
+            "order": 135,
+            "when": ["dshRunning", "pluginActive", "restartNotRequired"],
+            "action": {
+              "type": "pluginRpc",
+              "method": "graphJobOrchestrator.open"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+
